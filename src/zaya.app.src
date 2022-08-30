@@ -1,0 +1,20 @@
+{application, zaya,
+ [{description, "Distributed multi-database management system based on Erlang technologies"},
+  {vsn, git},
+  {registered, []},
+  {mod, {zaya_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    lager
+   ]},
+  {included_applications,[
+     ecall,
+     esubscribe
+  ]},
+  {env,[]},
+  {modules, []},
+
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.
