@@ -10,8 +10,8 @@
 -define(m_ets,zaya_ets).
 -define(m_ets_leveldb,zaya_ets_leveldb).
 -define(m_leveldb,zaya_leveldb).
--define(m_fpdb,zaya_fpdb).
--define(modules,[?m_ets,?m_ets_leveldb,?m_leveldb,?m_fpdb]).
+-define(m_ecomet,zaya_ecomet).
+-define(modules,[?m_ets,?m_ets_leveldb,?m_leveldb,?m_ecomet]).
 
 %--------------------Schema storage type---------------------------------
 -define(schemaModule,
@@ -220,58 +220,58 @@
 
 ).
 
--define(nodedbs(N),
+-define(nodeDBs(N),
 
   ?schemaFind(
-    [_@S || [_@S] <-
+    [_@DB || [_@DB] <-
       [{
-        {{sgm,'$1','@node@',N,'@params@'},'_'},
+        {{db,'$1','@node@',N,'@params@'},'_'},
         [],
         ['$1']
       }
       ]])
 ).
 
--define(readyNodesdbs,
+-define(readyNodesDBs,
 
-  [ {_@N,?nodedbs(_@N)} || _@N <- ?readyNodes]
-
-).
--define(notReadyNodesdbs,
-
-  [ {_@N,?nodedbs(_@N)} || _@N <- ?notReadyNodes]
+  [ {_@N,?nodeDBs(_@N)} || _@N <- ?readyNodes]
 
 ).
+-define(notReadyNodesDBs,
 
--define(allNodesdbs,
-
-  [ {_@N,?nodedbs(_@N)} || _@N <- ?allNodes]
+  [ {_@N,?nodeDBs(_@N)} || _@N <- ?notReadyNodes]
 
 ).
 
--define(nodedbParams(N,S),
+-define(allNodesDBs,
 
-  ?schemaRead({sgm,S,'@node@',N,'@params@'})
-
-).
-
--define(readyNodesdbParams(S),
-
-  [ {_@N,?nodedbParams(_@N,S)} || _@N<- ?dbReadyNodes(S) ]
-
-).
--define(notReadyNodesdbParams(S),
-
-  [ {_@N,?nodedbParams(_@N,S)} || _@N<- ?dbNotReadyNodes(S) ]
+  [ {_@N,?nodeDBs(_@N)} || _@N <- ?allNodes]
 
 ).
 
--define(nodedbsParams(N),
+-define(nodeDBParams(N,DB),
+
+  ?schemaRead({db,DB,'@node@',N,'@params@'})
+
+).
+
+-define(readyNodesDBParams(DB),
+
+  [ {_@N,?nodeDBParams(_@N,DB)} || _@N<- ?dbReadyNodes(DB) ]
+
+).
+-define(notReadyNodesDBParams(DB),
+
+  [ {_@N,?nodeDBParams(_@N,DB)} || _@N<- ?dbNotReadyNodes(DB) ]
+
+).
+
+-define(nodeDBsParams(N),
 
   ?schemaFind(
-    [{_@S,_@SPs} || [_@S,_@SPs] <-
+    [{_@DB,_@Ps} || [_@DB,_@Ps] <-
       [{
-        {{sgm,'$1','@node@',N,'@params@'},'$2'},
+        {{db,'$1','@node@',N,'@params@'},'$2'},
         [],
         ['$1','$2']
       }
@@ -279,47 +279,34 @@
 
 ).
 
--define(readyNodesdbsParams(N),
-
-  ?schemaFind(
-    [{_@S,_@SPs} || [_@S,_@SPs] <-
-      [{
-        {{sgm,'$1','@node@',N,'@params@'},'$2'},
-        [],
-        ['$1','$2']
-      }
-      ]])
-
-).
--define(allNodesdbsParams,
+-define(allNodesDBsParams,
 
   ?schemaFind(
     [
-      {_@N, [{_@S,_@SPs} || {_@S,_@SPs} <- ?nodedbsParams(_@N) ]
-      } || _@N <- ?allNodes
+      {_@N, ?nodeDBsParams(_@N) } || _@N <- ?allNodes
     ])
 
 ).
 
-%------------------------by dbs--------------------------------
--define(dbModule(S),
+%------------------------by DBs--------------------------------
+-define(dbModule(DB),
 
-  ?schemaRead({'sgm',S,'@module@'})
-
-).
--define(dbRef(S),
-
-  ?schemaRead({sgm,S,'@ref@'})
+  ?schemaRead({db,DB,'@module@'})
 
 ).
+-define(dbRef(DB),
+
+  ?schemaRead({db,DB,'@ref@'})
+
+).
 
 
--define(dbAllNodes(S),
+-define(dbAllNodes(DB),
 
   ?schemaFind(
     [_@N || [_@N] <-
       [{
-        {{sgm,S,'@node@','$1','@params@'},'_'},
+        {{db,DB,'@node@','$1','@params@'},'_'},
         [],
         ['$1']
       }
@@ -327,19 +314,19 @@
 
 
 ).
--define(dbNodeParams(S,N),
+-define(dbNodeParams(DB,N),
 
-  ?schemaRead({sgm,S,'@node@',N,'@params@'})
+  ?schemaRead({db,DB,'@node@',N,'@params@'})
 
 ).
 
 
--define(dbNodesParams(S),
+-define(dbNodesParams(DB),
 
   ?schemaFind(
-    [{_@N,_@NPs} || [_@S,_@NPs] <-
+    [{_@N,_@Ps} || [_@S,_@Ps] <-
       [{
-        {{sgm,S,'@node@','$1','@params@'},'$2'},
+        {{db,DB,'@node@','$1','@params@'},'$2'},
         [],
         ['$1','$2']
       }
@@ -348,12 +335,12 @@
 ).
 
 
--define(alldbs,
+-define(allDBs,
 
   ?schemaFind(
-    [_@S || [_@S] <-
+    [_@DB || [_@DB] <-
       [{
-        {'sgm','$1','@module@'},
+        {'db','$1','@module@'},
         [],
         ['$1']
       }
@@ -361,56 +348,55 @@
 
 ).
 
--define(alldbsNodesParams,
+-define(allDBsNodesParams,
 
   ?schemaFind(
     [
-      {_@S, [{_@N,_@NPs} || {_@N,_@NPs} <- ?dbNodeParams(_@S) ]
-      } || _@S <- ?alldbs
+      {_@DB, ?dbNodesParams(_@DB)} || _@DB <- ?allDBs
     ])
 
 ).
 
--define(dbReadyNodes(S),
-  ?dbAllNodes(S) -- ?notReadyNodes
+-define(dbReadyNodes(DB),
+  ?dbAllNodes(DB) -- ?notReadyNodes
 ).
 
--define(dbNotReadyNodes(S),
-  ?dbAllNodes(S) -- ?readyNodes
+-define(dbNotReadyNodes(DB),
+  ?dbAllNodes(DB) -- ?readyNodes
 ).
 
--define(dbsReadyNodes(S),
-  [{_@S, ?dbReadyNodes(S) } || ?alldbs]
+-define(dbsReadyNodes,
+  [{_@DB, ?dbReadyNodes(_@DB) } || _@DB <- ?allDBs]
 ).
 
--define(dbsNotReadyNodes(S),
-  [{_@S, ?dbNotReadyNodes(S) } || ?alldbs]
+-define(dbsNotReadyNodes,
+  [{_@DB, ?dbNotReadyNodes(_@DB) } || _@DB <- ?allDBs]
 ).
 
--define(isdbReady(S),
+-define(isDBReady(DB),
   case ?dbReadyNodes(S) of []-> false; _->true end
 ).
 
--define(isdbNotReady(S),
-  case ?dbReadyNodes(S) of []-> true; _->false end
+-define(isDBNotReady(DB),
+  case ?dbReadyNodes(DB) of []-> true; _->false end
 ).
 
--define(readydbs,
-  [_@S || _@S <- ?alldbs, case ?dbReadyNodes(_@S) of [] -> false; _->true end ]
+-define(readyDBs,
+  [_@DB || _@DB <- ?allDBs, ?isDBReady(_@DB) ]
 ).
 
--define(notReadydbs,
-  [_@S || _@S <- ?alldbs, case ?dbReadyNodes(_@S)  of [] ->true; _->false end ]
+-define(notReadyDBs,
+  [_@DB || _@DB <- ?allDBs, ?isDBNotReady(_@DB)]
 ).
--define(localdbs,
-  ?nodedbs(node())
+-define(localDBs,
+  ?nodeDBs(node())
 ).
 
--define(isLocaldb(S),
-  case ?schemaRead( {sgm,S,'@node@','$1','@params@'} ) of ?undefined->false ; _->true end
+-define(isLocalDB(DB),
+  case ?schemaRead( {db,DB,'@node@',node(),'@params@'} ) of ?undefined->false ; _->true end
 ).
--define( dbSource(S),
-  case ?isLocaldb(S) of true->node(); _->?random( ?dbReadyNodes(S) ) end
+-define(dbSource(DB),
+  case ?isLocalDB(DB) of true->node(); _->?random( ?dbReadyNodes(DB) ) end
 ).
 
 %=======================================================================================
@@ -430,41 +416,49 @@
   end
 ).
 
--define(ADD_db(S,M,Ps,Ref),
+-define(CREATE_DB(DB,M,Ref),
   begin
-    ?SCHEMA_WRITE({'sgm',S,'@module@'},M),
-    ?SCHEMA_WRITE({sgm,S,'@ref@'},Ref),
-    ?SCHEMA_WRITE({{sgm,S,'@node@',node(),'@params@'},Ps})
+    ?SCHEMA_WRITE({db,DB,'@module@'},M),
+    ?SCHEMA_WRITE({db,DB,'@ref@'},Ref)
   end
 ).
 
--define(ADD_db_COPY(S,Ps,Ref),
+-define(OPEN_DB(DB,Ref),
+    ?SCHEMA_WRITE({db,DB,'@ref@'},Ref)
+).
+
+-define(ADD_DB_COPY(DB,N,Ps),
+  ?SCHEMA_WRITE({{db,DB,'@node@',N,'@params@'},Ps})
+).
+
+-define(ADD_DB(DB,M,NsPs),
   begin
-    ?SCHEMA_WRITE({sgm,S,'@ref@'},Ref),
-    ?SCHEMA_WRITE({{sgm,S,'@node@',node(),'@params@'},Ps})
+    ?SCHEMA_WRITE({db,DB,'@module@'},M),
+    [?ADD_DB_COPY(DB,_@N,_@Ps) || {_@N,_@Ps} <- maps:to_list( NsPs ) ]
   end
 ).
 
--define(REMOVE_db_COPY(S),
-  begin
-    ?SCHEMA_DELETE({sgm,S,'@node@',N,'@params@'}),
-    ?SCHEMA_DELETE({sgm,S,'@ref@'})
-  end
+-define(REMOVE_DB_COPY(DB,N),
+    ?SCHEMA_DELETE({db,DB,'@node@',N,'@params@'})
 ).
 
--define(REMOVE_db(N,S),
+-define(REMOVE_DB(DB),
   begin
-    ?SCHEMA_DELETE({sgm,S,'@node@',N,'@params@'}),
-    ?SCHEMA_DELETE({sgm,S,'@ref@'}),
-    ?SCHEMA_DELETE({'sgm',S,'@module@'})
+    [?REMOVE_DB_COPY(DB,_@N) || _@N <- ?dbAllNodes(DB) ],
+    ?SCHEMA_DELETE({db,DB,'@ref@'}),
+    ?SCHEMA_DELETE({db,DB,'@module@'})
   end
 ).
 
 -define(REMOVE_NODE(N),
   begin
-    [ ?REMOVE_db(N,_@S) || _@S <-?nodedbs(N) ],
+    [ ?REMOVE_DB_COPY(_@DB,N) || _@DB <-?nodeDBs(N) ],
     ?SCHEMA_DELETE({node,N})
   end
 ).
 
+% TODO:
+% * db write(call)
+% * db_srv
+% db:create default path
 

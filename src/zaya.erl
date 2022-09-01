@@ -26,7 +26,7 @@
 %%  storage_limits/1, storage_limits/2,
 %%  default_limits/0, default_limits/1,
 %%  backend_env/0,backend_env/1,
-%%  add_db_copy/2, remove_db_copy/2,
+%%  ADD_DB_copy/2, REMOVE_DB_COPY/2,
 %%  remove_storage/1,
 %%  stop/0
 ]).
@@ -154,7 +154,7 @@
 %%% of atom
 %%%% @end
 %%%-----------------------------------------------------------------
-%%-spec get_dbs() -> Alldbs :: list(db()).
+%%-spec get_dbs() -> allDBs :: list(db()).
 %%get_dbs()->
 %%  zaya_storage:get_dbs().
 %%
@@ -178,7 +178,7 @@
 %%% and has type of atom
 %%%% @end
 %%%-----------------------------------------------------------------
-%%-spec get_node_dbs(Node :: node()) -> Nodedbs :: list(db()).
+%%-spec get_node_dbs(Node :: node()) -> nodeDBs :: list(db()).
 %%get_node_dbs(Node)->
 %%  zaya_storage:get_dbs(Node).
 %%
@@ -190,7 +190,7 @@
 %%% and has type of atom
 %%%% @end
 %%%-----------------------------------------------------------------
-%%-spec get_local_dbs() -> Nodedbs :: list(db()).
+%%-spec get_local_dbs() -> nodeDBs :: list(db()).
 %%get_local_dbs()->
 %%  zaya_db:local_dbs().
 %%
@@ -372,9 +372,9 @@
 %%% Returns ok, or { error, Reason}.
 %%%% @end
 %%%-----------------------------------------------------------------
-%%-spec add_db_copy(db :: db(), Node :: node()) -> ok | { error, Reason :: any() }.
-%%add_db_copy(db,Node)->
-%%  zaya_storage:add_db_copy( db, Node ).
+%%-spec ADD_DB_copy(db :: db(), Node :: node()) -> ok | { error, Reason :: any() }.
+%%ADD_DB_copy(db,Node)->
+%%  zaya_storage:ADD_DB_copy( db, Node ).
 %%
 %%%-----------------------------------------------------------------
 %%%% @doc Remove db_copy from node.
@@ -383,9 +383,9 @@
 %%% Returns ok, or { error, Reason}.
 %%%% @end
 %%%-----------------------------------------------------------------
-%%-spec remove_db_copy(db :: db(), Node :: node()) -> ok | { error, Reason :: any() }.
-%%remove_db_copy(db,Node)->
-%%  zaya_storage:remove_db_copy(db,Node).
+%%-spec REMOVE_DB_COPY(db :: db(), Node :: node()) -> ok | { error, Reason :: any() }.
+%%REMOVE_DB_COPY(db,Node)->
+%%  zaya_storage:REMOVE_DB_COPY(db,Node).
 %%
 %%%%---------------------------------------------------------------
 %%%%	DATA API

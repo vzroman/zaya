@@ -20,6 +20,8 @@
 %%	dbS API
 %%=================================================================
 -export([
+  create_db/3,
+  open_db/2,
   add_db/3,
   remove_db/1,
 
@@ -48,13 +50,19 @@ remove_node( Node )->
   gen_server:call(?MODULE, {remove_node, Node}).
 
 %%=================================================================
-%%	dbS
+%%	DBs
 %%=================================================================
-add_db(db,Params,Ref)->
-  gen_server:call(?MODULE, {add_db, db, Params, Ref}).
+create_db(DB,Module,Ref)->
+  gen_server:call(?MODULE, {create_db, DB,Module,Ref}).
 
-remove_db( db )->
-  gen_server:cast(?MODULE, {remove_db, db}).
+open_db(DB,Ref)->
+  gen_server:call(?MODULE, {open_db, DB, Ref}).
+
+add_db(DB,Module,Params)->
+  gen_server:call(?MODULE, {add_db, DB, Module, Params}).
+
+remove_db( DB )->
+  gen_server:call(?MODULE, {remove_db, DB}).
 
 add_copy(db,Params,Ref)->
   gen_server:call(?MODULE, {add_copy,db,Params,Ref}).
@@ -133,26 +141,66 @@ handle_call({remove_node, Node}, From, State) ->
   {noreply,State};
 
 %%=================================================================
-%%	CALL dbS
+%%	CALL DBs
 %%=================================================================
-handle_call({add_db, db, #{module:=Module,nodes:=NodesParams}, Ref}, From, State) ->
+handle_call({create_db, DB,Module,Ref}, From, State) ->
 
-  Params = maps:get(node(),NodesParams),
   try
-    ?ADD_db(db,Module,Params,Ref),
+    ?CREATE_DB(DB,Module,Ref),
     gen_server:reply(From,ok),
-    ?LOGINFO("~p db added to schema, module ~p, params ~p",[db,Module,Params])
+    ?LOGINFO("~p db added to schema, module ~p, ref ~p",[DB,Module,Ref])
+  catch
+    _:E:S->
+      gen_server:reply(From, {error,E}),
+      ?LOGERROR("~p add db schema error ~p stack ~p",[DB,E,S])
+  end,
+
+  {noreply,State};
+
+handle_call({open_db, DB, Ref}, From, State) ->
+
+  try
+    ?OPEN_DB(DB,Ref),
+    gen_server:reply(From,ok),
+    ?LOGINFO("~p db added to schema, ref ~p",[DB, Ref])
+  catch
+    _:E:S->
+      gen_server:reply(From, {error,E}),
+      ?LOGERROR("~p add db schema error ~p stack ~p",[DB,E,S])
+  end,
+
+  {noreply,State};
+
+handle_call({add_db, DB, Module, NodesParams}, From, State) ->
+  try
+    ?ADD_DB(DB,Module,NodesParams),
+    gen_server:reply(From,ok),
+    ?LOGINFO("~p db added to schema, module ~p, params ~p",[DB,Module,NodesParams])
   catch
       _:E:S->
         gen_server:reply(From, {error,E}),
-        ?LOGERROR("~p add db schema error ~p stack ~p",[db,E,S])
+        ?LOGERROR("~p add db schema error ~p stack ~p",[DB,E,S])
+  end,
+
+  {noreply,State};
+
+handle_call({remove_db, DB},From,State)->
+
+  try
+    ?REMOVE_DB(DB),
+    gen_server:reply(From,ok),
+    ?LOGINFO("~p removed from schema",[DB])
+  catch
+    _:E:S->
+      gen_server:reply(From, {error,E}),
+      ?LOGERROR("~p remove from schema error ~p stack ~p",[DB,E,S])
   end,
 
   {noreply,State};
 
 handle_call({add_copy,db,Params,Ref}, From, State) ->
   try
-    ?ADD_db_COPY(db,Params,Ref),
+    ?ADD_DB_COPY(db,Params,Ref),
     gen_server:reply(From,ok),
     ?LOGINFO("~p copy added to schema params ~p",[db,Params])
   catch
@@ -166,7 +214,7 @@ handle_call({add_copy,db,Params,Ref}, From, State) ->
 handle_call({remove_copy, db}, From, State) ->
 
   try
-    ?REMOVE_db_COPY( db ),
+    ?REMOVE_DB_COPY( db ),
     gen_server:reply(From,ok),
     ?LOGINFO("~p copy removed from schema",[db])
   catch
@@ -180,19 +228,6 @@ handle_call({remove_copy, db}, From, State) ->
 handle_call(Request, From, State) ->
   ?LOGWARNING("schema server got an unexpected call resquest ~p from ~p",[Request,From]),
   {noreply,State}.
-
-%--------------CASTS ARE NOTIFICATIONS FROM OTHER NODES-------------------
-handle_cast({remove_db, db},State)->
-
-  try
-    ?REMOVE_db(node(), db ),
-    ?LOGINFO("~p removed from schema",[db])
-  catch
-    _:E:S->
-      ?LOGERROR("~p add to schema error ~p stack ~p",[db,E,S])
-  end,
-
-  {noreply,State};
 
 handle_cast(Request,State)->
   ?LOGWARNING("schema server got an unexpected cast resquest ~p",[Request]),
@@ -373,9 +408,9 @@ recover_by_schema({?schema, Schema}, OldSchema)->
   ?LOGINFO("node recovery by schema ~p\r\n old schema ~p",[Schema,OldSchema]),
   ?SCHEMA_CLEAR,
   ?SCHEMA_LOAD(Schema),
-  Localdbs =
+  localDBs =
     [S || {{sgm,S,'@node@',N,'@params@'},_} <- OldSchema, N=:=node()],
-  merge_schema(Localdbs),
+  merge_schema(localDBs),
   ok.
 
 merge_schema([db|Rest])->

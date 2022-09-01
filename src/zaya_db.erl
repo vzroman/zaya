@@ -42,6 +42,7 @@
 %%=================================================================
 -export([
   create/3,
+  open/3,
   close/3,
   remove/3
 ]).
@@ -144,51 +145,54 @@ search(db,Options)->
 
 
 %%=================================================================
-%%	db SERVER
+%%	DB SERVER
 %%=================================================================
-create(db, Module, Params)->
+create(DB, Module, Params)->
   try
     Module:create( Params ),
     _Ref=Module:open( Params )
   catch
     _:E:S->
-      ?LOGERROR("~p create with params ~p module ~p error ~p stack ~p",[db,Module,Params,E,S]),
+      ?LOGERROR("~p create with params ~p module ~p error ~p stack ~p",[DB,Params,Module,E,S]),
       throw({module_error,E})
   end.
 
-close(db, Module, Ref )->
+open(DB, Module, Params )->
+  try
+    _Ref=Module:open( Params )
+  catch
+    _:E:S->
+      ?LOGERROR("~p open with params ~p module ~p error ~p stack ~p",[DB,Params,Module,E,S]),
+      throw({module_error,E})
+  end.
+
+close(DB, Module, Ref )->
   try
     Module:close( Ref )
   catch
     _:E:S->
-      ?LOGERROR("~p db close module error ~p stack ~p",[db,E,S]),
+      ?LOGERROR("~p db close module error ~p stack ~p",[DB,E,S]),
       throw({module_error,E})
   end.
 
-remove( db, Module, Params )->
+remove( DB, Module, Params )->
   try
-    case ?dbRef(db) of
-      ?undefined->
-        ignore;
-      Ref->
-        Module:close(Ref)
-     end,
      Module:remove( Params )
   catch
     _:E:S->
-      ?LOGERROR("~p remove module error ~p stack ~p",[db,E,S])
+      ?LOGERROR("~p remove module error ~p stack ~p",[DB,E,S])
   end.
 
 %%=================================================================
 %%	SCHEMA SERVER
 %%=================================================================
-try_recover(db)->
-  Params = ?dbNodeParams(db,node()),
-  Module = ?dbModule( db ),
+try_recover(DB)->
+  Params = ?dbNodeParams(DB,node()),
+  Module = ?dbModule( DB ),
   Ref = Module:open(Params),
-  zaya_copy:copy(db, Ref, Module, #{
+  zaya_copy:copy(DB, Ref, Module, #{
     live=>true,
-    attempts=>?env(db_recovery_attempts,?DEFAULT_db_RECOVERY_ATTEMPTS)
+    attempts=>?env(db_recovery_attempts,?DEFAULT_DB_RECOVERY_ATTEMPTS)
   }),
   Module:close(Ref).
 

@@ -55,7 +55,22 @@
 %%	TRANSFORMATION
 %%=================================================================
 remove( Node )->
-  gen_server:call(?MODULE, {remove,Node}).
+  case ?isNodeReady( Node ) of
+    true ->
+      throw(node_is_still_ready);
+    _->
+      ok
+  end,
+
+  case [DB || DB <-?nodeDBs( Node ), ?isDBNotReady( DB ) ] of
+    []->
+      ok;
+    NotReadyDBs->
+      throw({not_ready_dbs,NotReadyDBs})
+  end,
+
+  ecall:cast_all(?readyNodes, gen_server, cast,[?MODULE,{remove_node, Node}] ),
+  ok.
 
 %%=================================================================
 %%	INFO
@@ -82,33 +97,33 @@ not_ready_nodes()->
 %-------------------------------
 
 node_dbs( Node )->
-  ?nodedbs( Node ).
+  ?nodeDBs( Node ).
 
 ready_nodes_dbs()->
-  ?readyNodesdbs.
+  ?readyNodesDBs.
 
 not_ready_nodes_dbs()->
-  ?notReadyNodesdbs.
+  ?notReadyNodesDBs.
 
 all_nodes_dbs()->
-  ?allNodesdbs.
+  ?allNodesDBs.
 %------------------------------
 node_db_params( Node, db )->
   ?dbNodeParams(db, Node).
 
 ready_nodes_db_params(db)->
-  ?readyNodesdbParams(db).
+  ?readyNodesDBParams(db).
 
 not_ready_nodes_db_params(db)->
-  ?notReadyNodesdbParams(db).
+  ?notReadyNodesDBParams(db).
 
 %--------------------------------
 
 node_dbs_params( Node )->
-  ?nodedbsParams( Node ).
+  ?nodeDBsParams( Node ).
 
 all_nodes_dbs_params()->
-  ?allNodesdbsParams.
+  ?allNodesDBsParams.
 
 %%=================================================================
 %%	OTP
@@ -126,31 +141,15 @@ init([])->
 
   {ok,#state{}}.
 
-%-----------------CALL------------------------------------------------
-handle_call({remove_node, Node}, From ,State)->
-  case ?isNodeReady( Node ) of
-    true ->
-      gen_server:reply(From, {error, is_ready_yet});
-    _->
-      Nodedbs = ?nodedbs( Node ),
-      case [S || S <-Nodedbs, ?isdbReady( S ) ] of
-        []->
-          case zaya_schema_srv:remove_node( Node ) of
-            ok->
-              gen_server:reply(From,ok);
-            {error,SchemaError}->
-              gen_server:reply(From, {error, {schema_error,SchemaError}})
-          end;
-        NotReadydbs->
-          gen_server:reply(From, {error, {has_not_ready_dbs,NotReadydbs}})
-      end
-  end,
-
-  {noreply,State};
-
 handle_call(Request, From, State) ->
   ?LOGWARNING("node server got an unexpected call resquest ~p from ~p",[Request,From]),
   {noreply,State}.
+
+handle_cast({remove_node, Node} ,State)->
+
+  zaya_schema_srv:remove_node( Node ),
+
+  {noreply,State};
 
 handle_cast(Request,State)->
   ?LOGWARNING("node server got an unexpected cast resquest ~p",[Request]),
