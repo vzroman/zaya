@@ -57,34 +57,22 @@ create(DB, Module, Params)->
       []->
         throw(create_nodes_not_defined);
       Nodes->
-        case Nodes -- ?readyNodes of
-          []->
-            Nodes;
-          NotReadyNodes->
-            throw({not_ready_nodes, NotReadyNodes})
-        end
+        Nodes
     end,
 
-  case ecall:call_all( CreateNodes ,gen_server,call,[?MODULE,{create,DB,Module,Params}]) of
-    {ok,_}->
-      case ecall:call_all( ?readyNodes, gen_server,call,[?MODULE,{add,DB,Module,Params}] ) of
-        {ok,_}->
-          ok;
-        {error,AddErrors}->
-          ecall:cast_all(?readyNodes, gen_server, call, [?MODULE,{remove,DB}] ),
-          throw({add_error, AddErrors})
-      end;
-    {error,CreateErrors}->
-      ecall:cast_all(CreateNodes, gen_server, call, [?MODULE,{remove,DB}] ),
-      throw({create_error,CreateErrors})
-  end.
+  case CreateNodes -- (CreateNodes -- ?readyNodes) of
+    [] -> throw(create_nodes_not_ready);
+    _->ok
+  end,
 
-remove( DB )->
-  case ecall:call_all_wait(?readyNodes, gen_server,call,[?MODULE,{remove,DB}] ) of
-    {_,_Errors = []}->
-      ok;
-    {_,Errors}->
-      {error,Errors}
+  {OKs, Errors} = ecall:call_all_wait( ?readyNodes ,gen_server,call,[?MODULE,{create,DB,Module,Params},?infinity]),
+
+  case [N || {N, created} <- OKs] of
+    []->
+      ecall:cast_all( ?readyNodes, gen_server,call,[?MODULE,{remove,DB}] ),
+      {error,Errors};
+    _->
+      {OKs,Errors}
   end.
 
 
@@ -121,13 +109,8 @@ add_copy(DB,Node,Params)->
       ok
   end,
 
-  case ecall:call_all( ?readyNodes, gen_server,call,[?MODULE,{add_copy,DB,Node,Params}] ) of
-    {ok,_}->
-      ok;
-    {_, AddErrors }->
-      ecall:cast_all(?readyNodes, gen_server, cast, [?MODULE,{remove_copy,DB,Node}] ),
-      throw(AddErrors)
-  end.
+  gen_server:call({?MODULE, Node}, {add_copy,DB,Params}, ?infinity ).
+
 
 remove_copy(DB, Node)->
 
@@ -168,7 +151,18 @@ remove_copy(DB, Node)->
       ok
   end,
 
-  gen_server:call({?MODULE, Node},{remove_copy,DB}).
+  gen_server:call({?MODULE, Node},{remove_copy,DB},?infinity).
+
+remove( DB )->
+
+  case ?dbModule(DB) of
+    ?undefined->
+      throw(db_not_exists);
+    _->
+      ok
+  end,
+
+  ecall:call_all_wait(?readyNodes, gen_server,call,[?MODULE,{remove,DB},?infinity] ).
 
 
 %%=================================================================
@@ -188,123 +182,80 @@ init([])->
   {ok,#state{}}.
 
 %-----------------CALL------------------------------------------------
-handle_call({create,DB,Module,NodesParams}, From ,State)->
+handle_call({create,DB,Module,NodesParams}, _From ,State)->
 
-  Params = maps:get( node(), NodesParams ),
-  try
-    Ref = zaya_db:create(DB, Module, Params),
-    case zaya_schema_srv:create_db(DB, Module, Ref ) of
-      ok ->
-        gen_server:reply(From,ok);
-      {error,SchemaError}->
-        gen_server:reply(From,{error,{schema_error,SchemaError}})
-    end
-  catch
-    _:CreateError->
-      gen_server:reply(From,{error,CreateError})
-  end,
-
-  {noreply,State};
-
-handle_call({add,DB,Module,NodesParams}, From ,State)->
-
-  case zaya_schema_srv:add_db( DB,Module,NodesParams ) of
-    ok->
-      gen_server:reply(From,ok);
-    {error,SchemaError}->
-      gen_server:reply(From,{error,{schema_error,SchemaError}})
-  end,
-
-  {noreply,State};
-
-handle_call({remove,DB}, From ,State)->
-
-  case ?dbModule(DB) of
-
-    ?undefined->
-      gen_server:reply(From,ok);
-
-    Module->
-      Params = ?dbNodeParams(DB,node()),
-      Ref = ?dbRef(DB),
-
-      case zaya_schema_srv:remove_db( DB ) of
-        ok->
-          if
-            Params =/= ?undefined->
-              try
-                if
-                  Ref =/= ?undefined->
-                    zaya_db:close( DB, Module, Ref );
-                  true-> ignore
-                end,
-                zaya_db:remove(DB,Module,Params),
-
-                gen_server:reply(From,ok)
-              catch
-                _:RemoveError->
-                  gen_server:reply(From,{error,{remove_error,RemoveError}})
-              end;
-            true->
-              gen_server:reply(From,ok)
-          end;
-        {error,SchemaError}->
-          gen_server:reply(From,{error,{schema_error,SchemaError}})
+  Result =
+    epipe:do([
+      fun(_)->
+        zaya_schema_srv:add_db(DB,Module),
+        maps:get(node(), NodesParams, ?undefined)
+      end,
+      fun
+        (_Params = ?undefined)->
+          {ok, added};
+        (Params)->
+          epipe:do([
+            fun(_) -> zaya_db:create(DB, Module, Params) end,
+            fun( Ref )-> zaya_schema_srv:open_db(DB,Ref) end,
+            fun(_)->
+              ecall:cast_all(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
+              {ok, created}
+            end
+          ],?undefined)
       end
-  end,
+    ], ?undefined ),
 
-  {noreply,State};
+  {reply, Result ,State};
 
-handle_call({add_copy,DB,Node,Params}, From ,State)->
-  % TODO
-  Module = ?dbModule(DB),
-  try
+handle_call({remove,DB}, _From ,State)->
 
-    Ref = zaya_db:create(DB, Module, Params),
-
-    zaya_copy:copy(DB, Ref, Module, #{
-      live=>true
-    }),
-
-    case zaya_schema_srv:open_db(DB,Ref) of
-      ok->
-        gen_server:reply(From,ok);
-      {error,SchemaError}->
-        gen_server:reply(From,{error,{schema_error,SchemaError}}),
-        try
-          zaya_db:close( DB, Module, Ref ),
-          zaya_db:remove(DB, Module,Params)
-        catch
-          _:_ -> already_logged
-        end
+  Module = ?dbModule( DB ),
+  Result = epipe:do([
+    fun(_) -> zaya_schema_srv:remove_db( DB ) end,
+    fun
+      (_Ref = ?undefined)-> ok;
+      ( Ref )-> zaya_db:close( DB, Module, Ref )
+    end,
+    fun(_)-> ?dbNodeParams(DB,node()) end,
+    fun
+      (_Params = ?undefined)->ok;
+      (Params)-> zaya_db:remove(DB,Module,Params)
     end
-  catch
-    _:CreateError->
-      gen_server:reply(From,{error,{create_error,CreateError}})
-  end,
+  ], ?dbRef(DB)),
 
-  {noreply,State};
+  {reply, Result ,State};
 
-handle_call({remove_copy,DB}, From ,State)->
-  % TODO
-  case zaya_schema_srv:remove_copy(DB) of
-    ok->
-      Module = ?dbModule(db),
-      Params = ?dbNodeParams( db, node() ),
-      Ref = ?dbRef( db ),
-      try
-        zaya_db:close(db,Module,Ref),
-        zaya_db:remove(db,Module, Params),
-        gen_server:reply(From,ok)
-      catch
-        _:CreateError->
-          gen_server:reply(From,{error,{create_error,CreateError}})
-      end;
-    {error,SchemaError}->
-      gen_server:reply(From,{error,{schema_error,SchemaError}})
-  end,
+handle_call({add_copy,DB,Params}, _From ,State)->
 
-  {noreply,State};
+  Module = ?dbModule(DB),
+  Result = epipe:do([
+    fun(_)-> zaya_db:create(DB, Module, Params) end,
+    fun( Ref )->
+      epipe:do([
+        fun(_)-> zaya_copy:copy(DB, Ref, Module, #{ live=>true }) end,
+        fun(_)-> zaya_schema_srv:open_db(DB,Ref) end
+      ],?undefined)
+    end,
+    fun(_)-> ecall:cast_all(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]) end
+  ],?undefined),
+
+  {reply, Result ,State};
+
+handle_call({remove_copy,DB}, _From ,State)->
+
+  Module = ?dbModule(DB),
+  Params = ?dbNodeParams(DB, node()),
+  Result = epipe:do([
+    fun(_) -> ecall:call_all(?readyNodes, zaya_schema_srv, remove_db_copy, [DB, node()] ) end,
+    fun(_)-> ?dbRef(DB) end,
+    fun
+      (_Ref = ?undefined)-> ok;
+      (Ref)-> zaya_db:close(DB, Module, Ref)
+    end,
+    fun(_)-> zaya_db:remove(DB, Module, Params) end
+  ],?undefined),
+
+  {reply, Result ,State};
 
 handle_call(Request, From, State) ->
   ?LOGWARNING("node server got an unexpected call resquest ~p from ~p",[Request,From]),

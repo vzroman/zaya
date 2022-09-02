@@ -416,26 +416,20 @@
   end
 ).
 
--define(CREATE_DB(DB,M,Ref),
-  begin
-    ?SCHEMA_WRITE({db,DB,'@module@'},M),
-    ?SCHEMA_WRITE({db,DB,'@ref@'},Ref)
-  end
+-define(ADD_DB(DB,M),
+  ?SCHEMA_WRITE({db,DB,'@module@'},M)
 ).
 
 -define(OPEN_DB(DB,Ref),
     ?SCHEMA_WRITE({db,DB,'@ref@'},Ref)
 ).
 
--define(ADD_DB_COPY(DB,N,Ps),
-  ?SCHEMA_WRITE({{db,DB,'@node@',N,'@params@'},Ps})
+-define(CLOSE_DB(DB),
+  ?SCHEMA_DELETE({db,DB,'@ref@'})
 ).
 
--define(ADD_DB(DB,M,NsPs),
-  begin
-    ?SCHEMA_WRITE({db,DB,'@module@'},M),
-    [?ADD_DB_COPY(DB,_@N,_@Ps) || {_@N,_@Ps} <- maps:to_list( NsPs ) ]
-  end
+-define(ADD_DB_COPY(DB,N,Ps),
+  ?SCHEMA_WRITE({{db,DB,'@node@',N,'@params@'},Ps})
 ).
 
 -define(REMOVE_DB_COPY(DB,N),
@@ -445,7 +439,7 @@
 -define(REMOVE_DB(DB),
   begin
     [?REMOVE_DB_COPY(DB,_@N) || _@N <- ?dbAllNodes(DB) ],
-    ?SCHEMA_DELETE({db,DB,'@ref@'}),
+    ?CLOSE_DB(DB),
     ?SCHEMA_DELETE({db,DB,'@module@'})
   end
 ).

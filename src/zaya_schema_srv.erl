@@ -20,13 +20,13 @@
 %%	dbS API
 %%=================================================================
 -export([
-  create_db/3,
+  add_db/2,
   open_db/2,
-  add_db/3,
+  close_db/1,
   remove_db/1,
 
-  add_copy/3,
-  remove_copy/1
+  add_db_copy/3,
+  remove_db_copy/2
 ]).
 
 %%=================================================================
@@ -52,23 +52,25 @@ remove_node( Node )->
 %%=================================================================
 %%	DBs
 %%=================================================================
-create_db(DB,Module,Ref)->
-  gen_server:call(?MODULE, {create_db, DB,Module,Ref}).
+add_db(DB,Module)->
+  gen_server:call(?MODULE, {add_db, DB, Module}, ?infinity).
 
 open_db(DB,Ref)->
-  gen_server:call(?MODULE, {open_db, DB, Ref}).
+  gen_server:call(?MODULE, {open_db, DB, Ref}, ?infinity).
 
-add_db(DB,Module,Params)->
-  gen_server:call(?MODULE, {add_db, DB, Module, Params}).
+close_db(DB)->
+  gen_server:call(?MODULE, {close_db, DB}, ?infinity).
 
 remove_db( DB )->
-  gen_server:call(?MODULE, {remove_db, DB}).
+  gen_server:call(?MODULE, {remove_db, DB}, ?infinity).
 
-add_copy(db,Params,Ref)->
-  gen_server:call(?MODULE, {add_copy,db,Params,Ref}).
+add_db_copy(DB,Node,Params)->
+  gen_server:call(?MODULE, {add_db_copy,DB,Node,Params}, ?infinity).
 
-remove_copy( db )->
-  gen_server:call(?MODULE, {remove_copy, db}).
+remove_db_copy( DB, Node )->
+  gen_server:call(?MODULE, {remove_db_copy, DB, Node}, ?infinity).
+
+
 
 %%=================================================================
 %%	OTP
@@ -143,12 +145,12 @@ handle_call({remove_node, Node}, From, State) ->
 %%=================================================================
 %%	CALL DBs
 %%=================================================================
-handle_call({create_db, DB,Module,Ref}, From, State) ->
+handle_call({add_db, DB, Module}, From, State) ->
 
   try
-    ?CREATE_DB(DB,Module,Ref),
-    gen_server:reply(From,ok),
-    ?LOGINFO("~p db added to schema, module ~p, ref ~p",[DB,Module,Ref])
+      ?ADD_DB(DB,Module),
+      gen_server:reply(From,ok),
+      ?LOGINFO("~p db added to schema, module ~p",[DB,Module])
   catch
     _:E:S->
       gen_server:reply(From, {error,E}),
@@ -162,27 +164,29 @@ handle_call({open_db, DB, Ref}, From, State) ->
   try
     ?OPEN_DB(DB,Ref),
     gen_server:reply(From,ok),
-    ?LOGINFO("~p db added to schema, ref ~p",[DB, Ref])
+    ?LOGINFO("~p db opened, ref ~p",[DB, Ref])
   catch
     _:E:S->
       gen_server:reply(From, {error,E}),
-      ?LOGERROR("~p add db schema error ~p stack ~p",[DB,E,S])
+      ?LOGERROR("~p db open schema error ~p stack ~p",[DB,E,S])
   end,
 
   {noreply,State};
 
-handle_call({add_db, DB, Module, NodesParams}, From, State) ->
+handle_call({close_db, DB}, From, State) ->
+
   try
-    ?ADD_DB(DB,Module,NodesParams),
+    ?CLOSE_DB(DB),
     gen_server:reply(From,ok),
-    ?LOGINFO("~p db added to schema, module ~p, params ~p",[DB,Module,NodesParams])
+    ?LOGINFO("~p db closed",[DB])
   catch
-      _:E:S->
-        gen_server:reply(From, {error,E}),
-        ?LOGERROR("~p add db schema error ~p stack ~p",[DB,E,S])
+    _:E:S->
+      gen_server:reply(From, {error,E}),
+      ?LOGERROR("~p db close schema error ~p stack ~p",[DB,E,S])
   end,
 
   {noreply,State};
+
 
 handle_call({remove_db, DB},From,State)->
 
@@ -198,29 +202,29 @@ handle_call({remove_db, DB},From,State)->
 
   {noreply,State};
 
-handle_call({add_copy,db,Params,Ref}, From, State) ->
+handle_call({add_db_copy,DB,Node,Params}, From, State) ->
   try
-    ?ADD_DB_COPY(db,Params,Ref),
+    ?ADD_DB_COPY(DB,Node,Params),
     gen_server:reply(From,ok),
-    ?LOGINFO("~p copy added to schema params ~p",[db,Params])
+    ?LOGINFO("~p copy added to ~p, params: ~p",[DB,Node,Params])
   catch
     _:E:S->
-      ?LOGERROR("~p add copy to ~p schema error ~p stack ~p",[db,E,S]),
+      ?LOGERROR("~p add copy to ~p schema error ~p stack ~p",[DB,Node,E,S]),
       gen_server:reply(From, {error,E})
   end,
 
   {noreply,State};
 
-handle_call({remove_copy, db}, From, State) ->
+handle_call({remove_db_copy, DB, Node}, From, State) ->
 
   try
-    ?REMOVE_DB_COPY( db ),
+    ?REMOVE_DB_COPY( DB, Node ),
     gen_server:reply(From,ok),
-    ?LOGINFO("~p copy removed from schema",[db])
+    ?LOGINFO("~p copy removed from ~p",[DB, Node])
   catch
     _:E:S->
       gen_server:reply(From, {error,E}),
-      ?LOGERROR("~p remove copy from schema error ~p stack ~p",[db,E,S])
+      ?LOGERROR("~p remove copy from ~p schema error ~p stack ~p",[DB,Node,E,S])
   end,
 
   {noreply,State};

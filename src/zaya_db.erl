@@ -67,7 +67,7 @@
   end
 ).
 
--define(LOCAL(M,F), fun M:F/?FUNCTION_ARITY).
+-define(LOCAL(M), fun M:?FUNCTION_NAME/?FUNCTION_ARITY).
 
 -define(RPC(N,M,F,T),
   if
@@ -76,72 +76,85 @@
     ?FUNCTION_ARITY=:=2->fun(A1,A2)->T(N,M,F,[A1,A2]) end
   end).
 
--define(IS_LOCAL(S),
-
-  case ?dbRef(S) of ?undefined->false; _->true end
-
+-define(IS_LOCAL(DB),
+  case ?dbRef(DB) of ?undefined->false; _->true end
 ).
 
--define(REF(S),
-  case ?IS_LOCAL(S) of true ->?dbRef(S); false->S end
+-define(REF(DB),
+  case DB of
+    {'$call$',_@DB}->
+      ?dbRef(_@DB);
+    _->
+      case ?IS_LOCAL(DB) of
+        true ->?dbRef(DB);
+        false->{'$call$',DB}
+      end
+  end
 ).
 
 %------------entry points------------------------------------------
--define(read(S),
-  case ?dbModule(S) of ?undefined->?NOT_AVAILABLE;
+-define(read(DB),
+  case ?dbModule(DB) of ?undefined->?NOT_AVAILABLE;
     _@M->
-      case ?IS_LOCAL(S) of
+      case ?IS_LOCAL(DB) of
         true->
-          ?LOCAL(_@M,?FUNCTION_NAME);
+          ?LOCAL(_@M);
         _->
-          ?RPC(?dbReadyNodes(S),_@M,?FUNCTION_NAME,fun ecall:call_one/4)
+          ?RPC(?dbReadyNodes(DB),_@M,?FUNCTION_NAME,fun ecall:call_one/4)
       end
   end).
 
--define(write(S),
-  case ?dbModule(S) of ?undefined->?NOT_AVAILABLE;
-    _@M->
-      case ?IS_LOCAL(S) of
-        true->
-          ?RPC(?dbReadyNodes(S),_@M,?FUNCTION_NAME,fun ecall:cast_all/4);
-        _ ->
-          ?RPC(?dbReadyNodes(S),_@M,?FUNCTION_NAME,fun ecall:call_any/4)
+-define(write(DB),
+  case DB of
+    {'$call$',_@DB}->
+      ?LOCAL( ?dbModule(_@DB) );
+    _->
+      case ?dbModule(DB) of ?undefined->?NOT_AVAILABLE;
+        _@M->
+          case ?IS_LOCAL(DB) of
+            true->
+              ?RPC(?dbReadyNodes(DB) -- [node()],_@M,?FUNCTION_NAME,fun ecall:cast_all/4),
+              ?LOCAL(_@M);
+            _ ->
+              ?RPC(?dbReadyNodes(DB),_@M,?FUNCTION_NAME,fun ecall:call_any/4)
+          end
       end
-  end).
+  end
+).
 
 %%=================================================================
 %%	READ/WRITE API
 %%=================================================================
-read( db, Keys )->
-  (?read(db))(?REF(db), Keys).
+read( DB, Keys )->
+  (?read(DB))(?REF(DB), Keys).
 
-write(db,KVs)->
-  (?write(db))(?REF(db), KVs ).
+write(DB,KVs)->
+  (?write(DB))(?REF(DB), KVs ).
 
-delete(db,Keys)->
-  (?write(db))(?REF(db), Keys).
+delete(DB,Keys)->
+  (?write(DB))(?REF(DB), Keys).
 
 
 %%=================================================================
 %%	ITERATOR
 %%=================================================================
-first(db)->
-  (?read(db))(?REF(db)).
+first(DB)->
+  (?read(DB))(?REF(DB)).
 
-last(db)->
-  (?read(db))(?REF(db)).
+last(DB)->
+  (?read(DB))(?REF(DB)).
 
-next(db,Key)->
-  (?read(db))(?REF(db), Key ).
+next(DB,Key)->
+  (?read(DB))(?REF(DB), Key ).
 
-prev(db,Key)->
-  (?read(db))(?REF(db), Key ).
+prev(DB,Key)->
+  (?read(DB))(?REF(DB), Key ).
 
 %%=================================================================
 %%	SEARCH
 %%=================================================================
-search(db,Options)->
-  (?read(db))(?REF(db), Options).
+search(DB,Options)->
+  (?read(DB))(?REF(DB), Options).
 
 
 %%=================================================================

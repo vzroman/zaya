@@ -10,6 +10,7 @@
    ]},
   {included_applications,[
      ecall,
+     epipe,
      esubscribe
   ]},
   {env,[]},
