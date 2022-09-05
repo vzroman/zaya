@@ -5,11 +5,11 @@
 -include("zaya_schema.hrl").
 
 %%=================================================================
-%%	READ/WRITE API
+%%	LOW_LEVEL API
 %%=================================================================
 -export([
-  read/2,
-  write/2,
+  get/2,
+  put/2,
   delete/2
 ]).
 
@@ -24,10 +24,13 @@
 ]).
 
 %%=================================================================
-%%	SEARCH API
+%%	HIGH-LEVEL API
 %%=================================================================
 -export([
-  search/2
+  find/2,
+  foldl/4,
+  foldr/4,
+  update/2
 ]).
 
 %%=================================================================
@@ -67,95 +70,99 @@
   end
 ).
 
--define(LOCAL(M), fun M:?FUNCTION_NAME/?FUNCTION_ARITY).
-
--define(RPC(N,M,F,T),
-  if
-    ?FUNCTION_ARITY=:=0->fun()->T(N,M,F,[]) end;
-    ?FUNCTION_ARITY=:=1->fun(A)->T(N,M,F,[A]) end;
-    ?FUNCTION_ARITY=:=2->fun(A1,A2)->T(N,M,F,[A1,A2]) end
-  end).
-
--define(IS_LOCAL(DB),
-  case ?dbRef(DB) of ?undefined->false; _->true end
+-define(LOCAL_CALL(Mod,Ref,Args),
+  try case Args of
+    []-> Mod:?FUNCTION_NAME(Ref);
+    [_@1]->Mod:?FUNCTION_NAME(Ref,_@1);
+    [_@1,_@2]->Mod:?FUNCTION_NAME(Ref,_@1,_@2);
+    [_@1,_@2,_@3]->Mod:?FUNCTION_NAME(Ref,_@1,_@2,_@3)
+  end catch
+    _:_-> ?NOT_AVAILABLE
+  end
 ).
 
--define(REF(DB),
-  case DB of
-    {'$call$',_@DB}->
-      ?dbRef(_@DB);
-    _->
-      case ?IS_LOCAL(DB) of
-        true ->?dbRef(DB);
-        false->{'$call$',DB}
-      end
+-define(REMOTE_CALL(Type,Ns,DB,Args),
+  case ecall:Type( Ns, ?MODULE, ?FUNCTION_NAME,[ DB|Args]) of
+    {ok,_@Res} -> _@Res;
+    _-> ?NOT_AVAILABLE
   end
 ).
 
 %------------entry points------------------------------------------
--define(read(DB),
-  case ?dbModule(DB) of ?undefined->?NOT_AVAILABLE;
-    _@M->
-      case ?IS_LOCAL(DB) of
-        true->
-          ?LOCAL(_@M);
-        _->
-          ?RPC(?dbReadyNodes(DB),_@M,?FUNCTION_NAME,fun ecall:call_one/4)
-      end
-  end).
-
--define(write(DB),
+-define(REF(DB),
   case DB of
-    {'$call$',_@DB}->
-      ?LOCAL( ?dbModule(_@DB) );
+    _ when is_atom( DB)->
+      {db, ?dbRef( DB ), ?dbModule( DB ) };
+    {call,_@DB}->
+      {call, ?dbRef( _@DB ), ?dbModule(_@DB) }
+  end
+).
+
+-define(get(DB, Args),
+  case ?REF(DB) of
+    {db, _@Ref,_@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
+      ?LOCAL_CALL( _@Mod, _@Ref, Args);
+    {call, _@Ref, _@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
+      ?LOCAL_CALL( _@Mod, _@Ref, Args);
+    {db, _, _@Mod} when _@Mod =/= ?undefined->
+      ?REMOTE_CALL( ?dbReadyNodes(_@DB), call_one, {call,DB}, Args );
     _->
-      case ?dbModule(DB) of ?undefined->?NOT_AVAILABLE;
-        _@M->
-          case ?IS_LOCAL(DB) of
-            true->
-              ?RPC(?dbReadyNodes(DB) -- [node()],_@M,?FUNCTION_NAME,fun ecall:cast_all/4),
-              ?LOCAL(_@M);
-            _ ->
-              ?RPC(?dbReadyNodes(DB),_@M,?FUNCTION_NAME,fun ecall:call_any/4)
-          end
-      end
+      ?NOT_AVAILABLE
+  end
+).
+
+-define(put(DB, Args),
+  case ?REF(DB) of
+    {db, _@Ref,_@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
+      ?REMOTE_CALL( ?dbReadyNodes(DB), call_any, {call,DB}, _@Args );
+    [{call, _@Ref,_@Mod}|_@Args] when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
+      ?LOCAL_CALL( _@Mod, _@Ref, _@Args);
+    _->
+      ?NOT_AVAILABLE
   end
 ).
 
 %%=================================================================
-%%	READ/WRITE API
+%%	LOW-LEVEL (Required)
 %%=================================================================
-read( DB, Keys )->
-  (?read(DB))(?REF(DB), Keys).
+get( DB, Keys )->
+  ?get(DB, [Keys] ).
 
-write(DB,KVs)->
-  (?write(DB))(?REF(DB), KVs ).
+put(DB,KVs)->
+  ?put(DB, [KVs] ).
 
-delete(DB,Keys)->
-  (?write(DB))(?REF(DB), Keys).
-
+delete(DB, Keys)->
+  ?put( DB, [Keys] ).
 
 %%=================================================================
-%%	ITERATOR
+%%	ITERATOR (Optional)
 %%=================================================================
 first(DB)->
-  (?read(DB))(?REF(DB)).
+  ?get( DB, []).
 
 last(DB)->
-  (?read(DB))(?REF(DB)).
+  ?get( DB, []).
 
 next(DB,Key)->
-  (?read(DB))(?REF(DB), Key ).
+  ?get( DB, [Key]).
 
 prev(DB,Key)->
-  (?read(DB))(?REF(DB), Key ).
+  ?get( DB, [Key]).
 
 %%=================================================================
-%%	SEARCH
+%%	HIGH-LEVEL (Optional)
 %%=================================================================
-search(DB,Options)->
-  (?read(DB))(?REF(DB), Options).
+find(DB, Query)->
+  ?get( DB, [Query]).
 
+foldl( DB, Query, Fun, InAcc )->
+  ?get( DB, [Query, Fun, InAcc] ).
+
+foldr( DB, Query, Fun, InAcc )->
+  ?get( DB, [Query, Fun, InAcc] ).
+
+update( DB, Query )->
+  ?put( DB, [ Query ]).
 
 %%=================================================================
 %%	DB SERVER
