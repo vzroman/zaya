@@ -41,13 +41,16 @@
 ]).
 
 %%=================================================================
-%%	RPC API
+%%	SERVICE API
 %%=================================================================
 -export([
-  create/3,
+  create/3, do_create/3,
   open/3,
   close/3,
-  remove/3
+  remove/1, do_remove/1,
+
+  add_copy/3, do_add_copy/2,
+  remove_copy/2, do_remove_copy/1
 ]).
 
 %%=================================================================
@@ -165,25 +168,85 @@ update( DB, Query )->
   ?put( DB, [ Query ]).
 
 %%=================================================================
-%%	DB SERVER
+%%	SERVICE
 %%=================================================================
 create(DB, Module, Params)->
-  try
-    Module:create( Params ),
-    _Ref=Module:open( Params )
-  catch
-    _:E:S->
-      ?LOGERROR("~p create with params ~p module ~p error ~p stack ~p",[DB,Params,Module,E,S]),
-      throw({module_error,E})
+  if
+    is_atom(DB)->
+      ok;
+    true->
+      throw(invalid_name)
+  end,
+
+  case lists:member( Module, ?modules ) of
+    false ->
+      throw( invalid_module );
+    _->
+      ok
+  end,
+
+  if
+    is_map( Params )->
+      ok;
+    true->
+      throw( invalid_params )
+  end,
+
+  CreateNodes =
+    case maps:keys( Params ) of
+      []->
+        throw(create_nodes_not_defined);
+      Nodes->
+        Nodes
+    end,
+
+  case CreateNodes -- (CreateNodes -- ?readyNodes) of
+    [] -> throw(create_nodes_not_ready);
+    _->ok
+  end,
+
+  {OKs, Errors} = ecall:call_all_wait( ?readyNodes ,?MODULE, do_create, [DB,Module,Params]),
+
+  case [N || {N, created} <- OKs] of
+    []->
+      ecall:cast_all( ?readyNodes, ?MODULE, do_remove, [DB] ),
+      {error,Errors};
+    _->
+      {OKs,Errors}
   end.
+
+do_create(DB, Module, NodesParams)->
+
+  epipe:do([
+    fun(_)->
+      zaya_schema_srv:add_db(DB,Module),
+      maps:get(node(), NodesParams, ?undefined)
+    end,
+    fun
+      (_Params = ?undefined)->
+        {ok, added};
+      (Params)->
+        epipe:do([
+          fun(_) -> Module:create( Params ) end,
+          fun(_)-> Module:open( Params ) end,
+          fun( Ref )-> zaya_schema_srv:open_db(DB,Ref) end,
+          fun(_)->
+            ecall:cast_all(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
+            {ok, created}
+          end
+        ],?undefined)
+    end
+  ], ?undefined ).
+
 
 open(DB, Module, Params )->
   try
-    _Ref=Module:open( Params )
+    Ref=Module:open( Params ),
+    {ok, Ref}
   catch
     _:E:S->
       ?LOGERROR("~p open with params ~p module ~p error ~p stack ~p",[DB,Params,Module,E,S]),
-      throw({module_error,E})
+      {error, {module_error,E}}
   end.
 
 close(DB, Module, Ref )->
@@ -192,16 +255,141 @@ close(DB, Module, Ref )->
   catch
     _:E:S->
       ?LOGERROR("~p db close module error ~p stack ~p",[DB,E,S]),
-      throw({module_error,E})
+      {error,{module_error,E}}
   end.
 
-remove( DB, Module, Params )->
-  try
-     Module:remove( Params )
-  catch
-    _:E:S->
-      ?LOGERROR("~p remove module error ~p stack ~p",[DB,E,S])
-  end.
+remove( DB )->
+
+  case ?dbModule(DB) of
+    ?undefined->
+      throw(db_not_exists);
+    _->
+      ok
+  end,
+
+  ecall:call_all_wait(?readyNodes, ?MODULE, do_remove, [DB] ).
+
+do_remove( DB )->
+
+  Module = ?dbModule( DB ),
+  Ref = ?dbRef(DB),
+  Params = ?dbNodeParams(DB,node()),
+  epipe:do([
+    fun(_) -> zaya_schema_srv:remove_db( DB ) end,
+    fun
+      (_) when Ref =:= ?undefined-> ok;
+      (_)-> Module:close( Ref )
+    end,
+    fun
+      (_) when Params =:= ?undefined->ok;
+      (_)-> Module:remove( Params )
+    end
+  ], ?undefined).
+
+add_copy(DB,Node,Params)->
+
+  case ?dbModule(DB) of
+    ?undefined->
+      throw(db_not_exists);
+    _->
+      ok
+  end,
+  case lists:member( Node, ?allNodes ) of
+    false->
+      throw(node_not_attached);
+    _->
+      ok
+  end,
+  case ?dbReadyNodes(DB) of
+    []->
+      throw(db_not_ready);
+    _->
+      ok
+  end,
+  case lists:member(Node,?dbAllNodes(DB)) of
+    true->
+      throw(already_exists);
+    _->
+      ok
+  end,
+  case ?isNodeReady( Node ) of
+    false->
+      throw(node_not_ready);
+    _->
+      ok
+  end,
+
+  ecall:call_one([Node], ?MODULE, do_add_copy, [ DB, Params ]).
+
+do_add_copy( DB, Params )->
+
+  Module = ?dbModule(DB),
+  epipe:do([
+    fun(_)-> Module:create( Params ) end,
+    fun(_)-> Module:open( Params ) end,
+    fun( Ref )->
+      epipe:do([
+        fun(_)-> zaya_copy:copy(DB, Ref, Module, #{ live=>true }) end,
+        fun(_)-> zaya_schema_srv:open_db(DB,Ref) end
+      ],?undefined)
+    end,
+    fun(_)-> ecall:call_any(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]) end
+  ],?undefined).
+
+remove_copy(DB, Node)->
+
+  case ?dbModule(DB) of
+    ?undefined->
+      throw(db_not_exists);
+    _->
+      ok
+  end,
+
+  case lists:member( Node,?allNodes ) of
+    false->
+      throw(node_not_attached);
+    _->
+      ok
+  end,
+
+  case ?isNodeReady( Node ) of
+    false->
+      throw( node_not_ready );
+    _->
+      ok
+  end,
+
+  case ?dbNodeParams(DB,Node) of
+    ?undefined ->
+      throw(copy_not_exists);
+    _->
+      ok
+  end,
+
+  case ?dbReadyNodes(DB) of
+    [Node]->
+      throw( last_ready_copy );
+    []->
+      throw( db_not_ready );
+    _->
+      ok
+  end,
+
+  ecall:call_one([Node], ?MODULE, do_remove_copy, [ DB ]).
+
+do_remove_copy( DB )->
+  Module = ?dbModule( DB ),
+  Ref = ?dbRef(DB),
+  Params = ?dbNodeParams(DB,node()),
+  epipe:do([
+    fun(_) -> ecall:call_all(?readyNodes, zaya_schema_srv, remove_db_copy, [DB, node()] ) end,
+    fun
+      (_) when Ref =:= ?undefined-> ok;
+      (Ref)-> Module:close( Ref )
+    end,
+    fun(_)-> Module:remove( Params ) end
+  ],?undefined).
+
 
 %%=================================================================
 %%	SCHEMA SERVER

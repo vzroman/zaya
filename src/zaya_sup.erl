@@ -44,15 +44,6 @@ init([]) ->
     modules=>[zaya_node_srv]
   },
 
-  dbServer=#{
-    id=>zaya_db_srv,
-    start=>{zaya_db_srv,start_link,[]},
-    restart=>permanent,
-    shutdown=>?env(stop_timeout, ?DEFAULT_STOP_TIMEOUT),
-    type=>worker,
-    modules=>[zaya_db_srv]
-  },
-
 
   Supervisor=#{
     strategy=>one_for_one,
@@ -63,8 +54,7 @@ init([]) ->
   {ok, {Supervisor, [
     SubscriptionsServer,
     SchemaServer,
-    NodeServer,
-    dbServer
+    NodeServer
   ]}}.
 
 
