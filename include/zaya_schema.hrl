@@ -94,12 +94,12 @@
 -define(schemaParams,
   #{
     path => ?schemaPath,
-    ets_params =>#{
+    ets_params => #{
       named=>false,
       protected=>true,
       type=>ordered_set
     },
-    leveld_params=#{
+    leveld_params => #{
       %compression_algorithm => todo,
       open_options=>#{
         create_if_missing => false,
@@ -429,7 +429,7 @@
 ).
 
 -define(ADD_DB_COPY(DB,N,Ps),
-  ?SCHEMA_WRITE({{db,DB,'@node@',N,'@params@'},Ps})
+  ?SCHEMA_WRITE({db,DB,'@node@',N,'@params@'},Ps)
 ).
 
 -define(REMOVE_DB_COPY(DB,N),

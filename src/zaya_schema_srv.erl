@@ -244,7 +244,7 @@ handle_info({'EXIT',NodeServer, Reason},#state{nodes = Nodes}= State)->
       try ?NODE_DOWN(Node)
       catch
         _:E:S->
-          ?LOGERROR("schema update error ~p, stack ~p",[E:S])
+          ?LOGERROR("schema update error ~p, stack ~p",[E,S])
       end,
       {noreply,State#state{nodes = RestNodes}};
     _->
@@ -417,28 +417,28 @@ recover_by_schema({?schema, Schema}, OldSchema)->
   merge_schema(localDBs),
   ok.
 
-merge_schema([db|Rest])->
-  case ?dbAllNodes( db ) of
+merge_schema([DB|Rest])->
+  case ?dbAllNodes( DB ) of
     []->
-      ?LOGINFO("~p db was removed, remove local copy",[db]),
+      ?LOGINFO("~p db was removed, remove local copy",[DB]),
       try
-        Module = ?dbModule( db ),
-        LocalParams = ?dbNodeParams( node() ),
-        Module:remove( db, LocalParams ),
-        ?LOGINFO("~p local copy removed",[db])
+        Module = ?dbModule( DB ),
+        LocalParams = ?dbNodeParams(DB, node() ),
+        Module:remove( DB, LocalParams ),
+        ?LOGINFO("~p local copy removed",[DB])
       catch
         _:E:S->
-          ?LOGERROR("~p remove local copy error ~p stack ~p",[db,E,S])
+          ?LOGERROR("~p remove local copy error ~p stack ~p",[DB,E,S])
       end;
     _dbNodes->
-      case ?dbReadyNodes(db) of
+      case ?dbReadyNodes(DB) of
         []->
-          case ?dbNotReadyNodes( db )--[node()] of
+          case ?dbNotReadyNodes( DB )--[node()] of
             []->
               ?LOGINFO("~p has only local copy, continue");
             OtherNotReadyNodes->
-              ?LOGWARNING("~p HAS COPIES at ~p NODES THAT ARE NOT READY NOW! This nodes can have more fresh data", [db,OtherNotReadyNodes]),
-              case confirm_copy_dialog( db, OtherNotReadyNodes ) of
+              ?LOGWARNING("~p HAS COPIES at ~p NODES THAT ARE NOT READY NOW! This nodes can have more fresh data", [DB,OtherNotReadyNodes]),
+              case confirm_copy_dialog( DB, OtherNotReadyNodes ) of
                 yes->
                   ?LOGWARNING("~p local copy accepted as the latest, continue");
                 no->
@@ -447,13 +447,13 @@ merge_schema([db|Rest])->
               end
           end;
         dbReadyNodes->
-          ?LOGINFO("~p db has copies at ~p nodes, try to recover",[db,dbReadyNodes]),
+          ?LOGINFO("~p db has copies at ~p nodes, try to recover",[DB,?dbReadyNodes(DB)]),
           try
-            zaya_db:try_recover( db ),
+            zaya_db:try_recover( DB ),
             ?LOGINFO("~p db recovered")
           catch
             _:E:S->
-              ?LOGERROR("~p RECOVERY ERROR ~p stack ~p",[db,E,S])
+              ?LOGERROR("~p RECOVERY ERROR ~p stack ~p",[DB,E,S])
           end
       end
   end,
@@ -461,13 +461,13 @@ merge_schema([db|Rest])->
 merge_schema([])->
   ok.
 
-confirm_copy_dialog( db, Nodes )->
-  io:format("~p db copy nodes:"),
+confirm_copy_dialog( DB, Nodes )->
+  io:format("~p db copy nodes:",[Nodes]),
   [ io:format("\r\n  "++atom_to_list(N)) || N <- Nodes],
-  yes_or_no("is the local copy of "++atom_to_list(db)++" the latest:").
+  yes_or_no("is the local copy of "++atom_to_list(DB)++" the latest:").
 
 make_schema_backup()->
-  DT = unicode:characters_to_binary(calendar:system_time_to_rfc3339(DT,[{unit,millisecond},{offset,"Z"}])),
+  DT = unicode:characters_to_binary(calendar:system_time_to_rfc3339(erlang:system_time(millisecond),[{unit,millisecond},{offset,"Z"}])),
   ?makeSchemaBackup(?schemaDir++".zaya.SCHEMA.BACKUP."++DT).
 
 load_from_backup()->

@@ -63,31 +63,32 @@
 %%=================================================================
 %%	ENGINE
 %%=================================================================
--define(NOT_AVAILABLE,
+not_available( F )->
   if
-    ?FUNCTION_NAME=:=write->
+    F=:=put->
       ?not_available;
-    ?FUNCTION_NAME=:=next;?FUNCTION_NAME=:=prev;?FUNCTION_NAME=:=first;?FUNCTION_NAME=:=last->
+    F=:=next;F=:=prev;F=:=first;F=:=last->
       ?last;
     true->[]
-  end
+  end.
+
+-define(NOT_AVAILABLE,
+  not_available( ?FUNCTION_NAME )
 ).
 
 -define(LOCAL_CALL(Mod,Ref,Args),
-  try case Args of
-    []-> Mod:?FUNCTION_NAME(Ref);
-    [_@1]->Mod:?FUNCTION_NAME(Ref,_@1);
-    [_@1,_@2]->Mod:?FUNCTION_NAME(Ref,_@1,_@2);
-    [_@1,_@2,_@3]->Mod:?FUNCTION_NAME(Ref,_@1,_@2,_@3)
-  end catch
-    _:_-> ?NOT_AVAILABLE
+  try apply( fun Mod:?FUNCTION_NAME/?FUNCTION_ARITY, [Ref|Args] )
+  catch
+    _:_->
+    ?NOT_AVAILABLE
   end
 ).
 
--define(REMOTE_CALL(Type,Ns,DB,Args),
-  case Type( Ns, ?MODULE, ?FUNCTION_NAME,[ DB|Args]) of
+-define(REMOTE_CALL(Ns,Type,DB,Args),
+  case ecall:Type( Ns, ?MODULE, ?FUNCTION_NAME,[ DB|Args]) of
     {ok,_@Res} -> _@Res;
-    _-> ?NOT_AVAILABLE
+    _->
+      ?NOT_AVAILABLE
   end
 ).
 
@@ -108,7 +109,7 @@
     {call, _@Ref, _@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
       ?LOCAL_CALL( _@Mod, _@Ref, Args);
     {db, _, _@Mod} when _@Mod =/= ?undefined->
-      ?REMOTE_CALL( ?dbReadyNodes(_@DB), call_one, {call,DB}, Args );
+      ?REMOTE_CALL( ?dbReadyNodes(DB), call_one, {call,DB}, Args );
     _->
       ?NOT_AVAILABLE
   end
@@ -117,9 +118,9 @@
 -define(put(DB, Args),
   case ?REF(DB) of
     {db, _@Ref,_@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
-      ?REMOTE_CALL( ?dbReadyNodes(DB), call_any, {call,DB}, _@Args );
-    [{call, _@Ref,_@Mod}|_@Args] when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
-      ?LOCAL_CALL( _@Mod, _@Ref, _@Args);
+      ?REMOTE_CALL( ?dbReadyNodes(DB), call_any, {call,DB}, Args );
+    {call, _@Ref,_@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
+      ?LOCAL_CALL( _@Mod, _@Ref, Args);
     _->
       ?NOT_AVAILABLE
   end
@@ -401,7 +402,7 @@ do_remove_copy( DB )->
     fun(_) -> ecall:call_all(?readyNodes, zaya_schema_srv, remove_db_copy, [DB, node()] ) end,
     fun
       (_) when Ref =:= ?undefined-> ok;
-      (Ref)-> Module:close( Ref )
+      (_)-> Module:close( Ref )
     end,
     fun(_)-> Module:remove( Params ) end
   ],?undefined).

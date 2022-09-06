@@ -81,6 +81,7 @@ iterator({K,V},#acc{
 %------------------types-------------------------------------------
 -record(copy,{ send_node, source, copy_ref, module, options, attempts, log,error }).
 -record(r_acc,{sender,module,source,copy_ref,live,tail_key,hash,log}).
+-record(live,{ source, module, send_node, copy_ref, live_ets, giver, taker, log }).
 
 copy(Source, CopyRef, Module )->
   copy(Source, CopyRef, Module, #{}).
@@ -297,7 +298,7 @@ copy_request(#{
     batch = []
   },
 
-  {ok, Unlock} = elock:lock(elock, Source, true = _IsShared, [node()], ?infinity = _Timeout ),
+  {ok, Unlock} = elock:lock(elock, Source, _IsShared = true, [node()], _Timeout = ?infinity  ),
 
   try
       #s_acc{ batch = TailBatch, hash = TailHash } = TailState =
@@ -379,7 +380,6 @@ send_batch(#s_acc{
 %%===========================================================================
 %% LIVE COPY
 %%===========================================================================
--record(live,{ source, module, send_node, copy_ref, live_ets, giver, taker, log }).
 prepare_live_copy( _Source, _Module, _SendNode, _CopyRef, Log, #{live:=false} )->
   ?LOGINFO("~p cold copy",[Log]),
   #live{live_ets = false};
