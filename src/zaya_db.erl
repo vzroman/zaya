@@ -85,7 +85,7 @@
 ).
 
 -define(REMOTE_CALL(Type,Ns,DB,Args),
-  case ecall:Type( Ns, ?MODULE, ?FUNCTION_NAME,[ DB|Args]) of
+  case Type( Ns, ?MODULE, ?FUNCTION_NAME,[ DB|Args]) of
     {ok,_@Res} -> _@Res;
     _-> ?NOT_AVAILABLE
   end
@@ -94,7 +94,7 @@
 %------------entry points------------------------------------------
 -define(REF(DB),
   case DB of
-    _ when is_atom( DB)->
+    _ when is_atom( DB )->
       {db, ?dbRef( DB ), ?dbModule( DB ) };
     {call,_@DB}->
       {call, ?dbRef( _@DB ), ?dbModule(_@DB) }
@@ -123,6 +123,12 @@
     _->
       ?NOT_AVAILABLE
   end
+).
+
+-define(params(Ps),
+  maps:merge(#{
+    dir => ?schemaDir
+  },Ps)
 ).
 
 %%=================================================================
@@ -223,9 +229,10 @@ do_create(DB, Module, NodesParams)->
       maps:get(node(), NodesParams, ?undefined)
     end,
     fun
-      (_Params = ?undefined)->
+      (_InParams = ?undefined)->
         {ok, added};
-      (Params)->
+      (InParams)->
+        Params = ?params(InParams),
         epipe:do([
           fun(_) -> Module:create( Params ) end,
           fun(_)-> Module:open( Params ) end,
@@ -267,7 +274,7 @@ remove( DB )->
       ok
   end,
 
-  {ok,Unlock} = elock:lock(elock, DB, false =_IsShared, ?dbReadyNodes(DB), ?infinity= _Timeout ),
+  {ok,Unlock} = elock:lock(elock, DB, _IsShared = false, ?dbReadyNodes(DB), _Timeout = ?infinity ),
   try ecall:call_all_wait(?readyNodes, ?MODULE, do_remove, [DB] )
   after
     Unlock()
@@ -324,7 +331,9 @@ add_copy(DB,Node,Params)->
 
   ecall:call_one([Node], ?MODULE, do_add_copy, [ DB, Params ]).
 
-do_add_copy( DB, Params )->
+do_add_copy( DB, InParams )->
+
+  Params = ?params( InParams ),
 
   Module = ?dbModule(DB),
   epipe:do([
@@ -378,7 +387,7 @@ remove_copy(DB, Node)->
       ok
   end,
 
-  {ok,Unlock} = elock:lock(elock, DB, false =_IsShared, [Node], ?infinity= _Timeout ),
+  {ok,Unlock} = elock:lock(elock, DB, _IsShared = false, [Node], _Timeout = ?infinity ),
   try ecall:call_one([Node], ?MODULE, do_remove_copy, [ DB ])
   after
     Unlock()

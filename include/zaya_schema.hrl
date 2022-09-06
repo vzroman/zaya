@@ -70,7 +70,7 @@
 ).
 -define(schemaRead(K),
 
-                      ?SCHEMA_VALUE(?schemaModule:read(?schema,[K]))
+                      ?SCHEMA_VALUE( ?schemaModule:read(?schema,[K]) )
 
 ).
 -define(schemaFind(Q),
@@ -452,7 +452,5 @@
 ).
 
 % TODO:
-% * db write(call)
-% * db_srv
-% db:create default path
+
 

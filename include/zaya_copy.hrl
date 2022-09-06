@@ -17,16 +17,16 @@
 }).
 
 -define(DEFAULT_REMOTE_CONFIG,#{
-  batch_size => DEFAULT_REMOTE_BATCH_SIZE,						% 4 MB
+  batch_size => ?DEFAULT_REMOTE_BATCH_SIZE,						% 4 MB
   attempts => ?DEFAULT_REMOTE_ATTEMPTS,
   live => ?DEFAULT_LIVE_CONFIG
 }).
 -define(DEFAULT_CONFIG,#{
-  batch_size => DEFAULT_BATCH_SIZE,							% 30 MB
+  batch_size => ?DEFAULT_BATCH_SIZE,							% 30 MB
   remote => ?DEFAULT_REMOTE_CONFIG
 }).
 
--define(CONFIG,?ENV(copy, ?DEFAULT_CONFIG)).
+-define(CONFIG,?env(copy, ?DEFAULT_CONFIG)).
 -define(REMOTE_CONFIG,maps:get(remote,?CONFIG)).
 -define(LIVE_CONFIG,maps:get(live,?REMOTE_CONFIG)).
 

@@ -308,7 +308,7 @@ copy_request(#{
 
       FinalHash = crypto:hash_final( TailHash ),
 
-      ?LOGINFO("~p finished, final hash ~p",[Log, ?PRETTY_HASH]),
+      ?LOGINFO("~p finished, final hash ~p",[Log, ?PRETTY_HASH(FinalHash) ]),
       Receiver ! {finish, self(), FinalHash}
 
   catch
