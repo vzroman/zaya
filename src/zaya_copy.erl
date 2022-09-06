@@ -298,7 +298,7 @@ copy_request(#{
     batch = []
   },
 
-  {ok, Unlock} = elock:lock(elock, Source, _IsShared = true, [node()], _Timeout = ?infinity  ),
+  {ok, Unlock} = elock:lock(?locks, Source, _IsShared = true, [node()], _Timeout = ?infinity  ),
 
   try
       #s_acc{ batch = TailBatch, hash = TailHash } = TailState =

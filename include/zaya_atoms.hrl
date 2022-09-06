@@ -11,4 +11,6 @@
 -define(infinity,infinity).
 -define(undefined,undefined).
 
+-define(locks,'$zaya_locks$').
+
 -endif.

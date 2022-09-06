@@ -3,6 +3,7 @@
 
 -include("zaya.hrl").
 -include("zaya_util.hrl").
+-include("zaya_atoms.hrl").
 
 -behaviour(supervisor).
 
@@ -27,8 +28,8 @@ init([]) ->
   },
 
   LockServer = #{
-    id=>elock,
-    start=>{elock,start_link,[ elock ]},
+    id=>?locks,
+    start=>{elock,start_link,[ ?locks ]},
     restart=>permanent,
     shutdown=> ?env(stop_timeout, ?DEFAULT_STOP_TIMEOUT),
     type=>worker,
