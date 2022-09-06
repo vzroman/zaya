@@ -11,7 +11,8 @@
   {included_applications,[
      ecall,
      epipe,
-     esubscribe
+     esubscribe,
+     elock
   ]},
   {env,[]},
   {modules, []},

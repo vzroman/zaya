@@ -1,5 +1,5 @@
 
--module(zaya_node_srv).
+-module(zaya_node).
 
 -include("zaya.hrl").
 -include("zaya_schema.hrl").
@@ -38,18 +38,6 @@
   all_nodes_dbs_params/0
 
 ]).
-%%=================================================================
-%%	OTP API
-%%=================================================================
--export([
-  start_link/0,
-  init/1,
-  handle_call/3,
-  handle_cast/2,
-  handle_info/2,
-  terminate/2,
-  code_change/3
-]).
 
 %%=================================================================
 %%	TRANSFORMATION
@@ -69,8 +57,7 @@ remove( Node )->
       throw({not_ready_dbs,NotReadyDBs})
   end,
 
-  ecall:cast_all(?readyNodes, gen_server, cast,[?MODULE,{remove_node, Node}] ),
-  ok.
+  ecall:call_all_wait(?readyNodes, zaya_schema_srv, remove_node, [Node] ).
 
 %%=================================================================
 %%	INFO
@@ -125,45 +112,5 @@ node_dbs_params( Node )->
 all_nodes_dbs_params()->
   ?allNodesDBsParams.
 
-%%=================================================================
-%%	OTP
-%%=================================================================
-start_link()->
-  gen_server:start_link({local,?MODULE},?MODULE, [], []).
-
--record(state,{}).
-
-init([])->
-
-  process_flag(trap_exit,true),
-
-  ?LOGINFO("starting node server ~p",[self()]),
-
-  {ok,#state{}}.
-
-handle_call(Request, From, State) ->
-  ?LOGWARNING("node server got an unexpected call resquest ~p from ~p",[Request,From]),
-  {noreply,State}.
-
-handle_cast({remove_node, Node} ,State)->
-
-  zaya_schema_srv:remove_node( Node ),
-
-  {noreply,State};
-
-handle_cast(Request,State)->
-  ?LOGWARNING("node server got an unexpected cast resquest ~p",[Request]),
-  {noreply,State}.
-
-handle_info(Message,State)->
-  ?LOGWARNING("node server got an unexpected message ~p",[Message]),
-  {noreply,State}.
-
-terminate(Reason,_State)->
-  ?LOGWARNING("terminating node server reason ~p",[Reason]),
-  ok.
-
-code_change(_OldVsn, State, _Extra) ->
-  {ok, State}.
 
 

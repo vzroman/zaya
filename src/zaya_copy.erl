@@ -297,6 +297,8 @@ copy_request(#{
     batch = []
   },
 
+  {ok, Unlock} = elock:lock(elock, Source, true = _IsShared, [node()], ?infinity = _Timeout ),
+
   try
       #s_acc{ batch = TailBatch, hash = TailHash } = TailState =
         fold(SourceRef, fun remote_batch/3, InitState ),
@@ -313,6 +315,8 @@ copy_request(#{
     _:Error:Stack->
       ?LOGERROR("~p error ~p, stack ~p",[Log,Error,Stack]),
       Receiver ! {error, self(), Error}
+  after
+    Unlock()
   end.
 
 % Zip and stockpile local batches until they reach ?REMOTE_BATCH_SIZE

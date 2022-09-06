@@ -267,10 +267,13 @@ remove( DB )->
       ok
   end,
 
-  ecall:call_all_wait(?readyNodes, ?MODULE, do_remove, [DB] ).
+  {ok,Unlock} = elock:lock(elock, DB, false =_IsShared, ?dbReadyNodes(DB), ?infinity= _Timeout ),
+  try ecall:call_all_wait(?readyNodes, ?MODULE, do_remove, [DB] )
+  after
+    Unlock()
+  end.
 
 do_remove( DB )->
-
   Module = ?dbModule( DB ),
   Ref = ?dbRef(DB),
   Params = ?dbNodeParams(DB,node()),
@@ -375,7 +378,11 @@ remove_copy(DB, Node)->
       ok
   end,
 
-  ecall:call_one([Node], ?MODULE, do_remove_copy, [ DB ]).
+  {ok,Unlock} = elock:lock(elock, DB, false =_IsShared, [Node], ?infinity= _Timeout ),
+  try ecall:call_one([Node], ?MODULE, do_remove_copy, [ DB ])
+  after
+    Unlock()
+  end.
 
 do_remove_copy( DB )->
   Module = ?dbModule( DB ),
