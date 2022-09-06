@@ -85,15 +85,9 @@
                               ?schemaModule:delete(?schema,[K])
 ).
 
--define(SCHEMA_CREATE,
-
-                              ?schemaModule:create(?schema,#{path => ?schemaPath})
-
-).
-
 -define(schemaParams,
   #{
-    path => ?schemaPath,
+    dir => ?schemaPath,
     ets_params => #{
       named=>false,
       protected=>true,
@@ -130,7 +124,7 @@
         %whole_file_expiry => boolean()
       },
       read => #{
-        verify_checksums => true
+        verify_checksums => false
         %fill_cache => todo,
         %iterator_refresh =todo
       },
@@ -139,6 +133,12 @@
       }
     }
   }
+).
+
+-define(SCHEMA_CREATE,
+
+                              ?schemaModule:create(?schema,?schemaParams)
+
 ).
 
 -define(SCHEMA_OPEN,
