@@ -75,7 +75,7 @@
 ).
 -define(schemaFind(Q),
 
-  ?schemaModule:find(?schema, Q)
+  ?schemaModule:find(?schema, #{ms => Q})
 ).
 
 -define(SCHEMA_WRITE(K,V),
