@@ -8,8 +8,8 @@
 %%	LOW_LEVEL API
 %%=================================================================
 -export([
-  get/2,
-  put/2,
+  read/2,
+  write/2,
   delete/2
 ]).
 
@@ -65,7 +65,7 @@
 %%=================================================================
 not_available( F )->
   if
-    F=:=put->
+    F=:=write->
       ?not_available;
     F=:=next;F=:=prev;F=:=first;F=:=last->
       ?last;
@@ -102,7 +102,7 @@ not_available( F )->
   end
 ).
 
--define(get(DB, Args),
+-define(read(DB, Args),
   case ?REF(DB) of
     {db, _@Ref,_@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
       ?LOCAL_CALL( _@Mod, _@Ref, Args);
@@ -115,7 +115,7 @@ not_available( F )->
   end
 ).
 
--define(put(DB, Args),
+-define(write(DB, Args),
   case ?REF(DB) of
     {db, _@Ref,_@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
       ?REMOTE_CALL( ?dbReadyNodes(DB), call_any, {call,DB}, Args );
@@ -135,44 +135,44 @@ not_available( F )->
 %%=================================================================
 %%	LOW-LEVEL (Required)
 %%=================================================================
-get( DB, Keys )->
-  ?get(DB, [Keys] ).
+read( DB, Keys )->
+  ?read(DB, [Keys] ).
 
-put(DB,KVs)->
-  ?put(DB, [KVs] ).
+write(DB,KVs)->
+  ?write(DB, [KVs] ).
 
 delete(DB, Keys)->
-  ?put( DB, [Keys] ).
+  ?write( DB, [Keys] ).
 
 %%=================================================================
 %%	ITERATOR (Optional)
 %%=================================================================
 first(DB)->
-  ?get( DB, []).
+  ?read( DB, []).
 
 last(DB)->
-  ?get( DB, []).
+  ?read( DB, []).
 
 next(DB,Key)->
-  ?get( DB, [Key]).
+  ?read( DB, [Key]).
 
 prev(DB,Key)->
-  ?get( DB, [Key]).
+  ?read( DB, [Key]).
 
 %%=================================================================
 %%	HIGH-LEVEL (Optional)
 %%=================================================================
 find(DB, Query)->
-  ?get( DB, [Query]).
+  ?read( DB, [Query]).
 
 foldl( DB, Query, Fun, InAcc )->
-  ?get( DB, [Query, Fun, InAcc] ).
+  ?read( DB, [Query, Fun, InAcc] ).
 
 foldr( DB, Query, Fun, InAcc )->
-  ?get( DB, [Query, Fun, InAcc] ).
+  ?read( DB, [Query, Fun, InAcc] ).
 
 update( DB, Query )->
-  ?put( DB, [ Query ]).
+  ?write( DB, [ Query ]).
 
 %%=================================================================
 %%	SERVICE
