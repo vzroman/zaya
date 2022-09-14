@@ -35,13 +35,9 @@
                               '@schemaRef@'
 ).
 
--define(FIND_RESULT(R),
-                          todo
-).
-
 
 -define(getSchema,
-                       [ {_@K,_@V} || [_@K,_@V] <- ?schemaFind( [{{'$1','$2'},[],['$1','$2']  }]  ) ]
+                       ?schemaFind( [{{'$1','$2'},[],[{{'$1','$2'}}]  }]  )
 ).
 
 
@@ -169,14 +165,12 @@
 %-------------------------by nodes---------------------------------
 -define(allNodes,
 
-  ?schemaFind(
-    [_@N || [_@N] <-
-      [{
-        {{node,'$1'},'_'},
-        [],
-        ['$1']
-      }
-      ]])
+  ?schemaFind([{
+    {{node,'$1'},'_'},
+    [],
+    ['$1']
+  }])
+
 ).
 
 -define(isNodeReady(N),
@@ -197,39 +191,30 @@
 
 -define(readyNodes,
 
-  ?schemaFind(
-    [_@N || [_@N] <-
-      [{
-        {{node,'$1'},'@up@'},
-        [],
-        ['$1']
-      }
-      ]])
+  ?schemaFind([{
+      {{node,'$1'},'@up@'},
+      [],
+      ['$1']
+    }])
 
 ).
 -define(notReadyNodes,
 
-  ?schemaFind(
-    [_@N || [_@N] <-
-      [{
-        {{node,'$1'},'@down@'},
-        [],
-        ['$1']
-      }
-      ]])
+  ?schemaFind([{
+      {{node,'$1'},'@down@'},
+      [],
+      ['$1']
+    }])
 
 ).
 
 -define(nodeDBs(N),
 
-  ?schemaFind(
-    [_@DB || [_@DB] <-
-      [{
-        {{db,'$1','@node@',N,'@params@'},'_'},
-        [],
-        ['$1']
-      }
-      ]])
+  ?schemaFind([{
+      {{db,'$1','@node@',N,'@params@'},'_'},
+      [],
+      ['$1']
+    }])
 ).
 
 -define(readyNodesDBs,
@@ -268,23 +253,17 @@
 
 -define(nodeDBsParams(N),
 
-  ?schemaFind(
-    [{_@DB,_@Ps} || [_@DB,_@Ps] <-
-      [{
-        {{db,'$1','@node@',N,'@params@'},'$2'},
-        [],
-        ['$1','$2']
-      }
-      ]])
+  ?schemaFind([{
+      {{db,'$1','@node@',N,'@params@'},'$2'},
+      [],
+      [{{'$1','$2'}}]
+    }])
 
 ).
 
 -define(allNodesDBsParams,
 
-  ?schemaFind(
-    [
-      {_@N, ?nodeDBsParams(_@N) } || _@N <- ?allNodes
-    ])
+    [ {_@N, ?nodeDBsParams(_@N) } || _@N <- ?allNodes ]
 
 ).
 
@@ -303,17 +282,14 @@
 
 -define(dbAllNodes(DB),
 
-  ?schemaFind(
-    [_@N || [_@N] <-
-      [{
-        {{db,DB,'@node@','$1','@params@'},'_'},
-        [],
-        ['$1']
-      }
-      ]])
-
+  ?schemaFind([{
+      {{db,DB,'@node@','$1','@params@'},'_'},
+      [],
+      ['$1']
+    }])
 
 ).
+
 -define(dbNodeParams(DB,N),
 
   ?schemaRead({db,DB,'@node@',N,'@params@'})
@@ -323,37 +299,28 @@
 
 -define(dbNodesParams(DB),
 
-  ?schemaFind(
-    [{_@N,_@Ps} || [_@S,_@Ps] <-
-      [{
-        {{db,DB,'@node@','$1','@params@'},'$2'},
-        [],
-        ['$1','$2']
-      }
-      ]])
+  ?schemaFind([{
+      {{db,DB,'@node@','$1','@params@'},'$2'},
+      [],
+      ['$1','$2']
+    }])
 
 ).
 
 
 -define(allDBs,
 
-  ?schemaFind(
-    [_@DB || [_@DB] <-
-      [{
-        {'db','$1','@module@'},
-        [],
-        ['$1']
-      }
-      ]])
+  ?schemaFind([{
+      {'db','$1','@module@'},
+      [],
+      ['$1']
+    }])
 
 ).
 
 -define(allDBsNodesParams,
 
-  ?schemaFind(
-    [
-      {_@DB, ?dbNodesParams(_@DB)} || _@DB <- ?allDBs
-    ])
+  [ {_@DB, ?dbNodesParams(_@DB)} || _@DB <- ?allDBs ]
 
 ).
 
