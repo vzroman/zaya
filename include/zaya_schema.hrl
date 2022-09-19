@@ -4,18 +4,48 @@
 -include("zaya_atoms.hrl").
 -include("zaya_util.hrl").
 
--define(schema,'@schema@').
-
 %---------------------Type modules--------------------------------
 -define(m_ets,zaya_ets).
 -define(m_ets_leveldb,zaya_ets_leveldb).
 -define(m_leveldb,zaya_leveldb).
--define(m_ecomet,zaya_ecomet).
--define(modules,[?m_ets,?m_ets_leveldb,?m_leveldb,?m_ecomet]).
+-define(modules,[?m_ets,?m_ets_leveldb,?m_leveldb]).
 
 %--------------------Schema storage type---------------------------------
 -define(schemaModule,
                                         ?m_ets_leveldb
+).
+
+%--------------------------------API----------------------------------------
+-define(schema,'@schema@').
+
+-define(schemaRef, persistent_term:get(?schema)).
+
+-define(SCHEMA_VALUE(V),
+
+  case length(V) of 0->?undefined; _-> element(2,hd(V)) end
+
+).
+
+-define(schemaRead(K),
+
+  ?SCHEMA_VALUE( ?schemaModule:read(?schemaRef,[K]) )
+
+).
+-define(schemaFind(Q),
+
+  ?schemaModule:find(?schemaRef, #{ms => Q})
+).
+
+-define(SCHEMA_WRITE(K,V),
+
+  ?schemaModule:write(?schemaRef,[{K,V}])
+
+).
+
+-define(SCHEMA_DELETE(K),
+
+  ?schemaModule:delete(?schemaRef,[K])
+
 ).
 
 %----------------------Schema server init/terminate API----------------------
@@ -31,24 +61,25 @@
 
 ).
 
--define(schemaRef,
-                              '@schemaRef@'
-).
-
-
 -define(getSchema,
-                       ?schemaFind( [{{'$1','$2'},[],[{{'$1','$2'}}]  }]  )
+                       ?schemaFind( [{
+                         {'$1','$2'},
+                         [],
+                         [{{'$1','$2'}}]
+                       }])
 ).
 
 
 -define(makeSchemaBackup(Dest),
+
                               ok = file:write_file(Dest,term_to_binary(?getSchema))
+
 ).
 
 -define(LOAD_SCHEMA_FROM_BACKUP(Backup),
   begin
                               {ok,_@Schema} = file:read_file(Backup),
-                              ok = ?schemaModule:write( binary_to_term(_@Schema) )
+                              ok = ?schemaModule:write(?schemaRef, binary_to_term(_@Schema) )
   end
 ).
 %---------------------------------Notifications-----------------------------
@@ -60,72 +91,49 @@
   esubscribe:notify(?schema,A)
 ).
 
-%--------------------------------API----------------------------------------
--define(SCHEMA_VALUE(V),
-              case length(V) of 0->?undefined; _-> element(2,hd(V)) end
-).
--define(schemaRead(K),
-
-                      ?SCHEMA_VALUE( ?schemaModule:read(?schema,[K]) )
-
-).
--define(schemaFind(Q),
-
-  ?schemaModule:find(?schema, #{ms => Q})
-).
-
--define(SCHEMA_WRITE(K,V),
-                              ?schemaModule:write(?schema,[{K,V}])
-  ).
--define(SCHEMA_DELETE(K),
-                              ?schemaModule:delete(?schema,[K])
-).
-
 -define(schemaParams,
   #{
-    dir => ?schemaPath,
-    ets_params => #{
-      named=>false,
-      protected=>true,
-      type=>ordered_set
-    },
-    leveld_params => #{
-      %compression_algorithm => todo,
-      open_options=>#{
-        create_if_missing => false,
-        error_if_exists => false,
-        %write_buffer_size => todo
-        %sst_block_size => todo,
-        %block_restart_interval = todo,
-        %block_size_steps => todo,
-        paranoid_checks => true,  % Nice!
-        verify_compactions => true,
-        compression => false
-        %use_bloomfilter => todo,
-        %total_memory => todo,
-        %total_leveldb_mem => todo,
-        %total_leveldb_mem_percent => todo,
-        %is_internal_db => todo,
-        %limited_developer_mem => todo,
-        %eleveldb_threads => TODO pos_integer()
-        %fadvise_willneed => TODO boolean()
-        %block_cache_threshold => TODO pos_integer()
-        %delete_threshold => pos_integer()
-        %tiered_slow_level => pos_integer()
-        %tiered_fast_prefix => TODO string()
-        %tiered_slow_prefix => TODO string()
-        %cache_object_warming => TODO
-        %expiry_enabled => TODO boolean()
-        %expiry_minutes => TODO pos_integer()
-        %whole_file_expiry => boolean()
-      },
-      read => #{
-        verify_checksums => false
-        %fill_cache => todo,
-        %iterator_refresh =todo
-      },
-      write => #{
-        sync => true
+    ets => #{},
+    leveldb => #{
+      dir => ?schemaPath,
+      leveld_params => #{
+        %compression_algorithm => todo,
+        open_options=>#{
+          create_if_missing => false,
+          error_if_exists => false,
+          %write_buffer_size => todo
+          %sst_block_size => todo,
+          %block_restart_interval = todo,
+          %block_size_steps => todo,
+          paranoid_checks => true,  % Nice!
+          verify_compactions => true,
+          compression => false
+          %use_bloomfilter => todo,
+          %total_memory => todo,
+          %total_leveldb_mem => todo,
+          %total_leveldb_mem_percent => todo,
+          %is_internal_db => todo,
+          %limited_developer_mem => todo,
+          %eleveldb_threads => TODO pos_integer()
+          %fadvise_willneed => TODO boolean()
+          %block_cache_threshold => TODO pos_integer()
+          %delete_threshold => pos_integer()
+          %tiered_slow_level => pos_integer()
+          %tiered_fast_prefix => TODO string()
+          %tiered_slow_prefix => TODO string()
+          %cache_object_warming => TODO
+          %expiry_enabled => TODO boolean()
+          %expiry_minutes => TODO pos_integer()
+          %whole_file_expiry => boolean()
+        },
+        read => #{
+          verify_checksums => false
+          %fill_cache => todo,
+          %iterator_refresh =todo
+        },
+        write => #{
+          sync => true
+        }
       }
     }
   }
@@ -133,30 +141,30 @@
 
 -define(SCHEMA_CREATE,
 
-                              ?schemaModule:create(?schema,?schemaParams)
+  ?schemaModule:create( ?schemaParams )
 
 ).
 
 -define(SCHEMA_OPEN,
-  begin
 
-    {ok,_@schemaRef} =
-                              ?schemaModule:open(?schema, ?schemaParams ),
+  ?SCHEMA_WRITE(?schema, ?schemaModule:open( ?schemaParams ) )
 
-                              ?SCHEMA_WRITE(?schemaRef,_@schemaRef)
-  end
 ).
 
 -define(SCHEMA_CLOSE,
-                              ?schemaModule:close(?schema)
+                              ?schemaModule:close(?schemaRef)
 
 ).
 
 -define(SCHEMA_LOAD(SCHEMA),
-  ?schemaModule:write(?schema,SCHEMA)
+
+  ?schemaModule:write(?schemaRef,SCHEMA)
+
 ).
 -define(SCHEMA_CLEAR,
-  ?schemaModule:delete(?schema,[_@K || {_@K,_} <- ?getSchema ])
+
+  ?schemaModule:delete(?schemaRef,[_@K || {_@K,_} <- ?getSchema ])
+
 ).
 
 %------------------------------------------------------------------

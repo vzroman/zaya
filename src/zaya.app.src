@@ -12,7 +12,10 @@
      ecall,
      epipe,
      esubscribe,
-     elock
+     elock,
+     zaya_leveldb,
+     zaya_ets,
+     zaya_ets_leveldb
   ]},
   {env,[]},
   {modules, []},
