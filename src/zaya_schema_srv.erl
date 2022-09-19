@@ -21,8 +21,8 @@
 %%=================================================================
 -export([
   add_db/2,
-  open_db/1,
-  close_db/1,
+  open_db/3,
+  close_db/2,
   remove_db/1,
 
   add_db_copy/3,
@@ -55,11 +55,11 @@ remove_node( Node )->
 add_db(DB,Module)->
   gen_server:call(?MODULE, {add_db, DB, Module}, ?infinity).
 
-open_db(DB)->
-  gen_server:call(?MODULE, {open_db, DB}, ?infinity).
+open_db(DB, Node, Ref)->
+  gen_server:call(?MODULE, {open_db, DB, Node, Ref}, ?infinity).
 
-close_db(DB)->
-  gen_server:call(?MODULE, {close_db, DB}, ?infinity).
+close_db(DB, Node)->
+  gen_server:call(?MODULE, {close_db, DB, Node}, ?infinity).
 
 remove_db( DB )->
   gen_server:call(?MODULE, {remove_db, DB}, ?infinity).

@@ -22,7 +22,7 @@ init([]) ->
     id=>esubscribe,
     start=>{esubscribe,start_link,[]},
     restart=>permanent,
-    shutdown=> ?DEFAULT_STOP_TIMEOUT,
+    shutdown=> ?env(stop_timeout, ?DEFAULT_STOP_TIMEOUT),
     type=>worker,
     modules=>[esubscribe]
   },
@@ -34,6 +34,15 @@ init([]) ->
     shutdown=> ?env(stop_timeout, ?DEFAULT_STOP_TIMEOUT),
     type=>worker,
     modules=>[elock]
+  },
+
+  DBSup=#{
+    id=>zaya_db_sup,
+    start=>{zaya_db_sup,start_link,[]},
+    restart=>permanent,
+    shutdown=>?env(stop_timeout, ?DEFAULT_STOP_TIMEOUT),
+    type=>supervisor,
+    modules=>[zaya_db_sup]
   },
 
   SchemaServer=#{
@@ -54,6 +63,7 @@ init([]) ->
   {ok, {Supervisor, [
     SubscriptionsServer,
     LockServer,
+    DBSup,
     SchemaServer
   ]}}.
 
