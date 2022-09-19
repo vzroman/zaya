@@ -386,21 +386,31 @@
 
 -define(NODE_DOWN(N),
   begin
+    [ ?SCHEMA_WRITE({db,_@DB,'@nodes@'}, ?schemaRead({db,_@DB,'@nodes@'})--[N] ) || _@DB <- ?nodeDBs(N)],
     ?SCHEMA_WRITE({node,N},'@down@'),
     ?SCHEMA_NOTIFY({'@nodeDown@',N})
   end
 ).
 
 -define(ADD_DB(DB,M),
-  ?SCHEMA_WRITE({db,DB,'@module@'},M)
+  begin
+    ?SCHEMA_WRITE({db,DB,'@module@'},M),
+    ?SCHEMA_WRITE({db,DB,'@nodes@'}, [] )
+  end
 ).
 
--define(OPEN_DB(DB,Ref),
-    ?SCHEMA_WRITE({db,DB,'@ref@'},Ref)
+-define(OPEN_DB(DB,Node,Ref),
+  begin
+    ?SCHEMA_WRITE({db,DB,'@ref@',Node},Ref),
+    ?SCHEMA_WRITE({db,DB,'@nodes@'}, (?schemaRead({db,DB,'@nodes@'})--[N])++[N] )
+  end
 ).
 
--define(CLOSE_DB(DB),
-  ?SCHEMA_DELETE({db,DB,'@ref@'})
+-define(CLOSE_DB(DB,Node),
+  begin
+    ?SCHEMA_WRITE({db,DB,'@nodes@'}, ?schemaRead({db,DB,'@nodes@'})--[N] ),
+    ?SCHEMA_DELETE({db,DB,'@ref@',Node})
+  end
 ).
 
 -define(ADD_DB_COPY(DB,N,Ps),
@@ -413,17 +423,13 @@
 
 -define(REMOVE_DB(DB),
   begin
-    [?REMOVE_DB_COPY(DB,_@N) || _@N <- ?dbAllNodes(DB) ],
-    ?CLOSE_DB(DB),
-    ?SCHEMA_DELETE({db,DB,'@module@'})
+    ?SCHEMA_DELETE({db,DB,'@module@'}),
+    ?SCHEMA_DELETE({db,DB,'@nodes@'})
   end
 ).
 
 -define(REMOVE_NODE(N),
-  begin
-    [ ?REMOVE_DB_COPY(_@DB,N) || _@DB <-?nodeDBs(N) ],
-    ?SCHEMA_DELETE({node,N})
-  end
+  ?SCHEMA_DELETE({node,N})
 ).
 
 % TODO:

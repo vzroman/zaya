@@ -21,7 +21,7 @@
 %%=================================================================
 -export([
   add_db/2,
-  open_db/2,
+  open_db/1,
   close_db/1,
   remove_db/1,
 
@@ -55,8 +55,8 @@ remove_node( Node )->
 add_db(DB,Module)->
   gen_server:call(?MODULE, {add_db, DB, Module}, ?infinity).
 
-open_db(DB,Ref)->
-  gen_server:call(?MODULE, {open_db, DB, Ref}, ?infinity).
+open_db(DB)->
+  gen_server:call(?MODULE, {open_db, DB}, ?infinity).
 
 close_db(DB)->
   gen_server:call(?MODULE, {close_db, DB}, ?infinity).
@@ -159,10 +159,10 @@ handle_call({add_db, DB, Module}, From, State) ->
 
   {noreply,State};
 
-handle_call({open_db, DB, Ref}, From, State) ->
+handle_call({open_db, DB, Node, Ref}, From, State) ->
 
   try
-    ?OPEN_DB(DB,Ref),
+    ?OPEN_DB(DB,Node,Ref),
     gen_server:reply(From,ok),
     ?LOGINFO("~p db opened, ref ~p",[DB, Ref])
   catch
@@ -173,10 +173,10 @@ handle_call({open_db, DB, Ref}, From, State) ->
 
   {noreply,State};
 
-handle_call({close_db, DB}, From, State) ->
+handle_call({close_db, DB, Node}, From, State) ->
 
   try
-    ?CLOSE_DB(DB),
+    ?CLOSE_DB(DB, Node),
     gen_server:reply(From,ok),
     ?LOGINFO("~p db closed",[DB])
   catch

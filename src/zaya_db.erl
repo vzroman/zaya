@@ -236,16 +236,24 @@ do_create(DB, Module, NodesParams)->
         Params = ?params(InParams),
         epipe:do([
           fun(_) -> Module:create( Params ) end,
-          fun(_)-> Module:open( Params ) end,
-          fun( Ref )-> zaya_schema_srv:open_db(DB,Ref) end,
           fun(_)->
-            ecall:cast_all(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
+            ecall:call_all_wait(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
             {ok, created}
           end
         ],?undefined)
     end
   ], ?undefined ).
 
+open(DB)->
+
+  case ?dbModule( DB ) of
+    ?undefined->
+      throw( db_not_exists );
+    _->
+      ok
+  end,
+
+  ecall:call_all_wait( ?dbAllNodes(DB), zaya_schema_srv, open_db, [DB] ).
 
 open(DB, Module, Params )->
   try
@@ -275,7 +283,7 @@ remove( DB )->
       ok
   end,
 
-  {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, ?dbReadyNodes(DB), _Timeout = ?infinity ),
+  {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, _Timeout = ?infinity, ?dbReadyNodes(DB) ),
   try ecall:call_all_wait(?readyNodes, ?MODULE, do_remove, [DB] )
   after
     Unlock()
