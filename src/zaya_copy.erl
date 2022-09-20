@@ -40,7 +40,7 @@ fold(#source{module = Module,ref = SourceRef } , OnBatch, InAcc)->
     on_batch = OnBatch
   },
 
-  case try Module:fold(SourceRef, fun iterator/2, Acc0)
+  case try Module:foldl(SourceRef,#{}, fun iterator/2, Acc0)
   catch
    _:{stop,Stop}-> Stop;
    _:{final,Final}->{final,Final}
@@ -51,28 +51,26 @@ fold(#source{module = Module,ref = SourceRef } , OnBatch, InAcc)->
     {final,FinalAcc}-> FinalAcc
   end.
 %---------------------------------------------------
-iterator({K,V},#acc{
-  source_ref = #source{module = Module},
+iterator(Record,#acc{
   batch_size = BatchSize,
   batch = Batch,
   size = Size0
 } = Acc)
   when Size0 < BatchSize->
 
-  {Action,Size} = Module:action({K,V}),
-  Acc#acc{batch = [Action|Batch], size = Size0 + Size};
+  Size = size(term_to_binary( Record )),
+  Acc#acc{batch = [Record|Batch], size = Size0 + Size};
 
 % Batch is ready
-iterator({K,V},#acc{
-  source_ref = #source{module = Module},
+iterator(Record,#acc{
   batch = Batch,
   on_batch = OnBatch,
   size = Size0,
   acc = InAcc0
 } = Acc) ->
 
-  {Action,Size} = Module:action({K,V}),
-  Acc#acc{batch = [Action], acc =OnBatch(Batch, Size0, InAcc0), size = Size}.
+  Size = size(term_to_binary( Record )),
+  Acc#acc{batch = [Record], acc =OnBatch(Batch, Size0, InAcc0), size = Size}.
 
 %%=================================================================
 %%	API
@@ -208,16 +206,15 @@ receive_loop(#r_acc{
       % Dump batch
       [TailKey|_] =
         [ begin
-            Batch = binary_to_term( BatchBin ),
-            BTailKey = Module:get_key( hd(Batch) ),
+            [{BTailKey,_}|_] = Batch = binary_to_term( BatchBin ),
             ?LOGINFO("~p write batch size ~s, length ~p, last key ~p",[
               Log,
               ?PRETTY_SIZE(size( BatchBin )),
               ?PRETTY_COUNT(length(Batch)),
-              Module:decode_key( BTailKey )
+              BTailKey
             ]),
 
-            Module:write_batch(Batch, CopyRef),
+            Module:write(CopyRef, Batch),
             % Return batch tail key
             BTailKey
           end || BatchBin <- BatchList ],

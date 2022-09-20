@@ -87,40 +87,54 @@ not_available( F )->
 ).
 
 %------------entry points------------------------------------------
--define(REF(DB),
+-define(read(DB, Args),
   case DB of
     _ when is_atom( DB )->
-      {db, ?dbRef( DB, node() ), ?dbModule( DB ) };
+      _@Ref = ?dbRef( DB, node() ),
+      if
+        _@Ref =:= ?undefined->
+          ?REMOTE_CALL( ?dbSourceNodes(DB), call_one, {call,DB}, Args );
+        true->
+          _@M = ?dbModule(DB),
+          ?LOCAL_CALL(_@M, _@Ref, Args)
+      end;
     {call,_@DB}->
-      {call, ?dbRef( _@DB, node() ), ?dbModule(_@DB) }
-  end
-).
-
--define(read(DB, Args),
-  case ?REF(DB) of
-    {db, _@Ref,_@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
-      ?LOCAL_CALL( _@Mod, _@Ref, Args);
-    {call, _@Ref, _@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
-      ?LOCAL_CALL( _@Mod, _@Ref, Args);
-    {db, _, _@Mod} when _@Mod =/= ?undefined->
-      ?REMOTE_CALL( ?dbSourceNodes(DB), call_one, {call,DB}, Args );
+      _@M = ?dbModule(_@DB),
+      _@Ref = ?dbRef(_@DB,node()),
+      ?LOCAL_CALL( _@M, _@Ref, Args );
     _->
       ?NOT_AVAILABLE
   end
 ).
 
 -define(write(DB, Args),
-  case ?REF(DB) of
-    {db, _@Ref,_@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
-      case ?LOCAL_CALL(_@Mod,_@Ref, Args) of
+  case DB of
+    _ when is_atom( DB ) ->
+      _@Ref = ?dbRef( DB, node() ),
+      if
+        _@Ref =:= ?undefined->
+          ?REMOTE_CALL( ?dbSourceNodes(DB), call_any, {call,DB}, Args );
+        true->
+          _@M = ?dbModule( DB ),
+          case ?LOCAL_CALL(_@M,_@Ref, Args) of
+            ?not_available->
+              ?REMOTE_CALL( ?dbSourceNodes(DB)--[node()], call_any, {call,DB}, Args );
+            _@Res->
+              ?REMOTE_CALL( ?dbSourceNodes(DB)--[node()], cast_all, {call,DB}, Args ),
+              esubscribe:notify( DB, {?FUNCTION_NAME,Args} ),
+              _@Res
+          end
+      end;
+    {call, _@DB}->
+      _@M = ?dbModule(_@DB),
+      _@Ref = ?dbRef(_@DB,node()),
+      case ?LOCAL_CALL( _@M, _@Ref, Args) of
         ?not_available->
-          ?REMOTE_CALL( ?dbSourceNodes(DB)--[node()], call_any, {call,DB}, Args );
+          ?not_available;
         _@Res->
-          ?REMOTE_CALL( ?dbSourceNodes(DB)--[node()], cast_all, {call,DB}, Args ),
+          esubscribe:notify( _@DB, {?FUNCTION_NAME,Args} ),
           _@Res
       end;
-    {call, _@Ref,_@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
-      ?LOCAL_CALL( _@Mod, _@Ref, Args);
     _->
       ?NOT_AVAILABLE
   end
