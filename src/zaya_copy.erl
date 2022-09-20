@@ -416,33 +416,43 @@ roll_live_updates(#live{ source = Source, module = Module, copy_ref = CopyRef, l
   % because the next batch may not contain the update yet
   % and so will overwrite came live update.
   % Timeout 0 because we must to receive the next remote batch as soon as possible
-
-  Actions =
-    [ Module:live_action(Action) || {Action,_Node,_Actor} <- esubscribe:lookup( Source )],
-  ?LOGINFO("~p live updates count ~p",[
-    Log,
-    ?PRETTY_COUNT(length(Actions))
-  ]),
-
-  % Put them into the live ets to sort them and also overwrite old updates to avoid excessive
-  % writes to the copy
-  true = ets:insert(LiveEts, Actions),
+  get_live_actions( esubscribe:lookup( Source ), LiveEts),
+  ?LOGINFO("~p live updates",[Log]),
 
   % Take out the actions that are in the copy range already
-  Head = take_head(ets:first(LiveEts), LiveEts, TailKey),
-  ?LOGINFO("~p actions to add to the copy ~p, stockpiled ~p",[
+  {Write,Delete} = take_head(ets:first(LiveEts), LiveEts, TailKey, {[],[]}),
+  ?LOGINFO("~p actions to write to the copy ~p, delete ~p, stockpiled ~p",[
     Log,
-    ?PRETTY_COUNT(length(Head)),
+    ?PRETTY_COUNT(length(Write)),
+    ?PRETTY_COUNT(length(Delete)),
     ?PRETTY_COUNT(ets:info(LiveEts,size))
   ]),
 
-  Module:write_batch(Head, CopyRef).
+  Module:delete(CopyRef, Delete),
+  Module:write(CopyRef, Write).
 
-take_head(K, Live, TailKey ) when K =/= '$end_of_table', K =< TailKey->
-  [{_,Action}] = ets:take(Live, K),
-  [Action| take_head(ets:next(Live,K), Live, TailKey)];
-take_head(_K, _Live, _TailKey)->
-  [].
+get_live_actions([{{write,KVs},_Node,_Actor}|Rest], LiveEts)->
+  ets:insert(LiveEts,[{K,{write,V}} || {K,V} <- KVs ]),
+  get_live_actions( Rest, LiveEts);
+get_live_actions([{{delete,Keys},_Node,_Actor}|Rest], LiveEts)->
+  ets:insert(LiveEts,[{K,delete} || K <- Keys ]),
+  get_live_actions( Rest, LiveEts);
+get_live_actions([{_Other,_Node,_Actor}|Rest], LiveEts)->
+  get_live_actions( Rest, LiveEts);
+get_live_actions([],_LiveEts)->
+  ok.
+
+take_head(K, Live, TailKey, {Write,Delete} ) when K =/= '$end_of_table', K =< TailKey->
+  case ets:take(Live, K) of
+    [{K,{write,V}}]->
+      take_head( ets:next(Live,K), Live, TailKey, {[{K,V}|Write],Delete});
+    [{K,delete}]->
+      take_head( ets:next(Live,K), Live, TailKey, {Write,[K|Delete]});
+    _->
+      take_head( ets:next(Live,K), Live, TailKey, {Write,Delete})
+  end;
+take_head(_K, _Live, _TailKey, Acc)->
+  Acc.
 
 %---------------------------------------------------------------------
 % The remote copy has finished, but there can be live updates
@@ -480,21 +490,15 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
 
   Live#live{taker = Taker}.
 
-roll_tail_updates( #live{ source = Source, module = Module, live_ets = LiveEts, log = Log } )->
+roll_tail_updates( #live{ source = Source, live_ets = LiveEts, log = Log } )->
 
   % Timeout because I have already unsubscribed and it's a finite process
-  Actions =
-    [ Module:live_action(Action) || {Action,_Node,_Actor} <- esubscribe:wait( Source, ?FLUSH_TAIL_TIMEOUT )],
+  get_live_actions(esubscribe:wait( Source, ?FLUSH_TAIL_TIMEOUT ), LiveEts),
 
-  ?LOGINFO("~p giver ~p tail updates count ~p",[
+  ?LOGINFO("~p giver ~p stockpile tail updates",[
     Log,
-    self(),
-    ?PRETTY_COUNT(length(Actions))
-  ]),
-
-  % Put them into the live ets to sort them and also overwrite old updates to avoid excessive
-  % writes to the copy
-  ets:insert(LiveEts, Actions).
+    self()
+  ]).
 
 wait_ready(#live{
   source = Source,
@@ -505,24 +509,18 @@ wait_ready(#live{
 } = Live,_Ref = ?undefined)->
 
   % The copy is not ready yet
-  Actions0 =
-    [ Module:live_action(Action) || {Action,_Node,_Actor} <- esubscribe:wait( Source, ?FLUSH_TAIL_TIMEOUT )],
+  get_live_actions(esubscribe:wait( Source, ?FLUSH_TAIL_TIMEOUT ), LiveEts),
 
-  ?LOGINFO("~p taker ~p tail updates count ~p",[
+  {Write,Delete} = take_all(ets:first(LiveEts),LiveEts,{[],[]}),
+
+  ?LOGINFO("~p taker ~p actions to write to the copy ~p, to delete ~p",[
     Log,
-    self(),
-    ?PRETTY_COUNT(length(Actions0))
+    ?PRETTY_COUNT(length(Write)),
+    ?PRETTY_COUNT(length(Delete))
   ]),
 
-  ets:insert(LiveEts, Actions0),
-  Actions = take_all(ets:first(LiveEts),LiveEts),
-
-  ?LOGINFO("~p taker ~p actions to add to the copy ~p",[
-    Log,
-    ?PRETTY_COUNT(length(Actions))
-  ]),
-
-  Module:write_batch(Actions, CopyRef),
+  Module:delete(CopyRef, Delete),
+  Module:write(CopyRef, Write),
 
   wait_ready(Live, ?dbRef(Source,node()));
 
@@ -539,34 +537,34 @@ wait_ready(#live{
 
   ?LOGINFO("~p ready, taker ~p flush tail subscriptions",[Log,self()]),
 
-  Actions0 =
-    [ Module:live_action(Action) || {Action,_Node,_Actor} <- esubscribe:wait( Source, ?FLUSH_TAIL_TIMEOUT )],
+  get_live_actions(esubscribe:wait( Source, ?FLUSH_TAIL_TIMEOUT ), LiveEts),
 
-  ?LOGINFO("~p taker ~p tail updates count ~p",[
+  {Write,Delete} = take_all(ets:first(LiveEts),LiveEts,{[],[]}),
+
+  ?LOGINFO("~p taker ~p tail actions to write to the copy ~p, to delete ~p",[
     Log,
-    self(),
-    ?PRETTY_COUNT(length(Actions0))
+    ?PRETTY_COUNT(length(Write)),
+    ?PRETTY_COUNT(length(Delete))
   ]),
 
-  ets:insert(LiveEts, Actions0),
-  Actions = take_all(ets:first(LiveEts),LiveEts),
-
-  ?LOGINFO("~p taker ~p tail actions to add to the copy ~p",[
-    Log,
-    ?PRETTY_COUNT(length(Actions))
-  ]),
-
-  Module:write_batch(Actions, CopyRef),
+  Module:delete(CopyRef, Delete),
+  Module:write(CopyRef, Write),
 
   ets:delete( LiveEts ),
 
   ?LOGINFO("~p live copy finish",[Log]).
 
-take_all(K, Live ) when K =/= '$end_of_table'->
-  [{_,Action}] = ets:take(Live, K),
-  [Action| take_all(ets:next(Live,K), Live)];
-take_all(_K, _Live)->
-  [].
+take_all(K, Live, {Write,Delete} ) when K =/= '$end_of_table'->
+  case ets:take(Live, K) of
+    [{K,{write,V}}]->
+      take_all( ets:next(Live,K), Live, {[{K,V}|Write],Delete});
+    [{K,delete}]->
+      take_all( ets:next(Live,K), Live, {Write,[K|Delete]});
+    _->
+      take_all( ets:next(Live,K), Live, {Write,Delete})
+  end;
+take_all(_K, _Live, Acc)->
+  Acc.
 
 %---------------------------------------------------------------------
 % LOCAL COPY DB COPY TO DB
@@ -586,6 +584,7 @@ local_copy( Source, Target, Module, Options)->
         ?PRETTY_SIZE(Size),
         ?PRETTY_COUNT(length(Batch))
       ]),
+      % TODO, Roll over live updates
       Module:write_batch(Batch, TargetRef)
     end,
 
