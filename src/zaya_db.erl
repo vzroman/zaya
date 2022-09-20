@@ -279,7 +279,7 @@ remove( DB )->
       throw({not_closed, Nodes})
   end,
 
-  {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, _Timeout = ?infinity, ?readyNodes(DB) ),
+  {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, _Timeout = ?infinity, ?readyNodes ),
   try ecall:call_all_wait(?readyNodes, ?MODULE, do_remove, [DB] )
   after
     Unlock()

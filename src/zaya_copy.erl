@@ -281,7 +281,7 @@ copy_request(#{
     end
   end),
 
-  SourceRef = ?dbRef(Source),
+  SourceRef = ?dbRef(Source,node()),
   InitHash = crypto:hash_update(crypto:hash_init(sha256),<<>>),
 
   InitState = #s_acc{
@@ -464,7 +464,7 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
       receive {'ETS-TRANSFER',LiveEts,Giver,start}->ok end,
 
       ?LOGINFO("~p live updates has taken by ~p from ~p",[Log,self(),Giver]),
-      wait_ready(Live#live{ giver = Giver }, ?dbRef( Source ))
+      wait_ready(Live#live{ giver = Giver }, ?dbRef( Source,node() ))
 
     end),
 
@@ -527,7 +527,7 @@ wait_ready(#live{
 
   Module:write_batch(Actions, CopyRef),
 
-  wait_ready(Live, ?dbRef(Source));
+  wait_ready(Live, ?dbRef(Source,node()));
 
 wait_ready(#live{
   source = Source,
@@ -577,8 +577,8 @@ take_all(_K, _Live)->
 local_copy( Source, Target, Module, Options)->
 
   Log = ?LOG_LOCAL(Source,Target),
-  SourceRef = ?dbRef(Source),
-  TargetRef = ?dbRef(Target),
+  SourceRef = ?dbRef(Source,node()),
+  TargetRef = ?dbRef(Target,node()),
 
   Live = prepare_live_copy( Source, Module, node(), TargetRef, Log, Options ),
 

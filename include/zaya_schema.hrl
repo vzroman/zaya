@@ -294,7 +294,15 @@
 ).
 -define(dbSource(DB),
 
-  case ?dbRef(DB) of ?undefined-> ?random( ?dbSourceNodes(DB) ); _-> node() end
+  case
+    ?dbRef(DB,node()) of
+    ?undefined->
+      case ?dbSourceNodes(DB) of
+        [] -> ?undefined;
+        _@Ns-> ?random( _@Ns )
+      end;
+    _-> node()
+  end
 
 ).
 
@@ -403,17 +411,17 @@
   end
 ).
 
--define(OPEN_DB(DB,Node,Ref),
+-define(OPEN_DB(DB,N,Ref),
   begin
-    ?SCHEMA_WRITE({db,DB,'@ref@',Node},Ref),
+    ?SCHEMA_WRITE({db,DB,'@ref@',N},Ref),
     ?SCHEMA_WRITE({db,DB,'@nodes@'}, (?schemaRead({db,DB,'@nodes@'})--[N])++[N] )
   end
 ).
 
--define(CLOSE_DB(DB,Node),
+-define(CLOSE_DB(DB,N),
   begin
     ?SCHEMA_WRITE({db,DB,'@nodes@'}, ?schemaRead({db,DB,'@nodes@'})--[N] ),
-    ?SCHEMA_DELETE({db,DB,'@ref@',Node})
+    ?SCHEMA_DELETE({db,DB,'@ref@',N})
   end
 ).
 
