@@ -11,13 +11,16 @@
 %%=================================================================
 -export([
   open/1,
-  close/1
+  close/1,
+
+  add_copy/2,
+  recover/1
 ]).
 %%=================================================================
 %%	OTP API
 %%=================================================================
 -export([
-  start_link/1,
+  start_link/2,
   init/1,
   handle_call/3,
   handle_cast/2,
@@ -30,55 +33,81 @@
 %%	API
 %%=================================================================
 open( DB )->
-  case supervisor:start_child(zaya_db_sup,[ DB ]) of
-    {ok, PID} when is_pid( PID )->
+  case supervisor:start_child(zaya_db_sup,[DB, open]) of
+    {ok, _PID}->
       ok;
-    {ok, PID, _Info} when is_pid(PID)->
-      ok;
-    {ok, undefined}->
-      error;
-    {ok, undefined, _Info}->
-      error;
-    {error,{already_started,PID}}->
-      ok;
-    {error,already_present}->
-      ok;
-    {error,Error}->
-      ?LOGERROR("~p unable to start database server, error ~p",[DB,Error]),
-      error
+    Error->
+      Error
   end.
 
 close( DB )->
   case whereis( DB ) of
     PID when is_pid( PID )->
-      supervisor:terminate_child(zaya_db_sup,PID);
+      supervisor:terminate_child(zaya_db_sup, PID);
     _->
       {error, not_registered}
+  end.
+
+add_copy( DB, Params )->
+  case supervisor:start_child(zaya_db_sup,[DB, {add_copy,Params}]) of
+    {ok, PID} when is_pid( PID )->
+      ok;
+    Error->
+      Error
+  end.
+
+recover( DB )->
+  case supervisor:start_child(zaya_db_sup,[DB, recover]) of
+    {ok, PID} when is_pid( PID )->
+      ok;
+    Error->
+      Error
   end.
 
 %%=================================================================
 %%	OTP
 %%=================================================================
-start_link( DB )->
-  gen_server:start_link({local,?MODULE},?MODULE, [ DB ], []).
+start_link( DB, Action )->
+  gen_server:start_link({local,?MODULE},?MODULE, [ DB, Action ], []).
 
 -record(state,{db, module, params, ref, register}).
-init([ DB ])->
+init([DB, Action])->
 
   process_flag(trap_exit,true),
 
   ?LOGINFO("~p starting database server ~p",[DB ,self()]),
 
   Module = ?dbModule( DB ),
-  Params = ?dbNodeParams(DB,node()),
 
-  Ref = Module:open( Params ),
+  Ref = do_init(Action, DB, Module),
 
   register(DB, self()),
 
-  timer:send_after(1, register ),
+  timer:send_after(0, register ),
 
-  {ok,#state{db = DB, module = Module, params = Params, ref = Ref, register = ?readyNodes }}.
+  {ok,#state{db = DB, module = Module, ref = Ref, register = ?readyNodes }}.
+
+do_init(open, DB, Module)->
+  Params = ?dbNodeParams(DB,node()),
+  Module:open( Params );
+
+do_init({add_copy, Params}, DB, Module)->
+  Ref = zaya_copy:copy( DB, Module, Params, #{ live => true}),
+  case zaya_schema_srv:add_db_copy( DB, node(),Params ) of
+    ok->
+      ecall:cast_all( ?readyNodes, zaya_schema_srv, add_db_copy, [DB, node(), Params] ),
+      Ref;
+    SchemaError->
+      Module:close( Ref ),
+      Module:remove( Params ),
+      throw( SchemaError )
+  end;
+
+do_init(recover, DB, Module)->
+  % TODO. Hash tree
+  Params = ?dbNodeParams(DB,node()),
+  Module:remove( Params ),
+  do_init( {add_copy, Params}, DB, Module ).
 
 handle_call(Request, From, #state{db = DB} = State) ->
   ?LOGWARNING("~p database server got an unexpected call resquest ~p from ~p",[DB, Request,From]),

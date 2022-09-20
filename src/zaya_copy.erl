@@ -10,7 +10,6 @@
 %%=================================================================
 -export([
   copy/3, copy/4,
-  rollback_copy/3,
   local_copy/4
 ]).
 
@@ -79,19 +78,19 @@ iterator({K,V},#acc{
 %%	API
 %%=================================================================
 %------------------types-------------------------------------------
--record(copy,{ send_node, source, copy_ref, module, options, attempts, log,error }).
+-record(copy,{ send_node, source, params, copy_ref, module, options, attempts, log,error }).
 -record(r_acc,{sender,module,source,copy_ref,live,tail_key,hash,log}).
 -record(live,{ source, module, send_node, copy_ref, live_ets, giver, taker, log }).
 
-copy(Source, CopyRef, Module )->
-  copy(Source, CopyRef, Module, #{}).
-copy( Source, CopyRef, Module, Options0 )->
+copy(Source, Module, Params )->
+  copy(Source, Module, Params, #{}).
+copy( Source, Module, Params, Options0 )->
 
   Options = #{attempts:=Attempts} = ?OPTIONS(Options0),
   Copy = #copy{
     send_node = ?dbSource( Source ),
     source = Source,
-    copy_ref = CopyRef,
+    params = Params,
     module = Module,
     options = Options,
     attempts = Attempts,
@@ -114,7 +113,7 @@ try_copy(#copy{
   send_node = SendNode,
   source = Source,
   module = Module,
-  copy_ref = CopyRef,
+  params = Params,
   attempts = Attempts,
   options = Options,
   error = undefined
@@ -122,6 +121,9 @@ try_copy(#copy{
 
   Log = ?LOG_RECEIVE(SendNode,Source),
   ?LOGINFO("~p attempt ~p",[Log, Attempts - Attempts +1]),
+
+  ok = Module:create( Params ),
+  CopyRef = Module:open( Params ),
 
   Live = prepare_live_copy( Source, Module, SendNode, CopyRef, Log, Options ),
 
@@ -154,27 +156,22 @@ try_copy(#copy{
 
         exit(Sender,rollback),
         drop_live_copy( Live ),
-        Module:rollback_copy( CopyRef ),
-
-        try_copy(State#copy{attempts = Attempts - 1, error ={Error,Stack} })
+        Module:close( CopyRef ),
+        Module:remove( Params ),
+        try_copy(State#copy{send_node = ?dbSource(Source), attempts = Attempts - 1, error ={Error,Stack} })
     end,
 
-  LiveTail = finish_live_copy( Live ),
+  finish_live_copy( Live ),
 
   ?LOGINFO("~p finish hash ~s", [Log, ?PRETTY_HASH( FinalHash )]),
 
-  {FinalHash, LiveTail};
+  CopyRef;
 
 try_copy(#copy{source = Source,error = {Error,Stack}})->
   ?LOGERROR("~p copy failed, no attempts left, last error ~p, stack ~p",[
     Source, Error, Stack
   ]),
   throw( Error ).
-
-rollback_copy( CopyRef, Module, #live{ taker = Taker, log = Log } )->
-  ?LOGINFO("~p rollback",[Log]),
-  Taker ! { rollback, self },
-  Module:rollback_copy( CopyRef ).
 
 %----------------------Receiver---------------------------------------
 receive_loop(#r_acc{
@@ -405,9 +402,7 @@ finish_live_copy( Live )->
 
 drop_live_copy(#live{live_ets = false})->
   ok;
-drop_live_copy(#live{ source = Source, send_node = SendNode, live_ets = LiveEts, taker = Taker })->
-
-  Taker ! {rollback_copy, self},
+drop_live_copy(#live{ source = Source, send_node = SendNode, live_ets = LiveEts})->
 
   esubscribe:unsubscribe(Source,[SendNode], self()),
   % Try to drop tail updates
@@ -509,15 +504,8 @@ wait_ready(#live{
   module=Module,
   copy_ref = CopyRef,
   live_ets = LiveEts,
-  giver = Giver,
   log = Log
 } = Live,_Ref = ?undefined)->
-
-  % Check for rollback
-  receive {rollback,Giver} ->
-    ?LOGINFO("~p taker ~p rollback",[Log,self()]),
-    exit(normal)
-  after 0-> keep_waiting end,
 
   % The copy is not ready yet
   Actions0 =

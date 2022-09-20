@@ -49,15 +49,9 @@
   close/1, close/2,
   remove/1, do_remove/1,
 
-  add_copy/3, do_add_copy/2,
-  remove_copy/2, do_remove_copy/1
-]).
-
-%%=================================================================
-%%	RECOVERY API
-%%=================================================================
--export([
-  try_recover/1
+  add_copy/3,
+  remove_copy/2, do_remove_copy/1,
+  recover/1
 ]).
 
 %%=================================================================
@@ -96,9 +90,9 @@ not_available( F )->
 -define(REF(DB),
   case DB of
     _ when is_atom( DB )->
-      {db, ?dbRef( DB ), ?dbModule( DB ) };
+      {db, ?dbRef( DB, node() ), ?dbModule( DB ) };
     {call,_@DB}->
-      {call, ?dbRef( _@DB ), ?dbModule(_@DB) }
+      {call, ?dbRef( _@DB, node() ), ?dbModule(_@DB) }
   end
 ).
 
@@ -335,24 +329,7 @@ add_copy(DB,Node,Params)->
       ok
   end,
 
-  rpc:call( Node, ?MODULE, do_add_copy, [ DB, Params ]).
-
-do_add_copy( DB, InParams )->
-
-  Params = ?params( InParams ),
-
-  Module = ?dbModule(DB),
-  epipe:do([
-    fun(_)-> Module:create( Params ) end,
-    fun(_)-> Module:open( Params ) end,
-    fun( Ref )->
-      epipe:do([
-        fun(_)-> zaya_copy:copy(DB, Ref, Module, #{ live=>true }) end,
-        fun(_)-> zaya_db_srv:open(DB) end
-      ],?undefined)
-    end,
-    fun(_)-> ecall:call_any(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]) end
-  ],?undefined).
+  rpc:call( Node, zaya_db_srv, add_copy, [ DB, Params ]).
 
 remove_copy(DB, Node)->
 
@@ -384,39 +361,35 @@ remove_copy(DB, Node)->
       ok
   end,
 
-  case ?dbReadyNodes(DB) of
+  case ?dbRef( DB, Node ) of
+    ?undefined -> ok;
+    _->
+      throw(db_not_closed)
+  end,
+
+  case ?dbAllNodes(DB) of
     [Node]->
-      throw( last_ready_copy );
-    []->
-      throw( db_not_ready );
+      throw( last_copy );
     _->
       ok
   end,
 
   {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, [Node], _Timeout = ?infinity ),
-  try ecall:call_one([Node], ?MODULE, do_remove_copy, [ DB ])
+  try rpc:call(Node, ?MODULE, do_remove_copy, [ DB ])
   after
     Unlock()
   end.
 
 do_remove_copy( DB )->
   Module = ?dbModule( DB ),
-  Ref = ?dbRef(DB),
   Params = ?dbNodeParams(DB,node()),
   epipe:do([
     fun(_) -> ecall:call_all(?readyNodes, zaya_schema_srv, remove_db_copy, [DB, node()] ) end,
-    fun
-      (_) when Ref =:= ?undefined-> ok;
-      (_)-> Module:close( Ref )
-    end,
     fun(_)-> Module:remove( Params ) end
   ],?undefined).
 
 
-%%=================================================================
-%%	SCHEMA SERVER
-%%=================================================================
-try_recover(DB)->
+recover( DB )->
   Params = ?dbNodeParams(DB,node()),
   Module = ?dbModule( DB ),
   Ref = Module:open(Params),
