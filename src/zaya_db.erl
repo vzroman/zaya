@@ -45,8 +45,8 @@
 %%=================================================================
 -export([
   create/3, do_create/3,
-  open/3,
-  close/3,
+  open/1, open/2,
+  close/1, close/2,
   remove/1, do_remove/1,
 
   add_copy/3, do_add_copy/2,
@@ -65,7 +65,7 @@
 %%=================================================================
 not_available( F )->
   if
-    F=:=write->
+    F=:=write; F=:=update->
       ?not_available;
     F=:=next;F=:=prev;F=:=first;F=:=last->
       ?last;
@@ -109,7 +109,7 @@ not_available( F )->
     {call, _@Ref, _@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
       ?LOCAL_CALL( _@Mod, _@Ref, Args);
     {db, _, _@Mod} when _@Mod =/= ?undefined->
-      ?REMOTE_CALL( ?dbReadyNodes(DB), call_one, {call,DB}, Args );
+      ?REMOTE_CALL( ?dbSourceNodes(DB), call_one, {call,DB}, Args );
     _->
       ?NOT_AVAILABLE
   end
@@ -118,7 +118,13 @@ not_available( F )->
 -define(write(DB, Args),
   case ?REF(DB) of
     {db, _@Ref,_@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
-      ?REMOTE_CALL( ?dbReadyNodes(DB), call_any, {call,DB}, Args );
+      case ?LOCAL_CALL(_@Mod,_@Ref, Args) of
+        ?not_available->
+          ?REMOTE_CALL( ?dbSourceNodes(DB)--[node()], call_any, {call,DB}, Args );
+        _@Res->
+          ?REMOTE_CALL( ?dbSourceNodes(DB)--[node()], cast_all, {call,DB}, Args ),
+          _@Res
+      end;
     {call, _@Ref,_@Mod} when _@Ref =/= ?undefined, _@Mod =/= ?undefined ->
       ?LOCAL_CALL( _@Mod, _@Ref, Args);
     _->
@@ -244,7 +250,7 @@ do_create(DB, Module, NodesParams)->
     end
   ], ?undefined ).
 
-open(DB)->
+open( DB )->
 
   case ?dbModule( DB ) of
     ?undefined->
@@ -253,26 +259,16 @@ open(DB)->
       ok
   end,
 
-  ecall:call_all_wait( ?dbAllNodes(DB), zaya_schema_srv, open_db, [DB] ).
+  ecall:call_all_wait( ?dbReadyNodes(DB), zaya_db_srv, open, [DB] ).
 
-open(DB, Module, Params )->
-  try
-    Ref=Module:open( Params ),
-    {ok, Ref}
-  catch
-    _:E:S->
-      ?LOGERROR("~p open with params ~p module ~p error ~p stack ~p",[DB,Params,Module,E,S]),
-      {error, {module_error,E}}
-  end.
+open( DB, Node )->
+  rpc:call( Node, zaya_db_srv, open, [DB]).
 
-close(DB, Module, Ref )->
-  try
-    Module:close( Ref )
-  catch
-    _:E:S->
-      ?LOGERROR("~p db close module error ~p stack ~p",[DB,E,S]),
-      {error,{module_error,E}}
-  end.
+close(DB)->
+  ecall:call_all_wait( ?dbReadyNodes(DB), zaya_db_srv, close, [DB] ).
+
+close(DB, Node )->
+  rpc:call( Node, zaya_db_srv, close, [DB]).
 
 remove( DB )->
 
@@ -283,7 +279,13 @@ remove( DB )->
       ok
   end,
 
-  {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, _Timeout = ?infinity, ?dbReadyNodes(DB) ),
+  case ?dbSourceNodes( DB ) of
+    []-> ok;
+    Nodes->
+      throw({not_closed, Nodes})
+  end,
+
+  {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, _Timeout = ?infinity, ?readyNodes(DB) ),
   try ecall:call_all_wait(?readyNodes, ?MODULE, do_remove, [DB] )
   after
     Unlock()
@@ -291,14 +293,9 @@ remove( DB )->
 
 do_remove( DB )->
   Module = ?dbModule( DB ),
-  Ref = ?dbRef(DB),
   Params = ?dbNodeParams(DB,node()),
   epipe:do([
     fun(_) -> zaya_schema_srv:remove_db( DB ) end,
-    fun
-      (_) when Ref =:= ?undefined-> ok;
-      (_)-> Module:close( Ref )
-    end,
     fun
       (_) when Params =:= ?undefined->ok;
       (_)-> Module:remove( Params )
@@ -319,8 +316,8 @@ add_copy(DB,Node,Params)->
     _->
       ok
   end,
-  case ?dbReadyNodes(DB) of
-    []->
+  case ?isDBReady(DB) of
+    false->
       throw(db_not_ready);
     _->
       ok
@@ -338,7 +335,7 @@ add_copy(DB,Node,Params)->
       ok
   end,
 
-  ecall:call_one([Node], ?MODULE, do_add_copy, [ DB, Params ]).
+  rpc:call( Node, ?MODULE, do_add_copy, [ DB, Params ]).
 
 do_add_copy( DB, InParams )->
 
@@ -351,7 +348,7 @@ do_add_copy( DB, InParams )->
     fun( Ref )->
       epipe:do([
         fun(_)-> zaya_copy:copy(DB, Ref, Module, #{ live=>true }) end,
-        fun(_)-> zaya_schema_srv:open_db(DB,Ref) end
+        fun(_)-> zaya_db_srv:open(DB) end
       ],?undefined)
     end,
     fun(_)-> ecall:call_any(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]) end

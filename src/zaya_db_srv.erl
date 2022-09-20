@@ -78,7 +78,7 @@ init([ DB ])->
 
   timer:send_after(1, register ),
 
-  {ok,#state{db = DB, module = Module, params = Params, ref = Ref, register = ?allNodes }}.
+  {ok,#state{db = DB, module = Module, params = Params, ref = Ref, register = ?readyNodes }}.
 
 handle_call(Request, From, #state{db = DB} = State) ->
   ?LOGWARNING("~p database server got an unexpected call resquest ~p from ~p",[DB, Request,From]),

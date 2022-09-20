@@ -281,12 +281,22 @@
   ?schemaRead({db,DB,'@module@'})
 
 ).
--define(dbRef(DB),
+-define(dbRef(DB,Node),
 
-  ?schemaRead({db,DB,'@ref@'})
+  ?schemaRead({db,DB,'@ref@',Node})
 
 ).
 
+-define(dbSourceNodes(DB),
+
+  ?schemaRead({db,DB,'@nodes@'})
+
+).
+-define(dbSource(DB),
+
+  case ?dbRef(DB) of ?undefined-> ?random( ?dbSourceNodes(DB) ); _-> node() end
+
+).
 
 -define(dbAllNodes(DB),
 
@@ -349,11 +359,11 @@
 ).
 
 -define(isDBReady(DB),
-  case ?dbReadyNodes(S) of []-> false; _->true end
+  case ?dbSourceNodes(DB) of []-> false; _->true end
 ).
 
 -define(isDBNotReady(DB),
-  case ?dbReadyNodes(DB) of []-> true; _->false end
+  case ?dbSourceNodes(DB) of []-> true; _->false end
 ).
 
 -define(readyDBs,
@@ -363,15 +373,9 @@
 -define(notReadyDBs,
   [_@DB || _@DB <- ?allDBs, ?isDBNotReady(_@DB)]
 ).
+
 -define(localDBs,
   ?nodeDBs(node())
-).
-
--define(isLocalDB(DB),
-  case ?schemaRead( {db,DB,'@node@',node(),'@params@'} ) of ?undefined->false ; _->true end
-).
--define(dbSource(DB),
-  case ?isLocalDB(DB) of true->node(); _->?random( ?dbReadyNodes(DB) ) end
 ).
 
 %=======================================================================================
