@@ -323,7 +323,7 @@ try_load()->
 
 first_start_dialog()->
   ?LOGINFO("clear start"),
-  case yes_or_no("Do you want to attach this node to existing application?") of
+  case yes_or_no("Do you want to attach this node to an existing application?") of
     yes->
       attach_from_node();
     no->
@@ -404,7 +404,9 @@ get_schema_from( Node )->
   end.
 
 recover_by_schema({?schema, Schema}, OldSchema)->
-  OldSchema = ?getSchema,
+
+  % TODO
+
   ?LOGINFO("node recovery by schema ~p\r\n old schema ~p",[Schema,OldSchema]),
   ?SCHEMA_CLEAR,
   ?SCHEMA_LOAD(Schema),
