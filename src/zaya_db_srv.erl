@@ -4,13 +4,15 @@
 -include("zaya.hrl").
 -include("zaya_schema.hrl").
 
--behaviour(gen_server).
+-behaviour(gen_statem).
 
 %%=================================================================
 %%	API
 %%=================================================================
 -export([
   open/1,
+  recover/1,
+  force_load/1,
   close/1,
 
   add_copy/2,
@@ -20,13 +22,12 @@
 %%	OTP API
 %%=================================================================
 -export([
+  callback_mode/0,
   start_link/2,
   init/1,
-  handle_call/3,
-  handle_cast/2,
-  handle_info/2,
-  terminate/2,
-  code_change/3
+  code_change/3,
+  handle_event/4,
+  terminate/3
 ]).
 
 %%=================================================================
@@ -40,13 +41,16 @@ open( DB )->
       Error
   end.
 
-close( DB )->
-  case whereis( DB ) of
-    PID when is_pid( PID )->
-      supervisor:terminate_child(zaya_db_sup, PID);
-    _->
-      {error, not_registered}
+recover( DB )->
+  case supervisor:start_child(zaya_db_sup,[DB, recover]) of
+    {ok, PID} when is_pid( PID )->
+      ok;
+    Error->
+      Error
   end.
+
+force_load( DB )->
+  gen_statem:cast(DB, force_load).
 
 add_copy( DB, Params )->
   case supervisor:start_child(zaya_db_sup,[DB, {add_copy,Params}]) of
@@ -56,21 +60,26 @@ add_copy( DB, Params )->
       Error
   end.
 
-recover( DB )->
-  case supervisor:start_child(zaya_db_sup,[DB, recover]) of
-    {ok, PID} when is_pid( PID )->
-      ok;
-    Error->
-      Error
+close( DB )->
+  case whereis( DB ) of
+    PID when is_pid( PID )->
+      supervisor:terminate_child(zaya_db_sup, PID);
+    _->
+      {error, not_registered}
   end.
 
 %%=================================================================
 %%	OTP
 %%=================================================================
-start_link( DB, Action )->
-  gen_server:start_link({local,?MODULE},?MODULE, [ DB, Action ], []).
+callback_mode() ->
+  [
+    handle_event_function
+  ].
 
--record(state,{db, module, params, ref, register}).
+start_link( DB, Action )->
+  gen_statem:start_link({local,DB},?MODULE, [DB, Action], []).
+
+-record(data,{db, module, params, ref}).
 init([DB, Action])->
 
   process_flag(trap_exit,true),
@@ -79,65 +88,91 @@ init([DB, Action])->
 
   Module = ?dbModule( DB ),
 
-  Ref = do_init(Action, DB, Module),
+  {ok, init, #data{db = DB, module = Module }, [ {state_timeout, 0, Action } ]}.
 
-  register(DB, self()),
-
-  timer:send_after(0, register ),
-
-  {ok,#state{db = DB, module = Module, ref = Ref, register = ?readyNodes }}.
-
-do_init(open, DB, Module)->
+handle_event(state_timeout, open, init, #data{db = DB, module = Module} = Data) ->
   Params = ?dbNodeParams(DB,node()),
-  Module:open( Params );
-
-do_init({add_copy, Params}, DB, Module)->
-  Ref = zaya_copy:copy( DB, Module, Params, #{ live => true}),
-  case zaya_schema_srv:add_db_copy( DB, node(),Params ) of
-    ok->
-      ecall:cast_all( ?readyNodes, zaya_schema_srv, add_db_copy, [DB, node(), Params] ),
-      Ref;
-    SchemaError->
-      Module:close( Ref ),
-      Module:remove( Params ),
-      throw( SchemaError )
+  try
+    Ref = Module:open( Params ),
+    ?LOGINFO("~p database open",[DB]),
+    {next_state, register, Data#data{ ref = Ref }, [ {state_timeout, 0, register } ] }
+  catch
+    _:E->
+      ?LOGERROR("~p open error ~p",[DB,E]),
+      { keep_state_and_data, [ {state_timeout, 5000, open } ] }
   end;
 
-do_init(recover, DB, Module)->
-  % TODO. Hash tree
-  Params = ?dbNodeParams(DB,node()),
-  Module:remove( Params ),
-  do_init( {add_copy, Params}, DB, Module ).
-
-handle_call(Request, From, #state{db = DB} = State) ->
-  ?LOGWARNING("~p database server got an unexpected call resquest ~p from ~p",[DB, Request,From]),
-  {noreply,State}.
-
-handle_cast(Request,#state{db = DB} = State)->
-  ?LOGWARNING("~p database server got an unexpected cast resquest ~p",[DB,Request]),
-  {noreply,State}.
-
-handle_info(register, #state{db = DB, ref = Ref, register = Nodes} = State)->
-
-  case ecall:call_all_wait( Nodes, zaya_schema_srv, open_db, [ DB, node(), Ref ] ) of
-    {_,[]}->
-      ?LOGINFO("~p registered at ~p nodes",[ DB, Nodes ]),
-      {noreply,State};
-    {_, Errors}->
-      ErrNodes = [N || {N,_} <- Errors],
-      ?LOGWARNING("~p registered at ~p nodes, error nodes ~p",[ DB, Nodes -- ErrNodes, Errors ]),
-      timer:send_after(5000, register ),
-      {noreply,State#state{register = ErrNodes}}
+handle_event(state_timeout, {add_copy, Params}, init, #data{db = DB, module = Module} = Data) ->
+  try
+    Ref = zaya_copy:copy( DB, Module, Params, #{ live => true}),
+    {next_state, register_copy, Data#data{ ref = Ref }, [ {state_timeout, 0, {register_copy,Params} } ] }
+  catch
+    _:E->
+      ?LOGERROR("~p copy error ~p",[DB,E]),
+      { keep_state_and_data, [ {state_timeout, 5000, {add_copy, Params} } ] }
   end;
 
-handle_info(Message,#state{db = DB} =State)->
-  ?LOGWARNING("~p database server got an unexpected message ~p",[DB,Message]),
-  {noreply,State}.
+handle_event(state_timeout, recover, init, Data ) ->
+  {next_state, recovery, Data, [ {state_timeout, 0, recover } ] };
 
-terminate(Reason,#state{db = DB, module = Module, ref = Ref})->
+handle_event(state_timeout, {register_copy,Params}, register_copy, #data{db = DB} = Data) ->
+  case ecall:call_all(?readyNodes, zaya_schema_srv, add_db_copy, [DB, node(), Params] ) of
+    {ok,_}->
+      ?LOGINFO("~p copy registered",[DB]),
+      {next_state, register, Data, [ {state_timeout, 0, register } ] };
+    {error,Error}->
+      ?LOGERROR("~p register copy error ~p",[ DB, Error ]),
+      { keep_state_and_data, [ {state_timeout, 5000, {register_copy,Params} } ] }
+  end;
+
+handle_event(state_timeout, register, register, #data{db = DB, ref = Ref} = Data) ->
+
+  {OKs, Errs} = ecall:call_all_wait( ?readyNodes, zaya_schema_srv, open_db, [ DB, node(), Ref ] ),
+  ?LOGINFO("~p registered at ~p nodes, errors at ~p nodes",[ DB, [N || {N,_} <- OKs], [N || {N,_} <- Errs] ]),
+
+  {next_state, ready, Data};
+
+handle_event(state_timeout, recover, recovery, #data{db = DB, module = Module}=Data ) ->
+  case ?dbAvailableNodes(DB) of
+    []->
+      ?LOGERROR("~p database recover error: database is unavailable.\r\n"++
+        "If you sure that the local copy is the latest you can try to load it with:\r\n"++
+        "  zaya:db_force_load(~p, ~p).\r\n" ++
+        "Execute this command from erlang console at any attached node.\r\n"++
+        "WARNING!!! All the data changes made in other nodes coipies will be LOST!",[DB,DB,node()]),
+      { keep_state_and_data, [ {state_timeout, 5000, recover } ] };
+    _->
+      % TODO. Hash tree
+      Params = ?dbNodeParams(DB,node()),
+      try
+        Module:remove( Params ),
+        {next_state, init, Data, [ {state_timeout, 0, {add_copy, Params} } ] }
+      catch
+        _:E->
+          ?LOGERROR("~p remove copy error ~p",[DB,E]),
+          { keep_state_and_data, [ {state_timeout, 5000, recover } ] }
+      end
+  end;
+handle_event(cast, force_load, recovery, #data{db = DB} = Data ) ->
+  ?LOGWARNING("~p FORCE LOAD. ALL THE DATA CHANGES MADE IN OTHER NODES COPIES WILL BE LOST!",[DB]),
+  {next_state, init, Data, [ {state_timeout, 0, open } ] };
+
+handle_event(EventType, EventContent, _AnyState, #data{db = DB}) ->
+  ?LOGWARNING("~p received unexpected event type ~p, content ~p",[
+    DB,
+    EventType, EventContent
+  ]),
+  keep_state_and_data.
+
+terminate(Reason, _AnyState, #data{ db = DB, module = Module, ref = Ref })->
+
   ?LOGWARNING("~p terminating database server reason ~p",[DB,Reason]),
-
-  Module:close( Ref ),
+  if
+    Ref =/= ?undefined->
+      Module:close( Ref );
+    true->
+      ignore
+  end,
 
   ok.
 

@@ -46,6 +46,7 @@
 -export([
   create/3, do_create/3,
   open/1, open/2,
+  force_open/2,
   close/1, close/2,
   remove/1, do_remove/1,
 
@@ -93,7 +94,7 @@ not_available( F )->
       _@Ref = ?dbRef( DB, node() ),
       if
         _@Ref =:= ?undefined->
-          ?REMOTE_CALL( ?dbSourceNodes(DB), call_one, {call,DB}, Args );
+          ?REMOTE_CALL( ?dbAvailableNodes(DB), call_one, {call,DB}, Args );
         true->
           _@M = ?dbModule(DB),
           ?LOCAL_CALL(_@M, _@Ref, Args)
@@ -111,17 +112,17 @@ not_available( F )->
   case DB of
     _ when is_atom( DB ) ->
       _@Ref = ?dbRef( DB, node() ),
+      _@Ns = ?dbAvailableNodes(DB)--[node()],
       if
         _@Ref =:= ?undefined->
-          ?REMOTE_CALL( ?dbSourceNodes(DB), call_any, {call,DB}, Args );
+          ?REMOTE_CALL( _@Ns, call_any, {call,DB}, Args );
         true->
           _@M = ?dbModule( DB ),
           case ?LOCAL_CALL(_@M,_@Ref, Args) of
             ?not_available->
-              ?REMOTE_CALL( ?dbSourceNodes(DB)--[node()], call_any, {call,DB}, Args );
+              ?REMOTE_CALL( _@Ns, call_any, {call,DB}, Args );
             _@Res->
-              ?REMOTE_CALL( ?dbSourceNodes(DB)--[node()], cast_all, {call,DB}, Args ),
-              esubscribe:notify( DB, {?FUNCTION_NAME,Args} ),
+              ?REMOTE_CALL( _@Ns, cast_all, {call,DB}, Args ),
               _@Res
           end
       end;
@@ -272,6 +273,9 @@ open( DB )->
 open( DB, Node )->
   rpc:call( Node, zaya_db_srv, open, [DB]).
 
+force_open( DB, Node )->
+  rpc:call( Node, zaya_db_srv, force_open, [DB]).
+
 close(DB)->
   ecall:call_all_wait( ?dbReadyNodes(DB), zaya_db_srv, close, [DB] ).
 
@@ -287,7 +291,7 @@ remove( DB )->
       ok
   end,
 
-  case ?dbSourceNodes( DB ) of
+  case ?dbAvailableNodes( DB ) of
     []-> ok;
     Nodes->
       throw({not_closed, Nodes})

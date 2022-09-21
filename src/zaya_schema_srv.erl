@@ -13,6 +13,8 @@
 %%	NODES API
 %%=================================================================
 -export([
+  node_up/2,
+  node_down/2,
   remove_node/1
 ]).
 
@@ -45,6 +47,11 @@
 %%=================================================================
 %%	NODES
 %%=================================================================
+node_up( Node, Info )->
+  gen_server:call(?MODULE, {node_up, Node, Info}).
+
+node_down( Node, Info )->
+  gen_server:call(?MODULE, {node_down, Node, Info}).
 
 remove_node( Node )->
   gen_server:call(?MODULE, {remove_node, Node}).
@@ -78,7 +85,7 @@ remove_db_copy( DB, Node )->
 start_link()->
   gen_server:start_link({local,?MODULE},?MODULE, [], []).
 
--record(state,{ nodes }).
+-record(state,{}).
 init([])->
 
   process_flag(trap_exit,true),
@@ -89,17 +96,11 @@ init([])->
   catch
     _:E:S->
       ?LOGERROR("LOAD ERROR! ~p stack ~p\r\n"
-      ++" please check error logs, fix the problem and start again",[E,S]),
+      ++" please check error logs, fix the problem and try to start again",[E,S]),
       timer:sleep( ?infinity )
   end,
 
-  case ecall:call_all(?readyNodes,gen_server,call,[{add_node, ?MODULE, node(), self()}] ) of
-    {ok,_}->
-      ?NODE_UP( node() ),
-      ?LOGINFO("node is ready")
-  end,
-
-  {ok,#state{ nodes = #{} }}.
+  {ok,#state{ }}.
 
 %%=================================================================
 %%	CALL NODES
@@ -110,23 +111,33 @@ handle_call({attach_request, Node, ?MODULE}, _From, State) ->
 
   {reply,{?schema,?getSchema},State};
 
-handle_call({add_node, ?MODULE, Node, NodeSchemaServer}, From, #state{nodes = LinkedNodes} =State) ->
+handle_call({node_up, Node, Info}, From, State) ->
 
-  NewState =
   try
     ?NODE_UP( Node ),
-    ?LOGINFO("~p node added to schema",[Node]),
-    link(NodeSchemaServer),
     gen_server:reply(From,ok),
-    State#state{ nodes = LinkedNodes#{NodeSchemaServer=>Node}}
-  catch _:E:S->
-    gen_server:reply(From, {error,E}),
-    ?LOGERROR("~p node add to schema error ~p stack ~p",[Node,E,S]),
-    State
+    ?LOGINFO("~p node up, info ~p",[Node, Info])
+  catch
+    _:E:S->
+      gen_server:reply(From, {error,E}),
+      ?LOGERROR("~p node up schema error ~p stack ~p",[Node,E,S])
   end,
 
-  {noreply,NewState};
+  {noreply,State};
 
+handle_call({node_down, Node, Info}, From, State) ->
+
+  try
+    ?NODE_DOWN( Node ),
+    gen_server:reply(From,ok),
+    ?LOGINFO("~p node down, info ~p",[Node, Info])
+  catch
+    _:E:S->
+      gen_server:reply(From, {error,E}),
+      ?LOGERROR("~p node down schema error ~p stack ~p",[Node,E,S])
+  end,
+
+  {noreply,State};
 
 handle_call({remove_node, Node}, From, State) ->
 
@@ -236,21 +247,6 @@ handle_call(Request, From, State) ->
 handle_cast(Request,State)->
   ?LOGWARNING("schema server got an unexpected cast resquest ~p",[Request]),
   {noreply,State}.
-
-handle_info({'EXIT',NodeServer, Reason},#state{nodes = Nodes}= State)->
-  case maps:take(NodeServer,Nodes) of
-    {Node, RestNodes}->
-      ?LOGWARNING("~p node down, reason ~p",[Node,Reason]),
-      try ?NODE_DOWN(Node)
-      catch
-        _:E:S->
-          ?LOGERROR("schema update error ~p, stack ~p",[E,S])
-      end,
-      {noreply,State#state{nodes = RestNodes}};
-    _->
-      ?LOGWARNING("unexpected trap exit process ~p, reason ~p",[NodeServer,Reason]),
-      {noreply,State}
-  end;
 
 handle_info(Message,State)->
   ?LOGWARNING("schema server got an unexpected message ~p",[Message]),

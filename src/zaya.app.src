@@ -6,6 +6,7 @@
   {applications,
    [kernel,
     stdlib,
+    net_kernel,
     lager
    ]},
   {included_applications,[

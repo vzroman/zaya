@@ -287,7 +287,7 @@
 
 ).
 
--define(dbSourceNodes(DB),
+-define(dbAvailableNodes(DB),
 
   ?schemaRead({db,DB,'@nodes@'})
 
@@ -297,7 +297,7 @@
   case
     ?dbRef(DB,node()) of
     ?undefined->
-      case ?dbSourceNodes(DB) of
+      case ?dbAvailableNodes(DB) of
         [] -> ?undefined;
         _@Ns-> ?random( _@Ns )
       end;
@@ -367,11 +367,11 @@
 ).
 
 -define(isDBReady(DB),
-  case ?dbSourceNodes(DB) of []-> false; _->true end
+  case ?dbAvailableNodes(DB) of []-> false; _->true end
 ).
 
 -define(isDBNotReady(DB),
-  case ?dbSourceNodes(DB) of []-> true; _->false end
+  case ?dbAvailableNodes(DB) of []-> true; _->false end
 ).
 
 -define(readyDBs,
@@ -389,21 +389,6 @@
 %=======================================================================================
 %             SCHEMA TRANSFORMATION
 %=======================================================================================
--define(NODE_UP(N),
-  begin
-    ?SCHEMA_WRITE({node,N},'@up@'),
-    ?SCHEMA_NOTIFY({'@nodeUp@',N})
-  end
-).
-
--define(NODE_DOWN(N),
-  begin
-    [ ?SCHEMA_WRITE({db,_@DB,'@nodes@'}, ?schemaRead({db,_@DB,'@nodes@'})--[N] ) || _@DB <- ?nodeDBs(N)],
-    ?SCHEMA_WRITE({node,N},'@down@'),
-    ?SCHEMA_NOTIFY({'@nodeDown@',N})
-  end
-).
-
 -define(ADD_DB(DB,M),
   begin
     ?SCHEMA_WRITE({db,DB,'@module@'},M),
@@ -414,14 +399,16 @@
 -define(OPEN_DB(DB,N,Ref),
   begin
     ?SCHEMA_WRITE({db,DB,'@ref@',N},Ref),
-    ?SCHEMA_WRITE({db,DB,'@nodes@'}, (?schemaRead({db,DB,'@nodes@'})--[N])++[N] )
+    ?SCHEMA_WRITE({db,DB,'@nodes@'}, (?schemaRead({db,DB,'@nodes@'})--[N])++[N] ),
+    ?SCHEMA_NOTIFY({'@open_db@',DB,N})
   end
 ).
 
 -define(CLOSE_DB(DB,N),
   begin
     ?SCHEMA_WRITE({db,DB,'@nodes@'}, ?schemaRead({db,DB,'@nodes@'})--[N] ),
-    ?SCHEMA_DELETE({db,DB,'@ref@',N})
+    ?SCHEMA_DELETE({db,DB,'@ref@',N}),
+    ?SCHEMA_NOTIFY({'@close_db@',DB,N})
   end
 ).
 
@@ -440,10 +427,32 @@
   end
 ).
 
--define(REMOVE_NODE(N),
-  ?SCHEMA_DELETE({node,N})
+-define(NODE_UP(N),
+  begin
+    ?SCHEMA_WRITE({node,N},'@up@'),
+    ?SCHEMA_NOTIFY({'@nodeUp@',N})
+  end
 ).
 
-% TODO:
+-define(NODE_DOWN(N),
+  begin
+    [ ?CLOSE_DB(_@DB,N) || _@DB <- ?nodeDBs(N) ],
+    ?SCHEMA_WRITE({node,N},'@down@'),
+    ?SCHEMA_NOTIFY({'@nodeDown@',N})
+  end
+).
+
+-define(REMOVE_NODE(N),
+  begin
+    [
+      begin
+        ?CLOSE_DB(_@DB,N),
+        ?REMOVE_DB_COPY(_@DB,N)
+      end || _@DB <- ?nodeDBs(N)
+    ],
+    ?SCHEMA_DELETE({node,N})
+  end
+).
+
 
 
