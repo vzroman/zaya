@@ -11,12 +11,10 @@
 %%=================================================================
 -export([
   open/1,
+  add_copy/2,
   recover/1,
   force_load/1,
-  close/1,
-
-  add_copy/2,
-  recover/1
+  close/1
 ]).
 %%=================================================================
 %%	OTP API
@@ -157,6 +155,14 @@ handle_event(cast, force_load, recovery, #data{db = DB} = Data ) ->
   ?LOGWARNING("~p FORCE LOAD. ALL THE DATA CHANGES MADE IN OTHER NODES COPIES WILL BE LOST!",[DB]),
   {next_state, init, Data, [ {state_timeout, 0, open } ] };
 
+handle_event(cast, recover, ready, #data{db = DB, module = Module, ref = Ref}=Data) ->
+  ?LOGWARNING("~p recovery",[DB]),
+
+  ecall:call_all_wait(?readyNodes, zaya_schema_srv, close_db, [DB, node()]),
+  Module:close(Ref),
+
+  {next_state, recovery, Data, [ {state_timeout, 0, recover } ]};
+
 handle_event(EventType, EventContent, _AnyState, #data{db = DB}) ->
   ?LOGWARNING("~p received unexpected event type ~p, content ~p",[
     DB,
@@ -167,6 +173,8 @@ handle_event(EventType, EventContent, _AnyState, #data{db = DB}) ->
 terminate(Reason, _AnyState, #data{ db = DB, module = Module, ref = Ref })->
 
   ?LOGWARNING("~p terminating database server reason ~p",[DB,Reason]),
+  ecall:call_all_wait(?readyNodes, zaya_schema_srv, close_db, [DB, node()]),
+
   if
     Ref =/= ?undefined->
       Module:close( Ref );
