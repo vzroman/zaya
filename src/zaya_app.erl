@@ -9,8 +9,7 @@
 ]).
 
 start(_StartType, _StartArgs) ->
-    zaya_sup:start_link(),
-    ok.
+    zaya_sup:start_link().
 
 stop(_State) ->
     ok.

@@ -271,11 +271,9 @@ try_load()->
       catch
         _:E:S->
           ?LOGERROR("CRITICAL ERROR! UNABLE TO OPEN SCHMA \r\n~p\r\n ERROR ~p STACK ~p",[?schemaPath,E,S]),
-          ?LOGINFO("close the application, fix the problem and try to recover from backup"),
+          ?LOGINFO("close the application, fix the problem and try start again"),
           timer:sleep( ?infinity )
       end,
-
-      make_schema_backup(),
 
       case ?readyNodes -- [node()] of
         []->
@@ -304,31 +302,11 @@ try_load()->
             [ ?schemaPath ]),
           timer:sleep( ?infinity )
       end,
-      case load_from_backup() of
-        {ok, Backup}->
-          ?LOGINFO("try to recover from backup:\r\n "++Backup),
-          ?LOAD_SCHEMA_FROM_BACKUP(Backup),
-          attach_from_node();
-        no->
-          first_start_dialog();
-        reattach->
-          attach_from_node()
-      end,
-      ok
-  end.
-
-first_start_dialog()->
-  ?LOGINFO("clear start"),
-  case yes_or_no("Do you want to attach this node to an existing application?") of
-    yes->
-      attach_from_node();
-    no->
-      case yes_or_no("is it a single node first start?") of
-        yes ->
-          ?LOGINFO("single node first start"),
-          _NewSchema = ?undefined;
-        no->
-          attach_from_node()
+      case os:getenv("ATTACH_TO") of
+        false->
+          ?LOGINFO("single node first start");
+        Node->
+          attach_from_node(list_to_atom( Node ))
       end
   end.
 
@@ -341,6 +319,18 @@ attach_from_node()->
       ?SCHEMA_CLEAR,
       ?SCHEMA_LOAD(SchemaBackup),
       attach_from_node()
+  end.
+
+attach_from_node(Node)->
+  SchemaBackup = ?getSchema,
+  try try_attach_to( [Node] )
+  catch
+    _:E:S->
+      ?LOGERROR("attach from ~p unexpected error ~p, stack ~p",[Node,E,S]),
+      ?SCHEMA_CLEAR,
+      ?SCHEMA_LOAD(SchemaBackup),
+      ?LOGINFO("close application, fix the problem and try start again"),
+      timer:sleep( ?infinity )
   end.
 
 try_attach_to([Node|Rest])->
@@ -384,18 +374,6 @@ try_attach_to([])->
   ?LOGINFO("there are no known nodes to get schema from"),
   Node = attach_node_dialog(),
   try_attach_to([Node]).
-
-attach_node_dialog()->
-  case io:get_line("type the node name to attach to >") of
-    NodeName when is_list(NodeName)->
-      list_to_atom( NodeName );
-    {error,Error}->
-      ?LOGERROR("io error ~p",[Error]),
-      attach_node_dialog();
-    Other->
-      ?LOGERROR("unexpected io result ~p",[Other]),
-      attach_node_dialog()
-  end.
 
 get_schema_from( Node )->
   try gen_server:call({?MODULE, Node}, {attach_request, node(),?MODULE}, 5000)
@@ -465,102 +443,8 @@ merge_schema([DB|Rest],OldSchema)->
 merge_schema([], _OldSchema)->
   ok.
 
-make_schema_backup()->
-  DT = unicode:characters_to_binary(calendar:system_time_to_rfc3339(erlang:system_time(millisecond),[{unit,millisecond},{offset,"Z"}])),
-  ?makeSchemaBackup(?schemaPath++"/.zaya.SCHEMA.BACKUP."++DT).
-
-load_from_backup()->
-  case yes_or_no("schema not found, load from backup?") of
-    no-> no;
-    yes->
-      case find_backup() of
-        []->
-          ?LOGWARNING("backup files not found"),
-          case yes_or_no("is the schema dirrectory:\r\n "++?schemaDir++"\r\ncorrect?") of
-            no->
-              ?LOGINFO("fix schema directory on the config file, and try start again"),
-              timer:sleep( ?infinity);
-            yes->
-              ?LOGWARNING("close the application, try to find lost backup files, copy them into schema dirrectory and start again\r\n"
-              ++"or you can try to reattach the node of there are any other ready nodes"),
-              case yes_or_no("try to reattach?") of
-                yes->
-                  reattach;
-                no->
-                  ?LOGINFO("close the application"),
-                  timer:sleep(?infinity)
-              end
-          end;
-       [Backup]->
-          case yes_or_no("only backup found "++Backup++" try to load from it?") of
-            yes->
-              {ok,?schemaDir++"/"++Backup};
-            no->
-              io:format("if there are other ready nodes you can try to reattach this node\r\n"),
-              case yes_or_no("try to reattach?") of
-                yes->
-                  reattach;
-                no->
-                  no
-              end
-          end;
-       Backups ->
-          choose_backup_dialog(Backups)
-      end
-  end.
-
-find_backup()->
-  case file:list_dir(?schemaDir) of
-    {error,_}->
-      [];
-    {ok,Backups}->
-      lists:reverse( lists:usort(Backups) )
-  end.
-
-choose_backup_dialog([Latest|_]=Backups)->
-  io:format("found backups:"),
-  [ io:format(integer_to_list(I)++". ~s",[B]) || {I,B} <- lists:zip(lists:seq(1,length(Backups)), Backups) ],
-  io:format("it's strictly recomended to load from the latest"),
-  case yes_or_no("load from the "++Latest) of
-    yes->
-      Backup = ?schemaDir++"/"++Latest,
-      ?LOGINFO("loading from backup ~p",[Backup]),
-      {ok,Backup};
-    no->
-      case io:get_line( "type the number of backup and press enter >" ) of
-        Chosen when is_list(Chosen) ->
-          N =
-          try list_to_integer(string:replace(Chosen,"\n",""))
-          catch
-            _:_->
-              io:format("invalid input ~p, try again",[Chosen]),
-              choose_backup_dialog(Backups)
-          end,
-          if
-            length(Backups) >= N->
-              Backup = lists:nth(N,Backups),
-              {ok,Backup}
-          end;
-        Unexpected->
-          ?LOGWARNING("unexpected result ~p, try again",[Unexpected]),
-          choose_backup_dialog(Backups)
-      end
-  end.
 
 
-yes_or_no(Question)->
-  Yes ="yes\n",
-  No = "no\n",
-  ?LOGINFO("type yes or no and press Enter"),
-  case io:get_line( Question ++" >" ) of
-    Yes ->
-      yes;
-    No->
-      no;
-    _Other->
-      ?LOGINFO("unable to understand you reply, please type yes or no again and press Enter"),
-      yes_or_no( Question )
-  end.
 
 
 

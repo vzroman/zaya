@@ -53,7 +53,7 @@
                               ?env(schema_dir, ?DEFAULT_SCHEMA_DIR)
 ).
 -define(schemaPath,
-                              filename:absname(?schemaDir)
+                              filename:absname(?schemaDir)++"/SCHEMA"
 ).
 
 -define(schemaExists,
@@ -69,19 +69,6 @@
                        }])
 ).
 
-
--define(makeSchemaBackup(Dest),
-
-                              ok = file:write_file(Dest,term_to_binary(?getSchema))
-
-).
-
--define(LOAD_SCHEMA_FROM_BACKUP(Backup),
-  begin
-                              {ok,_@Schema} = file:read_file(Backup),
-                              ok = ?schemaModule:write(?schemaRef, binary_to_term(_@Schema) )
-  end
-).
 %---------------------------------Notifications-----------------------------
 -define(schemaSubscribe,
   esubscribe:subscribe(?schema,?readyNodes,self(),infinity)
@@ -146,14 +133,14 @@
 ).
 
 -define(SCHEMA_OPEN,
-
-  ?SCHEMA_WRITE(?schema, ?schemaModule:open( ?schemaParams ) )
-
+  persistent_term:put(?schema, ?schemaModule:open( ?schemaParams ))
 ).
 
 -define(SCHEMA_CLOSE,
-                              ?schemaModule:close(?schemaRef)
-
+  begin
+    ?schemaModule:close(?schemaRef),
+    persistent_term:erase(?schema)
+  end
 ).
 
 -define(SCHEMA_LOAD(SCHEMA),

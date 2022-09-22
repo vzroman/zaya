@@ -32,10 +32,12 @@ init([])->
 
   process_flag(trap_exit,true),
 
+  ?LOGINFO("start node server ~p",[self()]),
+
+  zaya_schema_srv:node_up(node(), init),
+
   % Monitor nodes state
   net_kernel:monitor_nodes(true, [nodedown_reason]),
-
-  ?LOGINFO("start node server ~p",[self()]),
 
   timer:send_after(0, loop),
 
