@@ -274,20 +274,7 @@ try_load()->
           ?LOGINFO("close the application, fix the problem and try start again"),
           timer:sleep( ?infinity )
       end,
-
-      case ?readyNodes -- [node()] of
-        []->
-          case ?allNodes -- [node()] of
-            []->
-              ?LOGINFO("SINGLE NODE RESTART"),
-              ok;
-            OtherNodes->
-              ?LOGINFO("FULL RESTART: nodes to reattach",[OtherNodes]),
-              ok
-          end;
-        _OtherReadyNodes->
-          attach_from_node()
-      end;
+      restart(?allNodes);
     _->
       try
         ?SCHEMA_CREATE,
@@ -306,35 +293,27 @@ try_load()->
         false->
           ?LOGINFO("single node first start");
         Node->
-          attach_from_node(list_to_atom( Node ))
+          try_attach_to([list_to_atom( Node )])
       end
   end.
 
-attach_from_node()->
-  SchemaBackup = ?getSchema,
-  try try_attach_to( ?allNodes --[node()] )
-  catch
-    _:E:S->
-      ?LOGERROR("recovery unexpected error ~p, stack ~p",[E,S]),
-      ?SCHEMA_CLEAR,
-      ?SCHEMA_LOAD(SchemaBackup),
-      attach_from_node()
-  end.
+restart([Node]) when Node =:= node()->
+  ?LOGINFO("single node application restart"),
+  [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
+  ok;
+restart([])->
+  ?LOGINFO("single application empty node restart"),
+  ok;
 
-attach_from_node(Node)->
-  SchemaBackup = ?getSchema,
-  try try_attach_to( [Node] )
-  catch
-    _:E:S->
-      ?LOGERROR("attach from ~p unexpected error ~p, stack ~p",[Node,E,S]),
-      ?SCHEMA_CLEAR,
-      ?SCHEMA_LOAD(SchemaBackup),
-      ?LOGINFO("close application, fix the problem and try start again"),
-      timer:sleep( ?infinity )
-  end.
+restart([Node])->
+  ?LOGINFO("try to reattach to ~p",[ Node ]),
+  try_attach_to([Node]);
+restart(Nodes)->
+  ?LOGINFO("multi-node application restart, nodes ~p",[Nodes]),
+  try_attach_to( Nodes -- [node()] ).
 
 try_attach_to([Node|Rest])->
-  ?LOGINFO("trying to get schema from ~p node",[Node]),
+  ?LOGINFO("trying to connect to ~p node",[Node]),
   case net_adm:ping( Node ) of
     pong->
       ?LOGINFO("~p node is available, trying to get the schema",[Node]),
@@ -371,9 +350,14 @@ try_attach_to([Node|Rest])->
       try_attach_to( Rest )
   end;
 try_attach_to([])->
-  ?LOGINFO("there are no known nodes to get schema from"),
-  Node = attach_node_dialog(),
-  try_attach_to([Node]).
+  case ?readyNodes -- [node()] of
+    []->
+      ?LOGINFO("multi node application full restart"),
+      [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
+      ok;
+    ReadyNodes->
+      todo
+  end.
 
 get_schema_from( Node )->
   try gen_server:call({?MODULE, Node}, {attach_request, node(),?MODULE}, 5000)
