@@ -57,7 +57,7 @@
 ).
 
 -define(schemaExists,
-                              filelib:is_file(?schemaPath ++ "/schema/CURRENT")
+                              filelib:is_file(?schemaPath ++ "/CURRENT")
 
 ).
 

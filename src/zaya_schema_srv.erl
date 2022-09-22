@@ -288,10 +288,6 @@ try_load()->
               ok
           end;
         _OtherReadyNodes->
-          OldSchema = ?getSchema,
-          SchemaBackupPath =
-            filename:absname(?schemaDir)++"/"++list_to_atom(node())++".schema_backup",
-          file:write_file(SchemaBackupPath,term_to_binary(OldSchema)),
           attach_from_node()
       end;
     _->
@@ -337,17 +333,17 @@ first_start_dialog()->
   end.
 
 attach_from_node()->
-  OldSchema = ?getSchema,
-  try try_attach_to( ?allNodes --[node()], OldSchema )
+  SchemaBackup = ?getSchema,
+  try try_attach_to( ?allNodes --[node()] )
   catch
     _:E:S->
       ?LOGERROR("recovery unexpected error ~p, stack ~p",[E,S]),
       ?SCHEMA_CLEAR,
-      ?SCHEMA_LOAD(OldSchema),
+      ?SCHEMA_LOAD(SchemaBackup),
       attach_from_node()
   end.
 
-try_attach_to([Node|Rest], OldSchema)->
+try_attach_to([Node|Rest])->
   ?LOGINFO("trying to get schema from ~p node",[Node]),
   case net_adm:ping( Node ) of
     pong->
@@ -355,34 +351,39 @@ try_attach_to([Node|Rest], OldSchema)->
       case get_schema_from( Node ) of
         {?schema,Schema}->
           ?LOGINFO("try to recover by schema from ~p node",[Node]),
-          try recover_by_schema(Schema, OldSchema)
+          SchemaBackup = ?getSchema,
+          try recover_by_schema(Schema)
           catch
             _:E:S->
-              ?LOGERROR("error to recover from node ~p schema ~p\r\n"
+              ?LOGERROR("error to recover from node ~p:\r\n"
               ++"error ~p, stack ~p",[Node,Schema,E,S]),
 
+              % We need to interrupt already started DBs
+              [ zaya_db_srv:close( DB ) || DB <- ?nodeDBs(node()) ],
+
               ?SCHEMA_CLEAR,
+              ?SCHEMA_LOAD(SchemaBackup),
 
               CorruptedSchemaPath =
-                filename:absname(?schemaDir)++"/"++list_to_atom(Node)++".corrapted_schema",
+                ?schemaPath++"/"++list_to_atom(Node)++".corrapted_schema",
 
               file:write_file(CorruptedSchemaPath,term_to_binary(Schema)),
 
               ?LOGINFO("please send file:\r\n ~p\r\n and logs to your support",[CorruptedSchemaPath]),
-              try_attach_to(Rest, OldSchema)
+              try_attach_to(Rest)
           end;
         {error,Error}->
           ?LOGERROR("~p node schema request error ~p",[Node,Error]),
-          try_attach_to(Rest, OldSchema)
+          try_attach_to(Rest)
       end;
     pang->
       ?LOGINFO("~p node is not available",[Node]),
-      try_attach_to( Rest, OldSchema )
+      try_attach_to( Rest )
   end;
-try_attach_to([], OldSchema)->
+try_attach_to([])->
   ?LOGINFO("there are no known nodes to get schema from"),
   Node = attach_node_dialog(),
-  try_attach_to([Node], OldSchema).
+  try_attach_to([Node]).
 
 attach_node_dialog()->
   case io:get_line("type the node name to attach to >") of
@@ -403,70 +404,70 @@ get_schema_from( Node )->
       {error,Error}
   end.
 
-recover_by_schema({?schema, Schema}, OldSchema)->
+recover_by_schema({?schema, Schema})->
+  ?LOGINFO("node recovery by schema:\r\n ~p",[Schema]),
 
-  % TODO
+  OldSchema =
+    lists:foldl(fun(DB, Acc)->
+      Acc#{DB =>#{
+        module => ?dbModule( DB ),
+        params => ?dbNodeParams(DB, node()),
+        nodes => ?dbAllNodes( DB )
+      }}
+    end,#{}, ?allDBs ),
 
-  ?LOGINFO("node recovery by schema ~p\r\n old schema ~p",[Schema,OldSchema]),
   ?SCHEMA_CLEAR,
   ?SCHEMA_LOAD(Schema),
-  localDBs =
-    [S || {{sgm,S,'@node@',N,'@params@'},_} <- OldSchema, N=:=node()],
-  merge_schema(localDBs),
+
+  % Remove stale DBs
+  [ case ?dbModule(DB) of
+      ?undefined ->
+        try Module:remove( Params )
+        catch
+          _:E->
+            ?LOGERROR("~p remove stale database error ~p",[ DB, E ])
+        end;
+      _->
+        not_stale
+    end || {DB,#{ module:=Module, params:=Params }} <- maps:to_list( OldSchema )],
+
+  merge_schema(?allDBs, OldSchema ),
+
   ok.
 
-merge_schema([DB|Rest])->
-  case ?dbAllNodes( DB ) of
-    []->
-      ?LOGINFO("~p db was removed, remove local copy",[DB]),
-      try
-        Module = ?dbModule( DB ),
-        LocalParams = ?dbNodeParams(DB, node() ),
-        Module:remove( DB, LocalParams ),
-        ?LOGINFO("~p local copy removed",[DB])
+merge_schema([DB|Rest],OldSchema)->
+  case {?dbNodeParams(DB,node()), maps:get(DB, OldSchema, ?undefined) } of
+    {?undefined, ?undefined }->
+      ignore;
+    {?undefined, #{module := Module, params:=Params } }->
+      ?LOGINFO("~p local copy was removed, try remove",[DB]),
+      try Module:remove( Params )
       catch
-        _:E:S->
-          ?LOGERROR("~p remove local copy error ~p stack ~p",[DB,E,S])
+        _:E->?LOGERROR("~p remove local copy error ~p",[DB,E])
       end;
-    _dbNodes->
-      case ?dbReadyNodes(DB) of
-        []->
-          case ?dbNotReadyNodes( DB )--[node()] of
-            []->
-              ?LOGINFO("~p has only local copy, continue");
-            OtherNotReadyNodes->
-              ?LOGWARNING("~p HAS COPIES at ~p NODES THAT ARE NOT READY NOW! This nodes can have more fresh data", [DB,OtherNotReadyNodes]),
-              case confirm_copy_dialog( DB, OtherNotReadyNodes ) of
-                yes->
-                  ?LOGWARNING("~p local copy accepted as the latest, continue");
-                no->
-                  ?LOGINFO("close the application, start the nodes with the latest data first and then try to start this node again"),
-                  timer:sleep(?infinity)
-              end
-          end;
-        dbReadyNodes->
-          ?LOGINFO("~p db has copies at ~p nodes, try to recover",[DB,?dbReadyNodes(DB)]),
-          try
-            zaya_db:try_recover( DB ),
-            ?LOGINFO("~p db recovered")
-          catch
-            _:E:S->
-              ?LOGERROR("~p RECOVERY ERROR ~p stack ~p",[DB,E,S])
-          end
+    {Params, ?undefined}->
+      ?LOGINFO("~p add local copy"),
+      zaya_db_srv:add_copy(DB, Params);
+    {Params, #{params:=?undefined}}->
+      ?LOGINFO("~p add local copy"),
+      zaya_db_srv:add_copy(DB, Params);
+    _->
+      case ?dbAllNodes(DB) of
+        [Node] when Node =:= node()->
+          ?LOGINFO("~p has only local copy, open",[ DB ]),
+          zaya_db_srv:open( DB );
+        Nodes->
+          ?LOGINFO("~p has copies at ~p nodes which can have more actual data, try to recover",[DB, Nodes--[node()]]),
+          zaya_db_srv:recover( DB )
       end
   end,
-  merge_schema(Rest);
-merge_schema([])->
+  merge_schema(Rest, OldSchema);
+merge_schema([], _OldSchema)->
   ok.
-
-confirm_copy_dialog( DB, Nodes )->
-  io:format("~p db copy nodes:",[Nodes]),
-  [ io:format("\r\n  "++atom_to_list(N)) || N <- Nodes],
-  yes_or_no("is the local copy of "++atom_to_list(DB)++" the latest:").
 
 make_schema_backup()->
   DT = unicode:characters_to_binary(calendar:system_time_to_rfc3339(erlang:system_time(millisecond),[{unit,millisecond},{offset,"Z"}])),
-  ?makeSchemaBackup(?schemaDir++".zaya.SCHEMA.BACKUP."++DT).
+  ?makeSchemaBackup(?schemaPath++"/.zaya.SCHEMA.BACKUP."++DT).
 
 load_from_backup()->
   case yes_or_no("schema not found, load from backup?") of
