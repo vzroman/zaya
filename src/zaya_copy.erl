@@ -513,7 +513,7 @@ wait_ready(#live{
 
   {Write,Delete} = take_all(ets:first(LiveEts),LiveEts,{[],[]}),
 
-  ?LOGINFO("~s taker ~p actions to write to the copy ~p, to delete ~p",[
+  ?LOGINFO("~s taker actions to write to the copy ~p, to delete ~p",[
     Log,
     ?PRETTY_COUNT(length(Write)),
     ?PRETTY_COUNT(length(Delete))
@@ -541,7 +541,7 @@ wait_ready(#live{
 
   {Write,Delete} = take_all(ets:first(LiveEts),LiveEts,{[],[]}),
 
-  ?LOGINFO("~s taker ~p tail actions to write to the copy ~p, to delete ~p",[
+  ?LOGINFO("~s taker tail actions to write to the copy ~p, to delete ~p",[
     Log,
     ?PRETTY_COUNT(length(Write)),
     ?PRETTY_COUNT(length(Delete))
