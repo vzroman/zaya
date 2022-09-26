@@ -70,7 +70,9 @@
   remove/1, do_remove/1,
 
   add_copy/3,
-  remove_copy/2, do_remove_copy/1
+  remove_copy/2, do_remove_copy/1,
+
+  params/2
 ]).
 
 %%=================================================================
@@ -172,12 +174,6 @@ remote_result(Type,Result) ->
     _->
       ?NOT_AVAILABLE
   end
-).
-
--define(params(DB,Ps),
-  maps:merge(#{
-    dir => filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
-  },Ps)
 ).
 
 %%=================================================================
@@ -345,7 +341,7 @@ do_create(DB, Module, InParams)->
       (_NodeParams = ?undefined)->
         {ok, added};
       (NodeParams)->
-        Params = ?params(DB,NodeParams),
+        Params = params(DB,NodeParams),
         epipe:do([
           fun(_) -> Module:create( Params ) end,
           fun(_)->
@@ -452,7 +448,7 @@ add_copy(DB,Node,Params)->
       ok
   end,
 
-  rpc:call( Node, zaya_db_srv, add_copy, [ DB, ?params(DB,Params) ]).
+  rpc:call( Node, zaya_db_srv, add_copy, [ DB, Params ]).
 
 remove_copy(DB, Node)->
 
@@ -511,6 +507,10 @@ do_remove_copy( DB )->
     fun(_)-> Module:remove( Params ) end
   ],?undefined).
 
+params(DB,Params)->
+  maps:merge(#{
+    dir => filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
+  },Params).
 
 
 

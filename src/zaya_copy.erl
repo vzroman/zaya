@@ -29,7 +29,7 @@
 %%  Internals
 %%-----------------------------------------------------------------
 -record(acc,{acc, source_ref, module, batch_size, batch, size, on_batch }).
-fold(#source{module = Module,ref = SourceRef } , OnBatch, InAcc)->
+fold(Module,SourceRef, OnBatch, InAcc)->
 
   Acc0 = #acc{
     source_ref = SourceRef,
@@ -278,13 +278,14 @@ copy_request(#{
     end
   end),
 
+  Module = ?dbModule( Source ),
   SourceRef = ?dbRef(Source,node()),
   InitHash = crypto:hash_update(crypto:hash_init(sha256),<<>>),
 
   InitState = #s_acc{
     receiver = Receiver,
     source_ref = SourceRef,
-    module = ?dbModule( Source ),
+    module = Module,
     hash = InitHash,
     log = Log,
     batch_size = ?REMOTE_BATCH_SIZE,
@@ -296,7 +297,7 @@ copy_request(#{
 
   try
       #s_acc{ batch = TailBatch, hash = TailHash } = TailState =
-        fold(SourceRef, fun remote_batch/3, InitState ),
+        fold(Module, SourceRef, fun remote_batch/3, InitState ),
 
       % Send the tail batch if exists
       case TailBatch of [] -> ok; _->send_batch( TailState ) end,
@@ -589,7 +590,7 @@ local_copy( Source, Target, Module, Options)->
     end,
 
   ?LOGINFO("~s finish, hash ~s",[Log]),
-  fold(#source{module = Module,ref = SourceRef } , OnBatch, ?undefined),
+  fold(Module, SourceRef , OnBatch, ?undefined),
 
   _LiveTail = finish_live_copy( Live ).
 

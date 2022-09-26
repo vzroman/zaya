@@ -51,7 +51,4 @@
 
 -define(LOG_LOCAL(Source,Target),unicode:characters_to_list(io_lib:format("local copy: ~p:~p",[Source,Target]))).
 
--record(source,{name,module,ref}).
-
-
 -endif.

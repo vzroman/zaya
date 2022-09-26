@@ -50,7 +50,8 @@ recover( DB )->
 force_load( DB )->
   gen_statem:cast(DB, force_load).
 
-add_copy( DB, Params )->
+add_copy( DB, InParams )->
+  Params = zaya_db:params(DB,InParams),
   case supervisor:start_child(zaya_db_sup,[DB, {add_copy,Params}]) of
     {ok, PID} when is_pid( PID )->
       ok;
