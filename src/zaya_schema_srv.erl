@@ -408,7 +408,7 @@ merge_schema([DB|Rest],OldSchema)->
   case {?dbNodeParams(DB,node()), maps:get(DB, OldSchema, ?undefined) } of
     {?undefined, ?undefined }->
       ignore;
-    {?undefined, #{module := Module, params:=Params } }->
+    {?undefined, #{module := Module, params:=Params } } when Params=/=?undefined->
       ?LOGINFO("~p local copy was removed, try remove",[DB]),
       try Module:remove( Params )
       catch
