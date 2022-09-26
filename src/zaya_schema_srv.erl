@@ -321,7 +321,7 @@ try_attach_to([Node|Rest])->
           catch
             _:E:S->
               ?LOGERROR("error to recover from node ~p:\r\n"
-              ++"error ~p, stack ~p",[Node,Schema,E,S]),
+              ++"error ~p, stack ~p",[Node,E,S]),
 
               % We need to interrupt already started DBs
               [ zaya_db_srv:close( DB ) || DB <- ?nodeDBs(node()) ],
@@ -330,7 +330,7 @@ try_attach_to([Node|Rest])->
               ?SCHEMA_LOAD(SchemaBackup),
 
               CorruptedSchemaPath =
-                ?schemaPath++"/"++list_to_atom(Node)++".corrupted_schema",
+                ?schemaPath++"/"++atom_to_list(Node)++".corrupted_schema",
 
               file:write_file(CorruptedSchemaPath,term_to_binary(Schema)),
 
@@ -373,7 +373,7 @@ get_schema_from( Node )->
       {error,Error}
   end.
 
-recover_by_schema({?schema, Schema})->
+recover_by_schema(Schema)->
   ?LOGINFO("node recovery by schema:\r\n ~p",[Schema]),
 
   OldSchema =
