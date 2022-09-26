@@ -37,7 +37,22 @@
 %%	INFO API
 %%=================================================================
 -export([
-
+  module/1,
+  available_nodes/1,
+  source_node/1,
+  all_nodes/1,
+  node_params/2,
+  nodes_params/1,
+  all_dbs/0,
+  all_dbs_nodes_params/0,
+  ready_nodes/1,
+  not_ready_nodes/1,
+  dbs_ready_nodes/0,
+  dbs_not_ready_nodes/0,
+  is_available/1,
+  is_not_available/1,
+  available_dbs/0,
+  not_available_dbs/0
 ]).
 
 %%=================================================================
@@ -189,6 +204,59 @@ update( DB, Query )->
   ?write( DB, [ Query ]).
 
 %%=================================================================
+%%	INFO
+%%=================================================================
+module( DB )->
+  ?dbModule( DB ).
+
+available_nodes( DB)->
+  ?dbAvailableNodes( DB ).
+
+source_node( DB )->
+  ?dbSource( DB ).
+
+all_nodes( DB )->
+  ?dbAllNodes( DB ).
+
+node_params(DB, Node)->
+  ?dbNodeParams(DB, Node).
+
+nodes_params( DB )->
+  ?dbNodesParams(DB).
+
+all_dbs()->
+  ?allDBs.
+
+
+all_dbs_nodes_params()->
+  ?allDBsNodesParams.
+
+ready_nodes(DB)->
+  ?dbReadyNodes(DB).
+
+not_ready_nodes(DB)->
+  ?dbNotReadyNodes(DB).
+
+dbs_ready_nodes()->
+  ?dbsReadyNodes.
+
+
+dbs_not_ready_nodes()->
+  ?dbsNotReadyNodes.
+
+is_available(DB)->
+  ?isDBAvailable(DB).
+
+is_not_available(DB)->
+  ?isDBNotAvailable(DB).
+
+available_dbs()->
+  ?availableDBs.
+
+not_available_dbs()->
+  ?notAvailableDBs.
+
+%%=================================================================
 %%	SERVICE
 %%=================================================================
 create(DB, Module, Params)->
@@ -335,9 +403,9 @@ add_copy(DB,Node,Params)->
     _->
       ok
   end,
-  case ?isDBReady(DB) of
+  case ?isDBAvailable(DB) of
     false->
-      throw(db_not_ready);
+      throw(db_not_available);
     _->
       ok
   end,

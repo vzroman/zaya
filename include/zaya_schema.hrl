@@ -315,7 +315,7 @@
   ?schemaFind([{
       {{db,DB,'@node@','$1','@params@'},'$2'},
       [],
-      ['$1','$2']
+      [{{'$1','$2'}}]
     }])
 
 ).
@@ -353,20 +353,20 @@
   [{_@DB, ?dbNotReadyNodes(_@DB) } || _@DB <- ?allDBs]
 ).
 
--define(isDBReady(DB),
+-define(isDBAvailable(DB),
   case ?dbAvailableNodes(DB) of []-> false; _->true end
 ).
 
--define(isDBNotReady(DB),
+-define(isDBNotAvailable(DB),
   case ?dbAvailableNodes(DB) of []-> true; _->false end
 ).
 
--define(readyDBs,
-  [_@DB || _@DB <- ?allDBs, ?isDBReady(_@DB) ]
+-define(availableDBs,
+  [_@DB || _@DB <- ?allDBs, ?isDBAvailable(_@DB) ]
 ).
 
--define(notReadyDBs,
-  [_@DB || _@DB <- ?allDBs, ?isDBNotReady(_@DB)]
+-define(notAvailableDBs,
+  [_@DB || _@DB <- ?allDBs, ?isDBNotAvailable(_@DB)]
 ).
 
 -define(localDBs,

@@ -50,11 +50,11 @@ remove( Node )->
       ok
   end,
 
-  case [DB || DB <-?nodeDBs( Node ), ?isDBNotReady( DB ) ] of
+  case [DB || DB <-?nodeDBs( Node ), ?isDBNotAvailable( DB ) ] of
     []->
       ok;
-    NotReadyDBs->
-      throw({not_ready_dbs,NotReadyDBs})
+    NotAvailableDBs->
+      throw({not_available_dbs,NotAvailableDBs})
   end,
 
   ecall:call_all_wait(?readyNodes, zaya_schema_srv, remove_node, [Node] ).
