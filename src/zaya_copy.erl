@@ -113,8 +113,7 @@ try_copy(#copy{
   module = Module,
   params = Params,
   attempts = Attempts,
-  options = Options,
-  error = undefined
+  options = Options
 } = State) when Attempts > 0->
 
   Log = ?LOG_RECEIVE(SendNode,Source),
