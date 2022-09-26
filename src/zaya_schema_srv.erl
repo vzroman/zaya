@@ -406,19 +406,19 @@ recover_by_schema(Schema)->
 
 merge_schema([DB|Rest],OldSchema)->
   case {?dbNodeParams(DB,node()), maps:get(DB, OldSchema, ?undefined) } of
-    {?undefined, ?undefined }->
-      ignore;
     {?undefined, #{module := Module, params:=Params } } when Params=/=?undefined->
       ?LOGINFO("~p local copy was removed, try remove",[DB]),
       try Module:remove( Params )
       catch
         _:E->?LOGERROR("~p remove local copy error ~p",[DB,E])
       end;
+    {?undefined,_}->
+      no_local_copy;
     {Params, ?undefined}->
-      ?LOGINFO("~p add local copy"),
+      ?LOGINFO("~p add local copy",[DB]),
       zaya_db_srv:add_copy(DB, Params);
     {Params, #{params:=?undefined}}->
-      ?LOGINFO("~p add local copy"),
+      ?LOGINFO("~p add local copy",[DB]),
       zaya_db_srv:add_copy(DB, Params);
     _->
       case ?dbAllNodes(DB) of

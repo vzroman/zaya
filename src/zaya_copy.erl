@@ -118,7 +118,7 @@ try_copy(#copy{
 } = State) when Attempts > 0->
 
   Log = ?LOG_RECEIVE(SendNode,Source),
-  ?LOGINFO("~p attempt ~p",[Log, Attempts - Attempts +1]),
+  ?LOGINFO("~s attempt ~p",[Log, Attempts - Attempts +1]),
 
   ok = Module:create( Params ),
   CopyRef = Module:open( Params ),
@@ -127,7 +127,7 @@ try_copy(#copy{
 
   InitHash = crypto:hash_update(crypto:hash_init(sha256),<<>>),
 
-  ?LOGINFO("~p init sender",[Log]),
+  ?LOGINFO("~s init sender",[Log]),
   SenderAgs = #{
     receiver => self(),
     source => Source,
@@ -150,7 +150,7 @@ try_copy(#copy{
       log = Log
     }) catch
       _:Error:Stack->
-        ?LOGERROR("~p attempt failed ~p, left attempts ~p",[Log,Error,Attempts-1]),
+        ?LOGERROR("~s attempt failed ~p, left attempts ~p",[Log,Error,Attempts-1]),
 
         exit(Sender,rollback),
         drop_live_copy( Live ),
@@ -161,7 +161,7 @@ try_copy(#copy{
 
   finish_live_copy( Live ),
 
-  ?LOGINFO("~p finish hash ~s", [Log, ?PRETTY_HASH( FinalHash )]),
+  ?LOGINFO("~s finish hash ~s", [Log, ?PRETTY_HASH( FinalHash )]),
 
   CopyRef;
 
@@ -183,7 +183,7 @@ receive_loop(#r_acc{
   receive
     {write_batch, Sender, ZipBatch, ZipSize, SenderHash }->
 
-      ?LOGINFO("~p batch received size ~s, hash ~s",[
+      ?LOGINFO("~s batch received size ~s, hash ~s",[
         Log,
         ?PRETTY_SIZE(ZipSize),
         ?PRETTY_HASH(SenderHash)
@@ -194,7 +194,7 @@ receive_loop(#r_acc{
       case crypto:hash_final(Hash) of
         SenderHash -> Sender ! {confirmed, self()};
         LocalHash->
-          ?LOGERROR("~p invalid sender hash ~s, local hash ~s",[
+          ?LOGERROR("~s invalid sender hash ~s, local hash ~s",[
             Log,
             ?PRETTY_HASH(SenderHash),
             ?PRETTY_HASH(LocalHash)
@@ -207,7 +207,7 @@ receive_loop(#r_acc{
       [TailKey|_] =
         [ begin
             [{BTailKey,_}|_] = Batch = binary_to_term( BatchBin ),
-            ?LOGINFO("~p write batch size ~s, length ~p, last key ~p",[
+            ?LOGINFO("~s write batch size ~s, length ~p, last key ~p",[
               Log,
               ?PRETTY_SIZE(size( BatchBin )),
               ?PRETTY_COUNT(length(Batch)),
@@ -226,13 +226,13 @@ receive_loop(#r_acc{
 
     {finish, Sender, SenderFinalHash }->
       % Finish
-      ?LOGINFO("~p sender finished, final hash ~s",[Log, ?PRETTY_HASH(SenderFinalHash)]),
+      ?LOGINFO("~s sender finished, final hash ~s",[Log, ?PRETTY_HASH(SenderFinalHash)]),
       case crypto:hash_final(Hash0) of
         SenderFinalHash ->
           % Everything is fine!
           SenderFinalHash;
         LocalFinalHash->
-          ?LOGERROR("~p invalid sender final hash ~s, local final hash ~s",[
+          ?LOGERROR("~s invalid sender final hash ~s, local final hash ~s",[
             Log,
             ?PRETTY_HASH(SenderFinalHash),
             ?PRETTY_HASH(LocalFinalHash)
@@ -240,7 +240,7 @@ receive_loop(#r_acc{
           throw(invalid_hash)
       end;
     {error,Sender,SenderError}->
-      ?LOGERROR("~p sender error ~p",[Log,SenderError]),
+      ?LOGERROR("~s sender error ~p",[Log,SenderError]),
       throw({sender_error,SenderError});
     {'EXIT',Sender,Reason}->
       throw({interrupted,Reason});
@@ -263,7 +263,7 @@ copy_request(#{
   log := Log,
   options := Options
 })->
-  ?LOGINFO("~p request options ~p", [
+  ?LOGINFO("~s request options ~p", [
     Log, Options
   ]),
 
@@ -274,7 +274,7 @@ copy_request(#{
       {'EXIT',_,Reason} when Reason=:=normal; Reason =:= shutdown->
         ok;
       {'EXIT',_,Reason}->
-        ?LOGERROR("~p interrupted, reason ~p",[Log,Reason])
+        ?LOGERROR("~s interrupted, reason ~p",[Log,Reason])
     end
   end),
 
@@ -303,12 +303,12 @@ copy_request(#{
 
       FinalHash = crypto:hash_final( TailHash ),
 
-      ?LOGINFO("~p finished, final hash ~p",[Log, ?PRETTY_HASH(FinalHash) ]),
+      ?LOGINFO("~s finished, final hash ~p",[Log, ?PRETTY_HASH(FinalHash) ]),
       Receiver ! {finish, self(), FinalHash}
 
   catch
     _:Error:Stack->
-      ?LOGERROR("~p error ~p, stack ~p",[Log,Error,Stack]),
+      ?LOGERROR("~s error ~p, stack ~p",[Log,Error,Stack]),
       Receiver ! {error, self(), Error}
   after
     Unlock()
@@ -330,7 +330,7 @@ remote_batch(Batch0, Size, #s_acc{
   ZipSize = size(Zip),
   TotalZipSize = TotalZipSize0 + ZipSize,
 
-  ?LOGINFO("~p add zip: size ~s, zip size ~p, total zip size ~p",[
+  ?LOGINFO("~s add zip: size ~s, zip size ~p, total zip size ~p",[
     Log, ?PRETTY_SIZE(Size), ?PRETTY_SIZE(ZipSize), ?PRETTY_SIZE(TotalZipSize)
   ]),
 
@@ -362,7 +362,7 @@ send_batch(#s_acc{
 })->
 
   BatchHash = crypto:hash_final(Hash),
-  ?LOGINFO("~p send batch: zip size ~s, length ~p, hash ~s",[
+  ?LOGINFO("~s send batch: zip size ~s, length ~p, hash ~s",[
     Log,
     ?PRETTY_SIZE(ZipSize),
     length(ZipBatch),
@@ -375,10 +375,10 @@ send_batch(#s_acc{
 %% LIVE COPY
 %%===========================================================================
 prepare_live_copy( _Source, _Module, _SendNode, _CopyRef, Log, #{live:=false} )->
-  ?LOGINFO("~p cold copy",[Log]),
+  ?LOGINFO("~s cold copy",[Log]),
   #live{live_ets = false};
 prepare_live_copy( Source, Module, SendNode, CopyRef, Log, _Options )->
-  ?LOGINFO("~p live copy, subscribe....",[Log]),
+  ?LOGINFO("~s live copy, subscribe....",[Log]),
   % We need to subscribe to all nodes, every node can do updates,
   % timeout is infinity we do not start until everybody is ready
   esubscribe:subscribe(Source, [SendNode], self(), _Timeout = infinity),
@@ -417,11 +417,11 @@ roll_live_updates(#live{ source = Source, module = Module, copy_ref = CopyRef, l
   % and so will overwrite came live update.
   % Timeout 0 because we must to receive the next remote batch as soon as possible
   get_live_actions( esubscribe:lookup( Source ), LiveEts),
-  ?LOGINFO("~p live updates",[Log]),
+  ?LOGINFO("~s live updates",[Log]),
 
   % Take out the actions that are in the copy range already
   {Write,Delete} = take_head(ets:first(LiveEts), LiveEts, TailKey, {[],[]}),
-  ?LOGINFO("~p actions to write to the copy ~p, delete ~p, stockpiled ~p",[
+  ?LOGINFO("~s actions to write to the copy ~p, delete ~p, stockpiled ~p",[
     Log,
     ?PRETTY_COUNT(length(Write)),
     ?PRETTY_COUNT(length(Delete)),
@@ -470,7 +470,7 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
 
       receive {'ETS-TRANSFER',LiveEts,Giver,start}->ok end,
 
-      ?LOGINFO("~p live updates has taken by ~p from ~p",[Log,self(),Giver]),
+      ?LOGINFO("~s live updates has taken by ~p from ~p",[Log,self(),Giver]),
       wait_ready(Live#live{ giver = Giver }, ?dbRef( Source,node() ))
 
     end),
@@ -482,10 +482,10 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
   % for my tail updates
   esubscribe:unsubscribe( Source, [SendNode], self() ),
 
-  ?LOGINFO("~p: giver ~p roll over tail live updates",[Log,Giver]),
+  ?LOGINFO("~s: giver ~p roll over tail live updates",[Log,Giver]),
   roll_tail_updates( Live ),
 
-  ?LOGINFO("~p give away live updates from ~p to ~p",[Log,Giver,Taker]),
+  ?LOGINFO("~s give away live updates from ~p to ~p",[Log,Giver,Taker]),
   ets:give_away(LiveEts, Taker, start),
 
   Live#live{taker = Taker}.
@@ -495,7 +495,7 @@ roll_tail_updates( #live{ source = Source, live_ets = LiveEts, log = Log } )->
   % Timeout because I have already unsubscribed and it's a finite process
   get_live_actions(esubscribe:wait( Source, ?FLUSH_TAIL_TIMEOUT ), LiveEts),
 
-  ?LOGINFO("~p giver ~p stockpile tail updates",[
+  ?LOGINFO("~s giver ~p stockpile tail updates",[
     Log,
     self()
   ]).
@@ -513,7 +513,7 @@ wait_ready(#live{
 
   {Write,Delete} = take_all(ets:first(LiveEts),LiveEts,{[],[]}),
 
-  ?LOGINFO("~p taker ~p actions to write to the copy ~p, to delete ~p",[
+  ?LOGINFO("~s taker ~p actions to write to the copy ~p, to delete ~p",[
     Log,
     ?PRETTY_COUNT(length(Write)),
     ?PRETTY_COUNT(length(Delete))
@@ -535,13 +535,13 @@ wait_ready(#live{
 
   esubscribe:unsubscribe( Source, [SendNode], self() ),
 
-  ?LOGINFO("~p ready, taker ~p flush tail subscriptions",[Log,self()]),
+  ?LOGINFO("~s ready, taker ~p flush tail subscriptions",[Log,self()]),
 
   get_live_actions(esubscribe:wait( Source, ?FLUSH_TAIL_TIMEOUT ), LiveEts),
 
   {Write,Delete} = take_all(ets:first(LiveEts),LiveEts,{[],[]}),
 
-  ?LOGINFO("~p taker ~p tail actions to write to the copy ~p, to delete ~p",[
+  ?LOGINFO("~s taker ~p tail actions to write to the copy ~p, to delete ~p",[
     Log,
     ?PRETTY_COUNT(length(Write)),
     ?PRETTY_COUNT(length(Delete))
@@ -552,7 +552,7 @@ wait_ready(#live{
 
   ets:delete( LiveEts ),
 
-  ?LOGINFO("~p live copy finish",[Log]).
+  ?LOGINFO("~s live copy finish",[Log]).
 
 take_all(K, Live, {Write,Delete} ) when K =/= '$end_of_table'->
   case ets:take(Live, K) of
@@ -579,7 +579,7 @@ local_copy( Source, Target, Module, Options)->
 
   OnBatch =
     fun(Batch, Size, _)->
-      ?LOGINFO("~p write batch, size ~s, length ~s",[
+      ?LOGINFO("~s write batch, size ~s, length ~s",[
         Log,
         ?PRETTY_SIZE(Size),
         ?PRETTY_COUNT(length(Batch))
@@ -588,7 +588,7 @@ local_copy( Source, Target, Module, Options)->
       Module:write_batch(Batch, TargetRef)
     end,
 
-  ?LOGINFO("~p finish, hash ~s",[Log]),
+  ?LOGINFO("~s finish, hash ~s",[Log]),
   fold(#source{module = Module,ref = SourceRef } , OnBatch, ?undefined),
 
   _LiveTail = finish_live_copy( Live ).

@@ -46,10 +46,10 @@
 -define(OPTIONS(O),maps:merge(?DEFAULT_OPTIONS,O)).
 
 % Log formats
--define(LOG_SEND(Source,Node),io_lib:format("copy: ~p to ~p",[Source,Node])).
--define(LOG_RECEIVE(Node,Source),io_lib:format("copy: ~p from ~p",[Source,Node])).
+-define(LOG_SEND(Source,Node),unicode:characters_to_list(io_lib:format("copy: ~p to ~p",[Source,Node]))).
+-define(LOG_RECEIVE(Node,Source),unicode:characters_to_list(io_lib:format("copy: ~p from ~p",[Source,Node]))).
 
--define(LOG_LOCAL(Source,Target),io_lib:format("local copy: ~p:~p",[Source,Target])).
+-define(LOG_LOCAL(Source,Target),unicode:characters_to_list(io_lib:format("local copy: ~p:~p",[Source,Target]))).
 
 -record(source,{name,module,ref}).
 
