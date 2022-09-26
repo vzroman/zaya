@@ -452,7 +452,7 @@ add_copy(DB,Node,Params)->
       ok
   end,
 
-  rpc:call( Node, zaya_db_srv, add_copy, [ DB, Params = ?params(DB,Params) ]).
+  rpc:call( Node, zaya_db_srv, add_copy, [ DB, ?params(DB,Params) ]).
 
 remove_copy(DB, Node)->
 

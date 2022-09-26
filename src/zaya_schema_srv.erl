@@ -374,8 +374,6 @@ get_schema_from( Node )->
   end.
 
 recover_by_schema(Schema)->
-  ?LOGINFO("node recovery by schema:\r\n ~p",[Schema]),
-
   OldSchema =
     lists:foldl(fun(DB, Acc)->
       Acc#{DB =>#{
