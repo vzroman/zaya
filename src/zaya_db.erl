@@ -97,12 +97,22 @@ not_available( F )->
   end
 ).
 
--define(REMOTE_CALL(Ns,Type,DB,Args),
-  case ecall:Type( Ns, ?MODULE, ?FUNCTION_NAME,[ DB|Args]) of
-    {ok,_@Res} -> _@Res;
+remote_result(Type,Result) ->
+  case Result of
+    {ok,{_,_@Res}} when Type=:=call_one; Type=:= call_any->
+      _@Res;
+    ok ->
+      ok;
+    {ok,_@Res} when Type=:=call_all->
+      _@Res;
+    _@Res when Type=:=call_all_wait->
+      _@Res;
     _->
       ?NOT_AVAILABLE
-  end
+  end.
+
+-define(REMOTE_CALL(Ns,Type,DB,Args),
+  remote_result(Type, ecall:Type( Ns, ?MODULE, ?FUNCTION_NAME,[ DB|Args]) )
 ).
 
 %------------entry points------------------------------------------

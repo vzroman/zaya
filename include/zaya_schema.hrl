@@ -324,7 +324,7 @@
 -define(allDBs,
 
   ?schemaFind([{
-      {'db','$1','@module@'},
+      {{db,'$1','@module@'},'_'},
       [],
       ['$1']
     }])
