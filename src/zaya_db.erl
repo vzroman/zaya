@@ -141,9 +141,9 @@ not_available( F )->
   end
 ).
 
--define(params(Ps),
+-define(params(DB,Ps),
   maps:merge(#{
-    dir => ?schemaDir
+    dir => ?schemaDir ++"/"++atom_to_list(DB)
   },Ps)
 ).
 
@@ -237,18 +237,18 @@ create(DB, Module, Params)->
       {OKs,Errors}
   end.
 
-do_create(DB, Module, NodesParams)->
+do_create(DB, Module, InParams)->
 
   epipe:do([
     fun(_)->
       zaya_schema_srv:add_db(DB,Module),
-      maps:get(node(), NodesParams, ?undefined)
+      maps:get(node(), InParams, ?undefined)
     end,
     fun
-      (_InParams = ?undefined)->
+      (_NodeParams = ?undefined)->
         {ok, added};
-      (InParams)->
-        Params = ?params(InParams),
+      (NodeParams)->
+        Params = ?params(DB,NodeParams),
         epipe:do([
           fun(_) -> Module:create( Params ) end,
           fun(_)->

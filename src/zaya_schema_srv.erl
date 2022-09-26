@@ -304,10 +304,6 @@ restart([Node]) when Node =:= node()->
 restart([])->
   ?LOGINFO("single application empty node restart"),
   ok;
-
-restart([Node])->
-  ?LOGINFO("try to reattach to ~p",[ Node ]),
-  try_attach_to([Node]);
 restart(Nodes)->
   ?LOGINFO("multi-node application restart, nodes ~p",[Nodes]),
   try_attach_to( Nodes -- [node()] ).
@@ -334,7 +330,7 @@ try_attach_to([Node|Rest])->
               ?SCHEMA_LOAD(SchemaBackup),
 
               CorruptedSchemaPath =
-                ?schemaPath++"/"++list_to_atom(Node)++".corrapted_schema",
+                ?schemaPath++"/"++list_to_atom(Node)++".corrupted_schema",
 
               file:write_file(CorruptedSchemaPath,term_to_binary(Schema)),
 
@@ -356,7 +352,18 @@ try_attach_to([])->
       [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
       ok;
     ReadyNodes->
-      todo
+      case os:getenv("FORCE_START") of
+        "true"->
+          ?LOGWARNING("FORCE RESTART"),
+          [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
+          ok;
+        _->
+          ?LOGWARNING("There were active nodes ~p, when the node went down. They might have more actual data.\r\n"
+          ++"Try to restart them first. If those nodes are lost or this node has the latest data you can restart it with:\r\n"
+          ++" env FORCE_START=true <your application>\r\n"
+          ++"ATTENTION! All the latest data on other nodes will be lost.",[ReadyNodes]),
+          try_attach_to(?allNodes)
+      end
   end.
 
 get_schema_from( Node )->
