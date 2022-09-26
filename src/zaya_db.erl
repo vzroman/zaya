@@ -112,7 +112,12 @@ remote_result(Type,Result) ->
   end.
 
 -define(REMOTE_CALL(Ns,Type,DB,Args),
-  remote_result(Type, ecall:Type( Ns, ?MODULE, ?FUNCTION_NAME,[ DB|Args]) )
+  case Ns of
+    _@Ns when is_list(_@Ns), length(_@Ns)>0 ->
+      remote_result(Type, ecall:Type( Ns, ?MODULE, ?FUNCTION_NAME,[ DB|Args]) );
+    _->
+      ?NOT_AVAILABLE
+  end
 ).
 
 %------------entry points------------------------------------------
