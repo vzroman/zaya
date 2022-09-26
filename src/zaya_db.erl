@@ -51,8 +51,7 @@
   remove/1, do_remove/1,
 
   add_copy/3,
-  remove_copy/2, do_remove_copy/1,
-  recover/1
+  remove_copy/2, do_remove_copy/1
 ]).
 
 %%=================================================================
@@ -143,7 +142,7 @@ not_available( F )->
 
 -define(params(DB,Ps),
   maps:merge(#{
-    dir => ?schemaDir ++"/"++atom_to_list(DB)
+    dir => filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
   },Ps)
 ).
 
@@ -229,11 +228,11 @@ create(DB, Module, Params)->
 
   {OKs, Errors} = ecall:call_all_wait( ?readyNodes ,?MODULE, do_create, [DB,Module,Params]),
 
-  case [N || {N, created} <- OKs] of
-    []->
+  if
+    length( OKs) =:= 0->
       ecall:cast_all( ?readyNodes, ?MODULE, do_remove, [DB] ),
       {error,Errors};
-    _->
+    true->
       {OKs,Errors}
   end.
 
@@ -277,10 +276,18 @@ force_open( DB, Node )->
   rpc:call( Node, zaya_db_srv, force_open, [DB]).
 
 close(DB)->
-  ecall:call_all_wait( ?dbReadyNodes(DB), zaya_db_srv, close, [DB] ).
+  {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, _Timeout = ?infinity, ?readyNodes ),
+  try ecall:call_all_wait( ?dbReadyNodes(DB), zaya_db_srv, close, [DB] )
+  after
+    Unlock()
+  end.
 
 close(DB, Node )->
-  rpc:call( Node, zaya_db_srv, close, [DB]).
+  {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, _Timeout = ?infinity, [Node] ),
+  try rpc:call( Node, zaya_db_srv, close, [DB])
+  after
+    Unlock()
+  end.
 
 remove( DB )->
 
@@ -406,16 +413,6 @@ do_remove_copy( DB )->
     fun(_)-> Module:remove( Params ) end
   ],?undefined).
 
-
-recover( DB )->
-  Params = ?dbNodeParams(DB,node()),
-  Module = ?dbModule( DB ),
-  Ref = Module:open(Params),
-  zaya_copy:copy(DB, Ref, Module, #{
-    live=>true,
-    attempts=>?env(db_recovery_attempts,?DEFAULT_DB_RECOVERY_ATTEMPTS)
-  }),
-  Module:close(Ref).
 
 
 

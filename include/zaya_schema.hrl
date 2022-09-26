@@ -409,6 +409,7 @@
 
 -define(REMOVE_DB(DB),
   begin
+    [ ?REMOVE_DB_COPY(DB,_@N) || _@N <- ?dbAllNodes(DB)],
     ?SCHEMA_DELETE({db,DB,'@module@'}),
     ?SCHEMA_DELETE({db,DB,'@nodes@'})
   end

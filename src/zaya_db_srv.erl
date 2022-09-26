@@ -164,7 +164,7 @@ handle_event(cast, recover, ready, #data{db = DB, module = Module, ref = Ref}=Da
   {next_state, recovery, Data, [ {state_timeout, 0, recover } ]};
 
 handle_event(EventType, EventContent, _AnyState, #data{db = DB}) ->
-  ?LOGWARNING("~p received unexpected event type ~p, content ~p",[
+  ?LOGWARNING("~p database server received unexpected event type ~p, content ~p",[
     DB,
     EventType, EventContent
   ]),
