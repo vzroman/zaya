@@ -133,12 +133,18 @@ handle_event(state_timeout, register, register, #data{db = DB, ref = Ref} = Data
 handle_event(state_timeout, recover, recovery, #data{db = DB, module = Module}=Data ) ->
   case ?dbAvailableNodes(DB) of
     []->
-      ?LOGERROR("~p database recover error: database is unavailable.\r\n"++
-        "If you sure that the local copy is the latest you can try to load it with:\r\n"++
-        "  zaya:db_force_open(~p, ~p).\r\n" ++
-        "Execute this command from erlang console at any attached node.\r\n"++
-        "WARNING!!! All the data changes made in other nodes copies will be LOST!",[DB,DB,node()]),
-      { keep_state_and_data, [ {state_timeout, 5000, recover } ] };
+      case os:getenv("FORCE_START") of
+        "true"->
+          ?LOGWARNING("~p force open",[DB]),
+          {next_state, init, Data, [ {state_timeout, 0, open } ] };
+        _->
+          ?LOGERROR("~p database recover error: database is unavailable.\r\n"++
+            "If you sure that the local copy is the latest you can try to load it with:\r\n"++
+            "  zaya:db_force_open(~p, ~p).\r\n" ++
+            "Execute this command from erlang console at any attached node.\r\n"++
+            "WARNING!!! All the data changes made in other nodes copies will be LOST!",[DB,DB,node()]),
+          { keep_state_and_data, [ {state_timeout, 5000, recover } ] }
+      end;
     _->
       % TODO. Hash tree
       Params = ?dbNodeParams(DB,node()),
