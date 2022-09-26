@@ -158,6 +158,8 @@ try_copy(#copy{
         try_copy(State#copy{send_node = ?dbSource(Source), attempts = Attempts - 1, error ={Error,Stack} })
     end,
 
+  unlink(Sender),
+
   finish_live_copy( Live ),
 
   ?LOGINFO("~s finish hash ~s", [Log, ?PRETTY_HASH( FinalHash )]),
@@ -530,6 +532,7 @@ wait_ready(#live{
   module = Module,
   copy_ref = CopyRef,
   live_ets = LiveEts,
+  giver = Giver,
   log = Log
 }, Ref) when Ref =/= ?undefined ->
 
@@ -551,6 +554,8 @@ wait_ready(#live{
   Module:write(CopyRef, Write),
 
   ets:delete( LiveEts ),
+
+  unlink(Giver),
 
   ?LOGINFO("~s live copy finish",[Log]).
 
