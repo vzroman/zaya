@@ -334,10 +334,10 @@ remote_batch(Batch0, Size, #s_acc{
     Log, ?PRETTY_SIZE(Size), ?PRETTY_SIZE(ZipSize), ?PRETTY_SIZE(TotalZipSize)
   ]),
 
-  State#{
-    size => TotalZipSize,
-    batch => [Zip|ZipBatch],
-    hash => Hash
+  State#s_acc{
+    size = TotalZipSize,
+    batch = [Zip|ZipBatch],
+    hash = Hash
   };
 
 % The batch is ready, send it
