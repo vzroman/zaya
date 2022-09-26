@@ -47,12 +47,16 @@
   all_dbs_nodes_params/0,
   ready_nodes/1,
   not_ready_nodes/1,
-  dbs_ready_nodes/0,
-  dbs_not_ready_nodes/0,
+  all_dbs_ready_nodes/0,
+  all_dbs_not_ready_nodes/0,
   is_available/1,
   is_not_available/1,
   available_dbs/0,
-  not_available_dbs/0
+  not_available_dbs/0,
+  available_copies/1,
+  not_available_copies/1,
+  all_dbs_available_copies/0,
+  all_dbs_not_available_copies/0
 ]).
 
 %%=================================================================
@@ -237,11 +241,10 @@ ready_nodes(DB)->
 not_ready_nodes(DB)->
   ?dbNotReadyNodes(DB).
 
-dbs_ready_nodes()->
+all_dbs_ready_nodes()->
   ?dbsReadyNodes.
 
-
-dbs_not_ready_nodes()->
+all_dbs_not_ready_nodes()->
   ?dbsNotReadyNodes.
 
 is_available(DB)->
@@ -255,6 +258,18 @@ available_dbs()->
 
 not_available_dbs()->
   ?notAvailableDBs.
+
+available_copies( DB )->
+  ?dbAvailableNodes( DB ).
+
+not_available_copies( DB )->
+  ?dbAllNodes(DB) -- ?dbAvailableNodes(DB).
+
+all_dbs_available_copies()->
+  [{DB,?dbAvailableNodes( DB )} || DB <- ?allDBs ].
+
+all_dbs_not_available_copies()->
+  [{DB,not_available_copies( DB )} || DB <- ?allDBs ].
 
 %%=================================================================
 %%	SERVICE

@@ -135,7 +135,7 @@ handle_event(state_timeout, recover, recovery, #data{db = DB, module = Module}=D
     []->
       ?LOGERROR("~p database recover error: database is unavailable.\r\n"++
         "If you sure that the local copy is the latest you can try to load it with:\r\n"++
-        "  zaya:force_load_db_copy(~p, ~p).\r\n" ++
+        "  zaya:db_force_open(~p, ~p).\r\n" ++
         "Execute this command from erlang console at any attached node.\r\n"++
         "WARNING!!! All the data changes made in other nodes copies will be LOST!",[DB,DB,node()]),
       { keep_state_and_data, [ {state_timeout, 5000, recover } ] };

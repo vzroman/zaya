@@ -95,14 +95,14 @@ not_ready_nodes_dbs()->
 all_nodes_dbs()->
   ?allNodesDBs.
 %------------------------------
-node_db_params( Node, db )->
-  ?dbNodeParams(db, Node).
+node_db_params( Node, DB )->
+  ?dbNodeParams(DB, Node).
 
-ready_nodes_db_params(db)->
-  ?readyNodesDBParams(db).
+ready_nodes_db_params(DB)->
+  ?readyNodesDBParams(DB).
 
-not_ready_nodes_db_params(db)->
-  ?notReadyNodesDBParams(db).
+not_ready_nodes_db_params(DB)->
+  ?notReadyNodesDBParams(DB).
 
 %--------------------------------
 
