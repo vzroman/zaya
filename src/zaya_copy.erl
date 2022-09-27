@@ -578,8 +578,8 @@ local_copy( Source, Target, Module, Options)->
   _LiveTail = finish_live_copy( Live ).
 
 
-debug(Storage, Count)->
-  spawn(fun()->fill(Storage, Count) end).
+debug(DB, Count)->
+  spawn(fun()->fill(DB, Count) end).
 
 fill(S,C) when C>0 ->
   if C rem 100000 =:= 0-> ?LOGINFO("DEBUG: write ~p",[C]); true->ignore end,
@@ -591,5 +591,8 @@ fill(S,C) when C>0 ->
   fill(S,C-1);
 fill(_S,_C)->
   ok.
+
+% Test = zaya_copy:debug(Test, 200000000)
+% exit(Test,shutdown).
 
 
