@@ -531,22 +531,11 @@ take_all(_K, _Live, Acc)->
   Acc.
 
 wait_ready(#live{
-  module = Module,
-  copy_ref = CopyRef,
-  source = Source,
-  send_node = SendNode
+  source = Source
 } = Live)->
   receive
-    {'$esubscription', Source, {write,[KVs]}, SendNode, _Actor}->
-      Module:write(CopyRef, KVs),
-      wait_ready( Live );
-    {'$esubscription', Source, {delete,[Keys]}, SendNode, _Actor}->
-      Module:delete(CopyRef, Keys),
-      wait_ready( Live );
     {'$esubscription', ?schema, {'open_db',Source,Node}, Node, _Actor} when Node =:= node()->
-      wait_tail(Live);
-    _->
-      wait_ready( Live )
+      wait_tail(Live)
   end.
 
 wait_tail(#live{
@@ -559,7 +548,9 @@ wait_tail(#live{
   esubscribe:unsubscribe(Source,self(),[node(),SendNode]),
 
   Local = get_subscriptions(Source, node(),#{}),
-  flush_tail(Live, Local ),
+  ?LOGINFO("DEBUG: local ~p",[Local]),
+
+  flush_tail(Live, Local),
 
   unlink(Giver),
 
@@ -569,7 +560,14 @@ wait_tail(#live{
 get_subscriptions(Source, Node, Acc)->
   receive
     {'$esubscription', Source, Action, Node, _Actor}->
-      get_subscriptions(Source, Node, Acc#{Action => true} )
+      AddKeys =
+        case Action of
+          {write,[KVs]}->
+            [{K,true} || {K,_} <- KVs];
+          {delete,[Keys]}->
+            [{K,true} || K <- Keys]
+        end,
+      get_subscriptions(Source, Node, maps:merge(Acc, maps:from_list(AddKeys)))
   after
     ?FLUSH_TAIL_TIMEOUT->Acc
   end.
@@ -581,18 +579,14 @@ flush_tail(#live{
   copy_ref = CopyRef
 } = Live, Local )->
   receive
-    {'$esubscription', Source, Action, SendNode, _Actor}->
-      case Local of
-        #{Action := _}->
-          flush_tail( Live, Local );
-        _->
-          case Action of
-            {write,[KVs]}->  Module:write(CopyRef, KVs);
-            {delete,[Keys]}-> Module:delete(CopyRef, Keys);
-            _-> ignore
-          end,
-          flush_tail( Live, Local )
-      end
+    {'$esubscription', Source, {write,[KVs]}, SendNode, _Actor}->
+      ToWrite = [Rec || Rec ={K,_} <- KVs, not maps:is_key(K,Local)],
+      Module:write(CopyRef, ToWrite),
+      flush_tail(Live, Local);
+    {'$esubscription', Source, {delete,[Keys]}, SendNode, _Actor}->
+      ToDelete = [K || K <- Keys, not maps:is_key(K,Local)],
+      Module:delete(CopyRef, ToDelete),
+      flush_tail(Live, Local)
   after
     ?FLUSH_TAIL_TIMEOUT->ok
   end.
