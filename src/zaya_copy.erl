@@ -388,6 +388,7 @@ prepare_live_copy( Source, Module, SendNode, CopyRef, Log, _Options )->
     module = Module,
     copy_ref = CopyRef,
     log = Log,
+    send_node = SendNode,
     % Prepare the storage for live updates anyway to avoid excessive check during the copying
     live_ets = ets:new(live,[private,ordered_set])
   }.
