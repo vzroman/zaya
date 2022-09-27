@@ -382,7 +382,7 @@ prepare_live_copy( Source, Module, SendNode, CopyRef, Log, _Options )->
   ?LOGINFO("~s live copy, subscribe....",[Log]),
   % We need to subscribe to all nodes, every node can do updates,
   % timeout is infinity we do not start until everybody is ready
-  esubscribe:subscribe(Source, [SendNode], self(), _Timeout = infinity),
+  esubscribe:subscribe(Source, self(), [SendNode]),
   #live{
     source = Source,
     module = Module,
@@ -402,7 +402,7 @@ drop_live_copy(#live{live_ets = false})->
   ok;
 drop_live_copy(#live{ source = Source, send_node = SendNode, live_ets = LiveEts})->
 
-  esubscribe:unsubscribe(Source,[SendNode], self()),
+  esubscribe:unsubscribe(Source, self(), [SendNode]),
   % Try to drop tail updates
   esubscribe:wait(Source, ?FLUSH_TAIL_TIMEOUT),
 
@@ -477,11 +477,11 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
     end),
 
   % Subscribe the Taker
-  esubscribe:subscribe( Source, [SendNode], Taker, _Timeout=infinity ),
+  esubscribe:subscribe( Source, Taker, [SendNode] ),
 
   % From now the Taker receives updates I can unsubscribe, and wait
   % for my tail updates
-  esubscribe:unsubscribe( Source, [SendNode], self() ),
+  esubscribe:unsubscribe( Source, self(), [SendNode] ),
 
   ?LOGINFO("~s: giver ~p roll over tail live updates",[Log,Giver]),
   roll_tail_updates( Live ),
@@ -535,7 +535,7 @@ wait_ready(#live{
   log = Log
 }, Ref) when Ref =/= ?undefined ->
 
-  esubscribe:unsubscribe( Source, [SendNode], self() ),
+  esubscribe:unsubscribe( Source, self(), [SendNode] ),
 
   ?LOGINFO("~s ready, taker ~p flush tail subscriptions",[Log,self()]),
 
