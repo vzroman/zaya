@@ -355,6 +355,7 @@ try_attach_to([])->
       case os:getenv("FORCE_START") of
         "true"->
           ?LOGWARNING("FORCE RESTART"),
+          [ ?NODE_DOWN(N) || N <- ?allNodes],
           [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
           ok;
         _->
