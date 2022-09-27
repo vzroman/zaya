@@ -592,7 +592,7 @@ fill(S,C) when C>0 ->
 fill(_S,_C)->
   ok.
 
-% Test = zaya_copy:debug(Test, 200000000)
+% Test = zaya_copy:debug(test, 200000000)
 % exit(Test,shutdown).
 
 
