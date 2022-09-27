@@ -555,12 +555,14 @@ fill(S,C) when C>0 ->
     {y, binary:copy(integer_to_binary(C), 100)}
   },
   zaya:write(S,[KV]),
+  timer:sleep(10),
   fill(S,C-1);
 fill(_S,_C)->
   ok.
 
 % Test = zaya_copy:debug(test, 200000000)
 % exit(Test,shutdown).
+% zaya_copy:get_hash(test)
 
 get_hash(DB)->
   InitHash = crypto:hash_update(crypto:hash_init(sha256),<<>>),
