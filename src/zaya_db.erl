@@ -158,6 +158,7 @@ remote_result(Type,Result) ->
               ?REMOTE_CALL( _@Ns, call_any, {call,DB}, Args );
             _@Res->
               ?REMOTE_CALL( _@Ns, cast_all, {call,DB}, Args ),
+              esubscribe:notify( DB, {?FUNCTION_NAME, Args} ),
               _@Res
           end
       end;
