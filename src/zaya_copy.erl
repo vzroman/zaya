@@ -592,6 +592,8 @@ flush_tail(#live{
     {'$esubscription', Source, {delete,[Keys]}, _Node, _Actor}->
       ToDelete = [K || K <- Keys, case ets:lookup(Updates,K) of []-> true; _-> false end],
       Module:delete(CopyRef, ToDelete),
+      flush_tail(Live);
+    _->
       flush_tail(Live)
   after
     ?FLUSH_TAIL_TIMEOUT->ok
