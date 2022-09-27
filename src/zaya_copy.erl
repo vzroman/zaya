@@ -476,7 +476,10 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
 
       Taker = self(),
       Local = spawn_link(fun()->
+
+        esubscribe:subscribe(?schema, self()),
         esubscribe:subscribe(Source, self()),
+
         Taker ! {ready, self()},
 
         Updates = ets:new(local,[protected,set]),
@@ -486,10 +489,14 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
               {write,[KVs]}-> ets:insert(Updates,[{K,true}||{K,_}<-KVs]);
               {delete,Keys}-> ets:insert(Updates,[{K,true}||K<-Keys]);
               _->ignore
-            end,
-            Taker ! {flush, self(), Updates},
-            wait_ready( Live#live{live_ets = Updates} )
-        end
+            end;
+          {'$esubscription', ?schema, {'open_db',Source,Node}, _Node, _Actor} when Node=:=node()->
+            ok
+        end,
+
+        Taker ! {flush, self(), Updates},
+        wait_ready( Live#live{live_ets = Updates} )
+
       end),
 
       receive {ready,Local}->ok end,
@@ -506,7 +513,11 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
 
       esubscribe:unsubscribe( Source, self(), [SendNode]),
 
-      flush_tail(Live#live{ giver = Giver, live_ets = LocalUpdates })
+      flush_tail(Live#live{ giver = Giver, live_ets = LocalUpdates }),
+
+      unlink(Giver),
+
+      ?LOGINFO("~s copy finished",[ Log ])
 
     end),
 
