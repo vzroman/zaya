@@ -472,12 +472,15 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
     spawn_link(fun()->
 
       % Subscribe to the schema transformations to be able to know when the copy is ready
-      esubscribe:subscribe( ?schema, self()),
+      esubscribe:subscribe( Source, self()),
 
       % Subscribe to the source
       esubscribe:subscribe( Source, self(), [SendNode]),
 
       Giver ! {ready, self()},
+
+      % Wait for the start
+      receive {start,Giver}-> ok end,
 
       ?LOGINFO("~s live updates has taken by ~p from ~p",[Log,self(),Giver]),
       wait_ready(Live#live{ giver = Giver })
@@ -494,7 +497,9 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
   ?LOGINFO("~s: giver ~p roll over tail live updates",[Log,Giver]),
   roll_tail_updates( Live ),
 
-  ets:delete(LiveEts).
+  ets:delete(LiveEts),
+
+  Taker ! {start, Giver}.
 
 roll_tail_updates( #live{ source = Source, module = Module, copy_ref = CopyRef, live_ets = LiveEts, log = Log } )->
 
@@ -528,46 +533,45 @@ wait_ready(#live{
   source = Source,
   module=Module,
   copy_ref = CopyRef,
-  send_node = SendNode
+  send_node = SendNode,
+  log = Log
 } = Live)->
 
   receive
-    {'$esubscription', Source, {write,[KVs]}, _Node, _Actor}->
+    {'$esubscription', Source, {write,[KVs]}, SendNode, _Actor}->
       Module:write(CopyRef, KVs),
       wait_ready( Live );
-    {'$esubscription', Source, {delete,[Keys]}, _Node, _Actor}->
+    {'$esubscription', Source, {delete,[Keys]}, SendNode, _Actor}->
       Module:delete(CopyRef, Keys),
       wait_ready( Live );
-    {'$esubscription', ?schema, {'open_db',Source,Node}, _Node, _Actor} when Node=:=node()->
-      % The copy is ready, roll tail updates
-      esubscribe:unsubscribe( Source, self(), [SendNode] ),
-      wait_tail(Live);
+    {'$esubscription', Source, _Action, Node, _Actor} when Node =:= node()->
+      ?LOGINFO("~s copy finsished",[Log]);
     _->
       wait_ready( Live )
   end.
 
-wait_tail(#live{
-  source = Source,
-  module=Module,
-  copy_ref = CopyRef,
-  log = Log,
-  giver = Giver
-} = Live)->
-
-  receive
-    {'$esubscription', Source, {write,[KVs]}, _Node, _Actor}->
-      Module:write(CopyRef, KVs),
-      wait_tail( Live );
-    {'$esubscription', Source, {delete,[Keys]}, _Node, _Actor}->
-      Module:delete(CopyRef, Keys),
-      wait_tail( Live );
-    _->
-      wait_tail( Live )
-  after
-    0->
-      unlink(Giver),
-      ?LOGINFO("~s copy finsished",[Log])
-  end.
+%%wait_tail(#live{
+%%  source = Source,
+%%  module=Module,
+%%  copy_ref = CopyRef,
+%%  log = Log,
+%%  giver = Giver
+%%} = Live)->
+%%
+%%  receive
+%%    {'$esubscription', Source, {write,[KVs]}, _Node, _Actor}->
+%%      Module:write(CopyRef, KVs),
+%%      wait_tail( Live );
+%%    {'$esubscription', Source, {delete,[Keys]}, _Node, _Actor}->
+%%      Module:delete(CopyRef, Keys),
+%%      wait_tail( Live );
+%%    _->
+%%      wait_tail( Live )
+%%  after
+%%    0->
+%%      unlink(Giver),
+%%      ?LOGINFO("~s copy finsished",[Log])
+%%  end.
 
 %---------------------------------------------------------------------
 % LOCAL COPY DB COPY TO DB
