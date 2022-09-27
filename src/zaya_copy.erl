@@ -22,7 +22,8 @@
 ]).
 
 -export([
-  debug/2
+  debug/2,
+  get_hash/1
 ]).
 
 %%-----------------------------------------------------------------
@@ -613,4 +614,7 @@ fill(_S,_C)->
 % Test = zaya_copy:debug(test, 200000000)
 % exit(Test,shutdown).
 
-
+get_hash(DB)->
+  InitHash = crypto:hash_update(crypto:hash_init(sha256),<<>>),
+  FinalHash = zaya:foldl(DB,#{},fun(Rec,Hash)->crypto:hash_update(Hash,term_to_binary(Rec)) end, InitHash),
+  ?PRETTY_HASH(crypto:hash_final( FinalHash )).
