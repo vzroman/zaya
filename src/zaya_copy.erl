@@ -433,10 +433,10 @@ roll_live_updates(#live{ source = Source, module = Module, copy_ref = CopyRef, l
   Module:delete(CopyRef, Delete),
   Module:write(CopyRef, Write).
 
-get_live_actions([{{write,KVs},_Node,_Actor}|Rest], LiveEts)->
+get_live_actions([{{write,[KVs]},_Node,_Actor}|Rest], LiveEts)->
   ets:insert(LiveEts,[{K,{write,V}} || {K,V} <- KVs ]),
   get_live_actions( Rest, LiveEts);
-get_live_actions([{{delete,Keys},_Node,_Actor}|Rest], LiveEts)->
+get_live_actions([{{delete,[Keys]},_Node,_Actor}|Rest], LiveEts)->
   ets:insert(LiveEts,[{K,delete} || K <- Keys ]),
   get_live_actions( Rest, LiveEts);
 get_live_actions([{_Other,_Node,_Actor}|Rest], LiveEts)->
@@ -495,15 +495,33 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
 
   ets:delete(LiveEts).
 
-roll_tail_updates( #live{ source = Source, live_ets = LiveEts, log = Log } )->
+roll_tail_updates( #live{ source = Source, module = Module, copy_ref = CopyRef, live_ets = LiveEts, log = Log } )->
 
   % Timeout because I have already unsubscribed and it's a finite process
   get_live_actions(esubscribe:wait( Source, ?FLUSH_TAIL_TIMEOUT ), LiveEts),
 
-  ?LOGINFO("~s giver ~p stockpile tail updates",[
+  % Take out the actions that are in the copy range already
+  {Write,Delete} = take_all(ets:first(LiveEts), LiveEts, {[],[]}),
+  ?LOGINFO("~s actions to write to the copy ~p, delete ~p",[
     Log,
-    self()
-  ]).
+    ?PRETTY_COUNT(length(Write)),
+    ?PRETTY_COUNT(length(Delete))
+  ]),
+
+  Module:delete(CopyRef, Delete),
+  Module:write(CopyRef, Write).
+
+take_all(K, Live, {Write,Delete} ) when K =/= '$end_of_table'->
+  case ets:take(Live, K) of
+    [{K,{write,V}}]->
+      take_all( ets:next(Live,K), Live, {[{K,V}|Write],Delete});
+    [{K,delete}]->
+      take_all( ets:next(Live,K), Live, {Write,[K|Delete]});
+    _->
+      take_all( ets:next(Live,K), Live, {Write,Delete})
+  end;
+take_all(_K, _Live, Acc)->
+  Acc.
 
 wait_ready(#live{
   source = Source,
@@ -513,10 +531,10 @@ wait_ready(#live{
 } = Live)->
 
   receive
-    {'$esubscription', Source, {write,KVs}, _Node, _Actor}->
+    {'$esubscription', Source, {write,[KVs]}, _Node, _Actor}->
       Module:write(CopyRef, KVs),
       wait_ready( Live );
-    {'$esubscription', Source, {delete,Keys}, _Node, _Actor}->
+    {'$esubscription', Source, {delete,[Keys]}, _Node, _Actor}->
       Module:delete(CopyRef, Keys),
       wait_ready( Live );
     {'$esubscription', ?schema, {'open_db',Source,Node}, _Node, _Actor} when Node=:=node()->
@@ -536,10 +554,10 @@ wait_tail(#live{
 } = Live)->
 
   receive
-    {'$esubscription', Source, {write,KVs}, _Node, _Actor}->
+    {'$esubscription', Source, {write,[KVs]}, _Node, _Actor}->
       Module:write(CopyRef, KVs),
       wait_tail( Live );
-    {'$esubscription', Source, {delete,Keys}, _Node, _Actor}->
+    {'$esubscription', Source, {delete,[Keys]}, _Node, _Actor}->
       Module:delete(CopyRef, Keys),
       wait_tail( Live );
     _->
