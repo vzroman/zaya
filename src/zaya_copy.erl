@@ -472,6 +472,7 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
     spawn_link(fun()->
 
       % Subscribe to the schema transformations to be able to know when the copy is ready
+      esubscribe:subscribe( ?schema, self()),
       esubscribe:subscribe( Source, self()),
 
       % Subscribe to the source
@@ -530,36 +531,71 @@ take_all(_K, _Live, Acc)->
   Acc.
 
 wait_ready(#live{
-  source = Source
+  module = Module,
+  copy_ref = CopyRef,
+  source = Source,
+  send_node = SendNode
 } = Live)->
   receive
-    {'$esubscription', Source, Action, Node, _Actor} when Node =:= node()->
-      wait_tail(Live,Action)
+    {'$esubscription', Source, {write,[KVs]}, SendNode, _Actor}->
+      Module:write(CopyRef, KVs),
+      wait_ready( Live );
+    {'$esubscription', Source, {delete,[Keys]}, SendNode, _Actor}->
+      Module:delete(CopyRef, Keys),
+      wait_ready( Live );
+    {'$esubscription', ?schema, {'open_db',Source,Node}, Node, _Actor} when Node =:= node()->
+      wait_tail(Live);
+    _->
+      wait_ready( Live )
   end.
 
 wait_tail(#live{
   source = Source,
-  module=Module,
-  copy_ref = CopyRef,
   send_node = SendNode,
   log = Log,
   giver = Giver
-} = Live, Action)->
+} = Live)->
+  esubscribe:unsubscribe(?schema, self()),
+  esubscribe:unsubscribe(Source,self(),[node(),SendNode]),
 
+  Local = get_subscriptions(Source, node(),#{}),
+  flush_tail(Live, Local ),
+
+  unlink(Giver),
+
+  ?LOGINFO("~s copy finsished",[Log]).
+
+
+get_subscriptions(Source, Node, Acc)->
   receive
-    {'$esubscription', Source, Action, SendNode, _Actor}->
-      unlink(Giver),
-      ?LOGINFO("~s copy finsished",[Log]);
-    {'$esubscription', Source, {write,[KVs]}, SendNode, _Actor}->
-      Module:write(CopyRef, KVs),
-      wait_tail( Live, Action );
-    {'$esubscription', Source, {delete,[Keys]}, SendNode, _Actor}->
-      Module:delete(CopyRef, Keys),
-      wait_tail( Live, Action );
-    _->
-      wait_tail( Live, Action )
+    {'$esubscription', Source, Action, Node, _Actor}->
+      get_subscriptions(Source, Node, Acc#{Action => true} )
+  after
+    ?FLUSH_TAIL_TIMEOUT->Acc
   end.
 
+flush_tail(#live{
+  source = Source,
+  send_node = SendNode,
+  module = Module,
+  copy_ref = CopyRef
+} = Live, Local )->
+  receive
+    {'$esubscription', Source, Action, SendNode, _Actor}->
+      case Local of
+        #{Action := _}->
+          flush_tail( Live, Local );
+        _->
+          case Action of
+            {write,[KVs]}->  Module:write(CopyRef, KVs);
+            {delete,[Keys]}-> Module:delete(CopyRef, Keys);
+            _-> ignore
+          end,
+          flush_tail( Live, Local )
+      end
+  after
+    ?FLUSH_TAIL_TIMEOUT->ok
+  end.
 %---------------------------------------------------------------------
 % LOCAL COPY DB COPY TO DB
 %---------------------------------------------------------------------
