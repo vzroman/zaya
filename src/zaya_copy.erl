@@ -530,48 +530,35 @@ take_all(_K, _Live, Acc)->
   Acc.
 
 wait_ready(#live{
+  source = Source
+} = Live)->
+  receive
+    {'$esubscription', Source, Action, Node, _Actor} when Node =:= node()->
+      wait_tail(Live,Action)
+  end.
+
+wait_tail(#live{
   source = Source,
   module=Module,
   copy_ref = CopyRef,
   send_node = SendNode,
-  log = Log
-} = Live)->
+  log = Log,
+  giver = Giver
+} = Live, Action)->
 
   receive
+    {'$esubscription', Source, Action, SendNode, _Actor}->
+      unlink(Giver),
+      ?LOGINFO("~s copy finsished",[Log]);
     {'$esubscription', Source, {write,[KVs]}, SendNode, _Actor}->
       Module:write(CopyRef, KVs),
-      wait_ready( Live );
+      wait_tail( Live, Action );
     {'$esubscription', Source, {delete,[Keys]}, SendNode, _Actor}->
       Module:delete(CopyRef, Keys),
-      wait_ready( Live );
-    {'$esubscription', Source, _Action, Node, _Actor} when Node =:= node()->
-      ?LOGINFO("~s copy finsished",[Log]);
+      wait_tail( Live, Action );
     _->
-      wait_ready( Live )
+      wait_tail( Live, Action )
   end.
-
-%%wait_tail(#live{
-%%  source = Source,
-%%  module=Module,
-%%  copy_ref = CopyRef,
-%%  log = Log,
-%%  giver = Giver
-%%} = Live)->
-%%
-%%  receive
-%%    {'$esubscription', Source, {write,[KVs]}, _Node, _Actor}->
-%%      Module:write(CopyRef, KVs),
-%%      wait_tail( Live );
-%%    {'$esubscription', Source, {delete,[Keys]}, _Node, _Actor}->
-%%      Module:delete(CopyRef, Keys),
-%%      wait_tail( Live );
-%%    _->
-%%      wait_tail( Live )
-%%  after
-%%    0->
-%%      unlink(Giver),
-%%      ?LOGINFO("~s copy finsished",[Log])
-%%  end.
 
 %---------------------------------------------------------------------
 % LOCAL COPY DB COPY TO DB
