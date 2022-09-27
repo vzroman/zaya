@@ -384,9 +384,6 @@ prepare_live_copy( Source, Module, SendNode, CopyRef, Log, _Options )->
     ?LOGINFO("~s live copy, subscribe....",[Log]),
     esubscribe:subscribe(Source, self(), [SendNode]),
 
-    esubscribe:subscribe(?schema,self(),[SendNode]),
-    esubscribe:subscribe(?schema,self()),
-
     wait_live_updates(#live{
       source = Source,
       module = Module,
@@ -402,7 +399,8 @@ prepare_live_copy( Source, Module, SendNode, CopyRef, Log, _Options )->
 finish_live_copy( ?undefined )->
   ok;
 finish_live_copy( Live )->
-  Live ! {finish, self()}.
+  Live ! {finish, self()},
+  receive {finish, Live}->ok end.
 
 drop_live_copy(?undefined)->
   ok;
@@ -427,6 +425,8 @@ wait_live_updates(#live{ source = Source, live_ets = LiveEts, owner = Owner }=Li
       wait_live_updates( Live );
     {finish, Owner}->
       roll_tail_updates( Live ),
+      Owner ! {finish,self()},
+      wait_ready( Live ),
       unlink(Owner);
     {drop,Owner}->
       unlink(Owner);
@@ -468,7 +468,7 @@ take_head(K, Live, TailKey, {Write,Delete} ) when K =/= '$end_of_table', K =< Ta
 take_head(_K, _Live, _TailKey, Acc)->
   Acc.
 
-roll_tail_updates( #live{ module = Module, copy_ref = CopyRef, live_ets = LiveEts, log = Log }=Live )->
+roll_tail_updates( #live{ module = Module, copy_ref = CopyRef, live_ets = LiveEts, log = Log })->
 
   % Take out the actions that are in the copy range already
   {Write,Delete} = take_all(ets:first(LiveEts), LiveEts, {[],[]}),
@@ -481,7 +481,7 @@ roll_tail_updates( #live{ module = Module, copy_ref = CopyRef, live_ets = LiveEt
   Module:delete(CopyRef, Delete),
   Module:write(CopyRef, Write),
 
-  wait_ready( Live ).
+  ok.
 
 take_all(K, Live, {Write,Delete} ) when K =/= '$end_of_table'->
   case ets:take(Live, K) of
@@ -499,7 +499,6 @@ wait_ready(#live{
   source = Source,
   module = Module,
   copy_ref = CopyRef,
-  send_node = SendNode,
   log = Log
 } = Live)->
   receive
@@ -508,13 +507,9 @@ wait_ready(#live{
       wait_ready(Live);
     {'$esubscription', Source, {delete,[Keys]}, _Node, _Actor}->
       Module:delete(CopyRef, Keys),
-      wait_ready(Live);
-    {'$esubscription', ?schema, {'open_db',Source,Node}, SendNode, _Actor} when Node=:=node()->
-      ?LOGINFO("~s copy finished",[Log]);
-    {'$esubscription', ?schema, {'node_down',SendNode}, _Node, _Actor}->
-      ?LOGINFO("~s copy finished as send node is down",[Log]);
-    _->
       wait_ready(Live)
+  after
+    0->?LOGINFO("~s finsish copy",[Log])
   end.
 
 %---------------------------------------------------------------------
@@ -555,7 +550,7 @@ fill(S,C) when C>0 ->
     {y, binary:copy(integer_to_binary(C), 100)}
   },
   zaya:write(S,[KV]),
-  timer:sleep(10),
+  %timer:sleep(10),
   fill(S,C-1);
 fill(_S,_C)->
   ok.
