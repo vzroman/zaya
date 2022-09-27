@@ -471,8 +471,6 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
   Taker =
     spawn_link(fun()->
 
-      % Subscribe to the schema transformations to be able to know when the copy is ready
-      esubscribe:subscribe( ?schema, self()),
       esubscribe:subscribe( Source, self()),
 
       % Subscribe to the source
@@ -531,31 +529,31 @@ take_all(_K, _Live, Acc)->
   Acc.
 
 wait_ready(#live{
-  source = Source
-} = Live)->
-  receive
-    {'$esubscription', ?schema, {'open_db',Source,Node}, Node, _Actor} when Node =:= node()->
-      wait_tail(Live)
-  end.
-
-wait_tail(#live{
   source = Source,
   send_node = SendNode,
-  log = Log,
-  giver = Giver
+  giver = Giver,
+  log = Log
 } = Live)->
-  esubscribe:unsubscribe(?schema, self()),
-  esubscribe:unsubscribe(Source,self(),[node(),SendNode]),
+  receive
+    {'$esubscription', Source, Action, Node, _Actor} when Node =:= node()->
+      esubscribe:unsubscribe(Source, self(),[node(),SendNode]),
+      InitAcc =
+        case Action of
+          {write,[KVs]}->
+            maps:from_list([{K,true} || {K,_} <- KVs]);
+          {delete,[Keys]}->
+            maps:from_list([{K,true} || K <- Keys])
+        end,
 
-  Local = get_subscriptions(Source, node(),#{}),
-  ?LOGINFO("DEBUG: local ~p",[Local]),
+      Local = get_subscriptions(Source, node(), InitAcc),
+      ?LOGINFO("DEBUG: local ~p",[Local]),
 
-  flush_tail(Live, Local),
+      flush_tail(Live, Local),
 
-  unlink(Giver),
+      unlink(Giver),
 
-  ?LOGINFO("~s copy finsished",[Log]).
-
+      ?LOGINFO("~s copy finsished",[Log])
+  end.
 
 get_subscriptions(Source, Node, Acc)->
   receive
@@ -582,15 +580,11 @@ flush_tail(#live{
 } = Live, Local )->
   receive
     {'$esubscription', Source, {write,[KVs]}, SendNode, _Actor}->
-      ?LOGINFO("DEBUG: remote write action ~p",[KVs]),
       ToWrite = [Rec || Rec ={K,_} <- KVs, not maps:is_key(K,Local)],
-      ?LOGINFO("DEBUG: remote to write ~p",[ToWrite]),
       Module:write(CopyRef, ToWrite),
       flush_tail(Live, Local);
     {'$esubscription', Source, {delete,[Keys]}, SendNode, _Actor}->
-      ?LOGINFO("DEBUG: remote delete action ~p",[Keys]),
       ToDelete = [K || K <- Keys, not maps:is_key(K,Local)],
-      ?LOGINFO("DEBUG: remote to delete ~p",[ToDelete]),
       Module:delete(CopyRef, ToDelete),
       flush_tail(Live, Local)
   after
