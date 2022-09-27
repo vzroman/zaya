@@ -442,7 +442,7 @@ roll_updates(#live{ module = Module, copy_ref = CopyRef, live_ets = LiveEts, log
   % and so will overwrite came live update.
   % Timeout 0 because we must to receive the next remote batch as soon as possible
 
-  TailKey = Module:last( CopyRef ),
+  {TailKey,_} = Module:last( CopyRef ),
   % Take out the actions that are in the copy range already
   {Write,Delete} = take_head(ets:first(LiveEts), LiveEts, TailKey, {[],[]}),
   ?LOGINFO("~s actions to write to the copy ~p, delete ~p, stockpiled ~p, tail key ~p",[
