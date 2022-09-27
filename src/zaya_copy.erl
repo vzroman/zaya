@@ -158,8 +158,6 @@ try_copy(#copy{
         try_copy(State#copy{send_node = ?dbSource(Source), attempts = Attempts - 1, error ={Error,Stack} })
     end,
 
-  unlink(Sender),
-
   finish_live_copy( Live ),
 
   ?LOGINFO("~s finish hash ~s", [Log, ?PRETTY_HASH( FinalHash )]),
@@ -313,7 +311,8 @@ copy_request(#{
       ?LOGERROR("~s error ~p, stack ~p",[Log,Error,Stack]),
       Receiver ! {error, self(), Error}
   after
-    Unlock()
+    Unlock(),
+    unlink(Receiver)
   end.
 
 % Zip and stockpile local batches until they reach ?REMOTE_BATCH_SIZE
