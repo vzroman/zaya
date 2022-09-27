@@ -146,22 +146,7 @@ remote_result(Type,Result) ->
 -define(write(DB, Args),
   case DB of
     _ when is_atom( DB ) ->
-      _@Ref = ?dbRef( DB, node() ),
-      _@Ns = ?dbAvailableNodes(DB)--[node()],
-      if
-        _@Ref =:= ?undefined->
-          ?REMOTE_CALL( _@Ns, call_any, {call,DB}, Args );
-        true->
-          _@M = ?dbModule( DB ),
-          case ?LOCAL_CALL(_@M,_@Ref, Args) of
-            ?not_available->
-              ?REMOTE_CALL( _@Ns, call_any, {call,DB}, Args );
-            _@Res->
-              ?REMOTE_CALL( _@Ns, cast_all, {call,DB}, Args ),
-              esubscribe:notify( DB, {?FUNCTION_NAME, Args} ),
-              _@Res
-          end
-      end;
+      ?REMOTE_CALL( ?dbAvailableNodes(DB), call_any, {call,DB}, Args );
     {call, _@DB}->
       _@M = ?dbModule(_@DB),
       _@Ref = ?dbRef(_@DB,node()),
