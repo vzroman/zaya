@@ -379,7 +379,8 @@
 -define(ADD_DB(DB,M),
   begin
     ?SCHEMA_WRITE({db,DB,'@module@'},M),
-    ?SCHEMA_WRITE({db,DB,'@nodes@'}, [] )
+    ?SCHEMA_WRITE({db,DB,'@nodes@'}, [] ),
+    ?SCHEMA_NOTIFY({add_db,DB})
   end
 ).
 
@@ -387,7 +388,7 @@
   begin
     ?SCHEMA_WRITE({db,DB,'@ref@',N},Ref),
     ?SCHEMA_WRITE({db,DB,'@nodes@'}, (?schemaRead({db,DB,'@nodes@'})--[N])++[N] ),
-    ?SCHEMA_NOTIFY({'@open_db@',DB,N})
+    ?SCHEMA_NOTIFY({'open_db',DB,N})
   end
 ).
 
@@ -395,30 +396,37 @@
   begin
     ?SCHEMA_WRITE({db,DB,'@nodes@'}, ?schemaRead({db,DB,'@nodes@'})--[N] ),
     ?SCHEMA_DELETE({db,DB,'@ref@',N}),
-    ?SCHEMA_NOTIFY({'@close_db@',DB,N})
+    ?SCHEMA_NOTIFY({'close_db',DB,N})
   end
 ).
 
 -define(ADD_DB_COPY(DB,N,Ps),
-  ?SCHEMA_WRITE({db,DB,'@node@',N,'@params@'},Ps)
+  begin
+    ?SCHEMA_WRITE({db,DB,'@node@',N,'@params@'},Ps),
+    ?SCHEMA_NOTIFY({add_db_copy,DB,N})
+  end
 ).
 
 -define(REMOVE_DB_COPY(DB,N),
-    ?SCHEMA_DELETE({db,DB,'@node@',N,'@params@'})
+  begin
+    ?SCHEMA_DELETE({db,DB,'@node@',N,'@params@'}),
+    ?SCHEMA_NOTIFY({remove_db_copy,DB,N})
+  end
 ).
 
 -define(REMOVE_DB(DB),
   begin
     [ ?REMOVE_DB_COPY(DB,_@N) || _@N <- ?dbAllNodes(DB)],
     ?SCHEMA_DELETE({db,DB,'@module@'}),
-    ?SCHEMA_DELETE({db,DB,'@nodes@'})
+    ?SCHEMA_DELETE({db,DB,'@nodes@'}),
+    ?SCHEMA_NOTIFY({remove_db,DB})
   end
 ).
 
 -define(NODE_UP(N),
   begin
     ?SCHEMA_WRITE({node,N},'@up@'),
-    ?SCHEMA_NOTIFY({'@nodeUp@',N})
+    ?SCHEMA_NOTIFY({'node_up',N})
   end
 ).
 
@@ -426,7 +434,7 @@
   begin
     [ ?CLOSE_DB(_@DB,N) || _@DB <- ?nodeDBs(N) ],
     ?SCHEMA_WRITE({node,N},'@down@'),
-    ?SCHEMA_NOTIFY({'@nodeDown@',N})
+    ?SCHEMA_NOTIFY({'node_down',N})
   end
 ).
 
@@ -438,7 +446,8 @@
         ?REMOVE_DB_COPY(_@DB,N)
       end || _@DB <- ?nodeDBs(N)
     ],
-    ?SCHEMA_DELETE({node,N})
+    ?SCHEMA_DELETE({node,N}),
+    ?SCHEMA_NOTIFY({'remove_node',N})
   end
 ).
 

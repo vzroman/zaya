@@ -462,7 +462,7 @@ take_head(_K, _Live, _TailKey, Acc)->
 % because the copier (storage server) have to add the table
 % to the mnesia schema. Until it does it the updates will
 % not go to the local copy. Therefore we start another process
-% write tail updates to the copy
+% to write tail updates to the copy
 %---------------------------------------------------------------------
 give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = LiveEts, log = Log }=Live)->
 
@@ -470,15 +470,21 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
   Taker =
     spawn_link(fun()->
 
-      receive {'ETS-TRANSFER',LiveEts,Giver,start}->ok end,
+      % Subscribe to the schema transformations to be able to know when the copy is ready
+      esubscribe:subscribe( ?schema, self()),
+
+      % Subscribe to the source
+      esubscribe:subscribe( Source, self(), [SendNode]),
+
+      Giver ! {ready, self()},
 
       ?LOGINFO("~s live updates has taken by ~p from ~p",[Log,self(),Giver]),
-      wait_ready(Live#live{ giver = Giver }, ?dbRef( Source,node() ))
+      wait_ready(Live#live{ giver = Giver })
 
     end),
 
-  % Subscribe the Taker
-  esubscribe:subscribe( Source, Taker, [SendNode] ),
+  % Wait for the Taker to get ready
+  receive {ready,Taker}->ok end,
 
   % From now the Taker receives updates I can unsubscribe, and wait
   % for my tail updates
@@ -487,10 +493,7 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
   ?LOGINFO("~s: giver ~p roll over tail live updates",[Log,Giver]),
   roll_tail_updates( Live ),
 
-  ?LOGINFO("~s give away live updates from ~p to ~p",[Log,Giver,Taker]),
-  ets:give_away(LiveEts, Taker, start),
-
-  Live#live{taker = Taker}.
+  ets:delete(LiveEts).
 
 roll_tail_updates( #live{ source = Source, live_ets = LiveEts, log = Log } )->
 
@@ -506,70 +509,43 @@ wait_ready(#live{
   source = Source,
   module=Module,
   copy_ref = CopyRef,
-  live_ets = LiveEts,
-  log = Log
-} = Live,_Ref = ?undefined)->
+  send_node = SendNode
+} = Live)->
 
-  % The copy is not ready yet
-  get_live_actions(esubscribe:wait( Source, ?FLUSH_TAIL_TIMEOUT ), LiveEts),
-
-  {Write,Delete} = take_all(ets:first(LiveEts),LiveEts,{[],[]}),
-
-  ?LOGINFO("~s taker actions to write to the copy ~p, to delete ~p",[
-    Log,
-    ?PRETTY_COUNT(length(Write)),
-    ?PRETTY_COUNT(length(Delete))
-  ]),
-
-  Module:delete(CopyRef, Delete),
-  Module:write(CopyRef, Write),
-
-  wait_ready(Live, ?dbRef(Source,node()));
-
-wait_ready(#live{
-  source = Source,
-  send_node = SendNode,
-  module = Module,
-  copy_ref = CopyRef,
-  live_ets = LiveEts,
-  giver = Giver,
-  log = Log
-}, Ref) when Ref =/= ?undefined ->
-
-  esubscribe:unsubscribe( Source, self(), [SendNode] ),
-
-  ?LOGINFO("~s ready, taker ~p flush tail subscriptions",[Log,self()]),
-
-  get_live_actions(esubscribe:wait( Source, ?FLUSH_TAIL_TIMEOUT ), LiveEts),
-
-  {Write,Delete} = take_all(ets:first(LiveEts),LiveEts,{[],[]}),
-
-  ?LOGINFO("~s taker tail actions to write to the copy ~p, to delete ~p",[
-    Log,
-    ?PRETTY_COUNT(length(Write)),
-    ?PRETTY_COUNT(length(Delete))
-  ]),
-
-  Module:delete(CopyRef, Delete),
-  Module:write(CopyRef, Write),
-
-  ets:delete( LiveEts ),
-
-  unlink(Giver),
-
-  ?LOGINFO("~s live copy finish",[Log]).
-
-take_all(K, Live, {Write,Delete} ) when K =/= '$end_of_table'->
-  case ets:take(Live, K) of
-    [{K,{write,V}}]->
-      take_all( ets:next(Live,K), Live, {[{K,V}|Write],Delete});
-    [{K,delete}]->
-      take_all( ets:next(Live,K), Live, {Write,[K|Delete]});
+  receive
+    {'$esubscription', Source, {write,KVs}, _Node, _Actor}->
+      Module:write(CopyRef, KVs),
+      wait_ready( Live );
+    {'$esubscription', Source, {delete,Keys}, _Node, _Actor}->
+      Module:delete(CopyRef, Keys),
+      wait_ready( Live );
+    {'$esubscription', ?schema, {'open_db',Source,Node}, _Node, _Actor} when Node=:=node()->
+      % The copy is ready, roll tail updates
+      esubscribe:unsubscribe( Source, self(), [SendNode] ),
+      wait_tail(Live);
     _->
-      take_all( ets:next(Live,K), Live, {Write,Delete})
-  end;
-take_all(_K, _Live, Acc)->
-  Acc.
+      wait_ready( Live )
+  end.
+
+wait_tail(#live{
+  source = Source,
+  module=Module,
+  copy_ref = CopyRef,
+  log = Log
+} = Live)->
+
+  receive
+    {'$esubscription', Source, {write,KVs}, _Node, _Actor}->
+      Module:write(CopyRef, KVs),
+      wait_tail( Live );
+    {'$esubscription', Source, {delete,Keys}, _Node, _Actor}->
+      Module:delete(CopyRef, Keys),
+      wait_tail( Live );
+    _->
+      wait_tail( Live )
+  after
+    0->?LOGINFO("~s copy finsished",[Log])
+  end.
 
 %---------------------------------------------------------------------
 % LOCAL COPY DB COPY TO DB
