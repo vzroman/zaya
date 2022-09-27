@@ -560,6 +560,7 @@ wait_tail(#live{
 get_subscriptions(Source, Node, Acc)->
   receive
     {'$esubscription', Source, Action, Node, _Actor}->
+      ?LOGINFO("DEBUG: local action ~p",[Action]),
       AddKeys =
         case Action of
           {write,[KVs]}->
@@ -567,6 +568,7 @@ get_subscriptions(Source, Node, Acc)->
           {delete,[Keys]}->
             [{K,true} || K <- Keys]
         end,
+      ?LOGINFO("DEBUG: local keys ~p",[AddKeys]),
       get_subscriptions(Source, Node, maps:merge(Acc, maps:from_list(AddKeys)))
   after
     ?FLUSH_TAIL_TIMEOUT->Acc
@@ -580,11 +582,15 @@ flush_tail(#live{
 } = Live, Local )->
   receive
     {'$esubscription', Source, {write,[KVs]}, SendNode, _Actor}->
+      ?LOGINFO("DEBUG: remote write action ~p",[KVs]),
       ToWrite = [Rec || Rec ={K,_} <- KVs, not maps:is_key(K,Local)],
+      ?LOGINFO("DEBUG: remote to write ~p",[ToWrite]),
       Module:write(CopyRef, ToWrite),
       flush_tail(Live, Local);
     {'$esubscription', Source, {delete,[Keys]}, SendNode, _Actor}->
+      ?LOGINFO("DEBUG: remote delete action ~p",[Keys]),
       ToDelete = [K || K <- Keys, not maps:is_key(K,Local)],
+      ?LOGINFO("DEBUG: remote to delete ~p",[ToDelete]),
       Module:delete(CopyRef, ToDelete),
       flush_tail(Live, Local)
   after
