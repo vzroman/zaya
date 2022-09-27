@@ -445,11 +445,12 @@ roll_updates(#live{ module = Module, copy_ref = CopyRef, live_ets = LiveEts, log
   TailKey = Module:last( CopyRef ),
   % Take out the actions that are in the copy range already
   {Write,Delete} = take_head(ets:first(LiveEts), LiveEts, TailKey, {[],[]}),
-  ?LOGINFO("~s actions to write to the copy ~p, delete ~p, stockpiled ~p",[
+  ?LOGINFO("~s actions to write to the copy ~p, delete ~p, stockpiled ~p, tail key ~p",[
     Log,
     ?PRETTY_COUNT(length(Write)),
     ?PRETTY_COUNT(length(Delete)),
-    ?PRETTY_COUNT(ets:info(LiveEts,size))
+    ?PRETTY_COUNT(ets:info(LiveEts,size)),
+    TailKey
   ]),
 
   Module:delete(CopyRef, Delete),
