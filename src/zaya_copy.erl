@@ -471,10 +471,28 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
   Taker =
     spawn_link(fun()->
 
-      esubscribe:subscribe( Source, self()),
-
       % Subscribe to the source
       esubscribe:subscribe( Source, self(), [SendNode]),
+
+      Taker = self(),
+      Local = spawn_link(fun()->
+        esubscribe:subscribe(Source, self()),
+        Taker ! {ready, self()},
+
+        Updates = ets:new(local,[protected,set]),
+        receive
+          {'$esubscription', Source, Action, _Node, _Actor}->
+            case Action of
+              {write,[KVs]}-> ets:insert(Updates,[{K,true}||{K,_}<-KVs]);
+              {delete,Keys}-> ets:insert(Updates,[{K,true}||K<-Keys]);
+              _->ignore
+            end,
+            Taker ! {flush, self(), Updates},
+            wait_ready( Live#live{live_ets = Updates} )
+        end
+      end),
+
+      receive {ready,Local}->ok end,
 
       Giver ! {ready, self()},
 
@@ -482,7 +500,13 @@ give_away_live_updates(#live{source = Source, send_node = SendNode, live_ets = L
       receive {start,Giver}-> ok end,
 
       ?LOGINFO("~s live updates has taken by ~p from ~p",[Log,self(),Giver]),
-      wait_ready(Live#live{ giver = Giver })
+
+      LocalUpdates=
+        receive {flush, Local, Updates}->Updates end,
+
+      esubscribe:unsubscribe( Source, self(), [SendNode]),
+
+      flush_tail(Live#live{ giver = Giver, live_ets = LocalUpdates })
 
     end),
 
@@ -530,63 +554,34 @@ take_all(_K, _Live, Acc)->
 
 wait_ready(#live{
   source = Source,
-  send_node = SendNode,
-  giver = Giver,
-  log = Log
+  live_ets = Updates
 } = Live)->
   receive
-    {'$esubscription', Source, Action, Node, _Actor} when Node =:= node()->
-      esubscribe:unsubscribe(Source, self(),[node(),SendNode]),
-      InitAcc =
-        case Action of
-          {write,[KVs]}->
-            maps:from_list([{K,true} || {K,_} <- KVs]);
-          {delete,[Keys]}->
-            maps:from_list([{K,true} || K <- Keys])
-        end,
-
-      Local = get_subscriptions(Source, node(), InitAcc),
-      ?LOGINFO("DEBUG: local ~p",[Local]),
-
-      flush_tail(Live, Local),
-
-      unlink(Giver),
-
-      ?LOGINFO("~s copy finsished",[Log])
-  end.
-
-get_subscriptions(Source, Node, Acc)->
-  receive
-    {'$esubscription', Source, Action, Node, _Actor}->
-      ?LOGINFO("DEBUG: local action ~p",[Action]),
-      AddKeys =
-        case Action of
-          {write,[KVs]}->
-            [{K,true} || {K,_} <- KVs];
-          {delete,[Keys]}->
-            [{K,true} || K <- Keys]
-        end,
-      ?LOGINFO("DEBUG: local keys ~p",[AddKeys]),
-      get_subscriptions(Source, Node, maps:merge(Acc, maps:from_list(AddKeys)))
-  after
-    ?FLUSH_TAIL_TIMEOUT->Acc
+    {'$esubscription', Source, {write,[KVs]}, _Node, _Actor}->
+      ets:insert( Updates, [{K,true} || {K,_} <- KVs]),
+      wait_ready(Live);
+    {'$esubscription', Source, {delete,[Keys]}, _Node, _Actor}->
+      ets:insert( Updates, [{K,true} || K <- Keys]),
+      wait_ready(Live);
+    _->
+      wait_ready(Live)
   end.
 
 flush_tail(#live{
   source = Source,
-  send_node = SendNode,
   module = Module,
-  copy_ref = CopyRef
-} = Live, Local )->
+  copy_ref = CopyRef,
+  live_ets = Updates
+} = Live )->
   receive
-    {'$esubscription', Source, {write,[KVs]}, SendNode, _Actor}->
-      ToWrite = [Rec || Rec ={K,_} <- KVs, not maps:is_key(K,Local)],
+    {'$esubscription', Source, {write,[KVs]}, _Node, _Actor}->
+      ToWrite = [Rec || Rec ={K,_} <- KVs, case ets:lookup(Updates,K) of []-> true; _-> false end ],
       Module:write(CopyRef, ToWrite),
-      flush_tail(Live, Local);
-    {'$esubscription', Source, {delete,[Keys]}, SendNode, _Actor}->
-      ToDelete = [K || K <- Keys, not maps:is_key(K,Local)],
+      flush_tail(Live);
+    {'$esubscription', Source, {delete,[Keys]}, _Node, _Actor}->
+      ToDelete = [K || K <- Keys, case ets:lookup(Updates,K) of []-> true; _-> false end],
       Module:delete(CopyRef, ToDelete),
-      flush_tail(Live, Local)
+      flush_tail(Live)
   after
     ?FLUSH_TAIL_TIMEOUT->ok
   end.
