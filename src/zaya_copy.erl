@@ -532,7 +532,7 @@ wait_tail(#live{
   module=Module,
   copy_ref = CopyRef,
   log = Log,
-  taker = Taker
+  giver = Giver
 } = Live)->
 
   receive
@@ -546,7 +546,7 @@ wait_tail(#live{
       wait_tail( Live )
   after
     0->
-      unlink(Taker),
+      unlink(Giver),
       ?LOGINFO("~s copy finsished",[Log])
   end.
 
