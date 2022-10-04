@@ -279,19 +279,40 @@ release_locks( Locks, Parent )->
 %%  COMMIT
 %%-----------------------------------------------------------
 commit( Data )->
-  Nodes =
-    lists:usort( lists:append([ ?dbAvailableNodes(DB) || DB <- maps:keys(Data) ])),
-  Master = self(),
+  {Self,Ref} = {self(), make_ref()},
 
-  Workers =
-    [ {N, spawn_opt(N, ?MODULE, do_commit, [Master, maps:with( ?nodeDBs(N), Data )],[ monitor ])} || N <- Nodes],
+  spawn(fun()->
+    Master = self(),
 
-  wait_commit_ready( Workers ),
+    Nodes =
+      lists:usort( lists:append([ ?dbAvailableNodes(DB) || DB <- maps:keys(Data) ])),
 
-  [ W ! {commit, Master} || {_,{W,_}} <- Workers ],
+    Workers =
+      [ {N, spawn_opt(N, ?MODULE, do_commit, [Master, Ref, maps:with( ?nodeDBs(N), Data )],[ monitor ])} || N <- Nodes],
 
+    Workers1 =
+      maps:from_list([{W,N} || {N,{W,_}} <- Workers]),
 
-  ok.
+    try
+      Workers2 = wait_confirm( Workers1, Data ),
+
+      [ W ! {commit, Master} || {_,{W,_}} <- Workers2 ],
+
+      wait_committed( Workers2, Data ),
+
+      Self ! {committed, Ref}
+    catch
+      _:Error->
+        Self ! {abort, Error}
+    end
+
+  end).
+
+wait_confirm( Workers, Data )->
+  todo.
+
+wait_committed( Workers, Data )->
+  todo.
 
 do_commit( Master, Data )->
   todo.
