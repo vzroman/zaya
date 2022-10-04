@@ -73,7 +73,8 @@
   write/3,
   delete/3,
 
-  transaction/1
+  transaction/1,
+  rollback/1
 ]).
 
 %%=================================================================
@@ -172,6 +173,9 @@ transaction(Fun)->
     _->
       run_transaction( Fun, ?ATTEMPTS )
   end.
+
+rollback( Data )->
+  todo.
 
 run_transaction(Fun, Attempts) when Attempts>0->
   put(?transaction,#transaction{ data = #{}, locks = #{} }),
