@@ -55,6 +55,7 @@
 -record(transaction,{data,locks,parent}).
 
 -define(LOCK_TIMEOUT, 60000).
+-define(ATTEMPTS,5).
 
 %%=================================================================
 %%	Environment API
@@ -156,7 +157,39 @@ do_delete([], Data)->
 %%  TRANSACTION
 %%-----------------------------------------------------------
 transaction(Fun)->
-  todo.
+  case get(?transaction) of
+    #transaction{locks = PLocks}=Parent->
+      try { ok, Fun() }
+      catch
+        _:{lock,Error}->
+          throw({lock,Error});
+        _:Error->
+          #transaction{locks = Locks} = get(?transaction),
+          release_locks(Locks, PLocks),
+          put(?transaction, Parent),
+          {error,Error}
+      end;
+    _->
+      run_transaction( Fun, ?ATTEMPTS )
+  end.
+
+run_transaction(Fun, Attempts) when Attempts>0->
+  put(?transaction,#transaction{ data = #{}, locks = #{} }),
+  try
+    Result = Fun(),
+    #transaction{data = Data} = get(?transaction),
+    commit( Data ),
+    Result
+  catch
+    _:{lock,_} when Attempts>1->
+      ?LOGDEBUG("lock error ~p"),
+      run_transaction(Fun, Attempts-1 );
+    _:Error->
+      {abort,Error}
+  after
+    #transaction{locks = Locks} = erase( ?transaction ),
+    release_locks( Locks, #{} )
+  end.
 
 in_context(DB, Keys, Lock, Fun)->
   case get(?transaction) of
@@ -171,6 +204,7 @@ in_context(DB, Keys, Lock, Fun)->
     _ ->
       throw(no_transaction)
   end.
+
 %%-----------------------------------------------------------
 %%  LOCKS
 %%-----------------------------------------------------------
@@ -180,31 +214,29 @@ lock(DB, Keys, Type, Locks) when Type=:=read; Type=:=write->
       do_lock( Keys, DB, ?dbAvailableNodes(DB), Type, Locks );
     _->
       lock( DB, Keys, Type, Locks#{
-        {?MODULE,DB} => lock_key( {?MODULE,DB}, _IsShared=true, _Timeout=?infinity, ?dbAvailableNodes(DB) )
+        {?MODULE,DB} => lock_key( DB, _IsShared=true, _Timeout=?infinity, ?dbAvailableNodes(DB) )
       })
   end;
 lock(_DB, _Keys, none, Locks)->
   Locks.
 
 do_lock([K|Rest], DB, Nodes, Type, Locks)->
-  KeyLocks =
+  Unlock =
     case Locks of
-      #{K := HeldKeyLocks}->
-        case HeldKeyLocks of
-          #{Type:=_}->
-            HeldKeyLocks;
-          #{write := _}->
-            HeldKeyLocks;
-          _->
-            HeldKeyLocks#{
-              Type=> lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, Nodes )
-            }
-        end;
+      #{K := #{Type:=_Unlock}}->
+        _Unlock;
       _->
-        #{
-          Type => lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, Nodes )
-        }
+        lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, Nodes )
     end,
+
+  KeyLocks=
+    if
+      Type =:= write->
+        #{ read => Unlock, write => Unlock };
+      true->
+        #{ read => Unlock }
+    end,
+
   do_lock( Rest, DB, Nodes, Type, Locks#{ K => KeyLocks } );
 
 do_lock([], _DB, _Nodes, _Type, Locks )->
@@ -214,7 +246,26 @@ lock_key( Key, IsShared, Timeout, Nodes )->
   case elock:lock( ?locks, Key, IsShared, Timeout, Nodes) of
     {ok, Unlock}->
       Unlock;
-    Error->
-      throw(Error)
+    {error,Error}->
+      throw({lock,Error})
   end.
 
+release_locks( Locks, Parent )->
+  maps:fold(fun(DB,Keys,_)->
+    PDBs = maps:get(DB,Parent,#{}),
+    maps:fold(fun(K,Types,_)->
+      PTypes = maps:get(K,PDBs),
+      maps:fold(fun(Type,Unlock,_)->
+        case maps:is_key(Type,PTypes) of
+          true->ignore;
+          _->Unlock()
+        end
+      end,?undefined,Types)
+    end,?undefined,Keys)
+  end,?undefined,Locks).
+
+%%-----------------------------------------------------------
+%%  COMMIT
+%%-----------------------------------------------------------
+commit( Data )->
+  todo.

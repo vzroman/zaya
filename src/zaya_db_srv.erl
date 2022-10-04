@@ -93,13 +93,21 @@ init([DB, Action])->
 
 handle_event(state_timeout, open, init, #data{db = DB, module = Module} = Data) ->
   Params = ?dbNodeParams(DB,node()),
-  try
-    Ref = Module:open( Params ),
-    ?LOGINFO("~p database open",[DB]),
-    {next_state, register, Data#data{ ref = Ref }, [ {state_timeout, 0, register } ] }
-  catch
-    _:E->
-      ?LOGERROR("~p open error ~p",[DB,E]),
+  case elock:lock( ?locks, DB, _IsShared=false, 5000, ?dbAvailableNodes(DB)) of
+    {ok, Unlock}->
+      try
+        Ref = Module:open( Params ),
+        ?LOGINFO("~p database open",[DB]),
+        {next_state, register, Data#data{ ref = Ref }, [ {state_timeout, 0, register } ] }
+      catch
+        _:E->
+          ?LOGERROR("~p open error ~p",[DB,E]),
+          { keep_state_and_data, [ {state_timeout, 0, open } ] }
+      after
+        Unlock()
+      end;
+    {error,LockError}->
+      ?LOGINFO("~p open lock error ~p, retry",[DB, LockError]),
       { keep_state_and_data, [ {state_timeout, 5000, open } ] }
   end;
 
