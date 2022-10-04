@@ -52,6 +52,9 @@
 
 -define(log,{?MODULE,'$log$'}).
 -define(transaction,{?MODULE,'$transaction$'}).
+-record(transaction,{data,locks,parent}).
+
+-define(LOCK_TIMEOUT, 60000).
 
 %%=================================================================
 %%	Environment API
@@ -59,6 +62,17 @@
 -export([
   create_log/1,
   open_log/1
+]).
+
+%%=================================================================
+%%	API
+%%=================================================================
+-export([
+  read/3,
+  write/3,
+  delete/3,
+
+  transaction/1
 ]).
 
 %%=================================================================
@@ -72,30 +86,135 @@ open_log( Path )->
   persistent_term:put(?log, ?logModule:open( ?logParams#{ dir=> Path } )),
   ok.
 
-%%=================================================================
-%%	API
-%%=================================================================
--export([
-  read/3,
-  write/3,
-  delete/3,
-
-  transaction/1
-]).
-
+%%-----------------------------------------------------------
+%%  READ
+%%-----------------------------------------------------------
 read(DB, Keys, Lock)->
-  todo.
+  #{DB:=DBData} = in_context(DB, Keys, Lock, fun(Data)->
+    do_read(DB, Keys, Data)
+  end),
+  data_keys(Keys, DBData).
 
+do_read(DB, Keys, Data)->
+  ToRead =
+    [K || K <- Keys, not maps:is_key(K,Data)],
+  Values =
+    maps:from_list( zaya_db:read( DB, ToRead ) ),
+  lists:foldl(fun(K,Acc)->
+    Value =
+      case Values of
+        #{K:=V}-> {V,V};
+        _->?undefined
+      end,
+    Acc#{K => Value}
+  end, Data, ToRead).
+
+data_keys([K|Rest], Data)->
+  case Data of
+    #{ K:= {_,V} }->
+      [{K,V} | data_keys(Rest,Data)];
+    _->
+      data_keys(Rest, Data)
+  end;
+data_keys([],_Data)->
+  [].
+
+%%-----------------------------------------------------------
+%%  WRITE
+%%-----------------------------------------------------------
 write(DB, KVs, Lock)->
-  todo.
+  in_context(DB, [K || {K,_}<-KVs], Lock, fun(Data)->
+    do_write( KVs, Data )
+  end),
+  ok.
 
+do_write([{K,V}|Rest], Data )->
+  case Data of
+    #{K := {V0,_}}->
+      do_write(Rest, Data#{K => {V0,V} });
+    _->
+      do_write(Rest, Data#{K=>{{V}, V}})
+  end;
+do_write([], Data )->
+  Data.
+
+%%-----------------------------------------------------------
+%%  DELETE
+%%-----------------------------------------------------------
 delete(DB, Keys, Lock)->
-  todo.
+  in_context(DB, Keys, Lock, fun(Data)->
+    do_delete(Keys, Data)
+  end),
+  ok.
 
+do_delete([K|Rest], Data)->
+  do_delete(Rest, Data#{K=>delete});
+do_delete([], Data)->
+  Data.
+
+%%-----------------------------------------------------------
+%%  TRANSACTION
+%%-----------------------------------------------------------
 transaction(Fun)->
   todo.
 
+in_context(DB, Keys, Lock, Fun)->
+  case get(?transaction) of
+    #transaction{data = Data,locks = Locks}=T->
+      DBLocks = lock(DB, Keys, Lock, maps:get(DB,Locks) ),
+      DBData = Fun( maps:get(DB,Data,#{}) ),
+      put( ?transaction, T#transaction{
+        data = Data#{ DB => DBData },
+        locks = Locks#{ DB => DBLocks }
+      }),
+      ok;
+    _ ->
+      throw(no_transaction)
+  end.
+%%-----------------------------------------------------------
+%%  LOCKS
+%%-----------------------------------------------------------
+lock(DB, Keys, Type, Locks) when Type=:=read; Type=:=write->
+  case maps:is_key({?MODULE,DB}, Locks) of
+    true->
+      do_lock( Keys, DB, ?dbAvailableNodes(DB), Type, Locks );
+    _->
+      lock( DB, Keys, Type, Locks#{
+        {?MODULE,DB} => lock_key( {?MODULE,DB}, _IsShared=true, _Timeout=?infinity, ?dbAvailableNodes(DB) )
+      })
+  end;
+lock(_DB, _Keys, none, Locks)->
+  Locks.
 
+do_lock([K|Rest], DB, Nodes, Type, Locks)->
+  KeyLocks =
+    case Locks of
+      #{K := HeldKeyLocks}->
+        case HeldKeyLocks of
+          #{Type:=_}->
+            HeldKeyLocks;
+          #{write := _}->
+            HeldKeyLocks;
+          _->
+            HeldKeyLocks#{
+              Type=> lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, Nodes )
+            }
+        end;
+      _->
+        #{
+          Type => lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, Nodes )
+        }
+    end,
+  do_lock( Rest, DB, Nodes, Type, Locks#{ K => KeyLocks } );
 
+do_lock([], _DB, _Nodes, _Type, Locks )->
+  Locks.
 
+lock_key( Key, IsShared, Timeout, Nodes )->
+  case elock:lock( ?locks, Key, IsShared, Timeout, Nodes) of
+    {ok, Unlock}->
+      Unlock;
+    Error->
+      throw(Error)
+  end.
 
