@@ -78,6 +78,13 @@
 ]).
 
 %%=================================================================
+%%	Internal API
+%%=================================================================
+-export([
+  do_commit/2
+]).
+
+%%=================================================================
 %%	Environment
 %%=================================================================
 create_log( Path )->
@@ -272,4 +279,19 @@ release_locks( Locks, Parent )->
 %%  COMMIT
 %%-----------------------------------------------------------
 commit( Data )->
+  Nodes =
+    lists:usort( lists:append([ ?dbAvailableNodes(DB) || DB <- maps:keys(Data) ])),
+  Master = self(),
+
+  Workers =
+    [ {N, spawn_opt(N, ?MODULE, do_commit, [Master, maps:with( ?nodeDBs(N), Data )],[ monitor ])} || N <- Nodes],
+
+  wait_commit_ready( Workers ),
+
+  [ W ! {commit, Master} || {_,{W,_}} <- Workers ],
+
+
+  ok.
+
+do_commit( Master, Data )->
   todo.
