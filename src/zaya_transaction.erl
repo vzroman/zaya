@@ -292,9 +292,11 @@ commit( Data0 )->
       case prepare_commit( Data ) of
         #commit{ns = [Node],ns_dbs = NsDBs} = Commit->
           % Single node commit
-          case rpc:call(Node,?MODULE, single_node_commit,[maps:get(Node,NsDBs)]) of
-            ok-> ok;
-            Error-> throw( Error )
+          case rpc:call(Node,?MODULE, single_node_commit, [maps:get(Node,NsDBs)]) of
+            {badrpc, Reason}->
+              throw( Reason );
+            _->
+              ok
           end;
         Commit->
           multi_node_commit( Commit )
@@ -368,7 +370,8 @@ prepare_commit( Data )->
 %%-----------------------------------------------------------
 single_node_commit( DBs )->
   LogID = commit1( DBs ),
-  commit2( LogID ).
+  commit2( LogID, DBs ),
+  spawn(fun()-> on_commit( DBs ) end).
 
 %%-----------------------------------------------------------
 %%  MULTI NODE COMMIT
@@ -418,12 +421,14 @@ commit_request( Master, DBs )->
   erlang:monitor(process, Master),
 
   LogID = commit1( DBs ),
+
   Master ! { commit1, self() },
 
   receive
     {commit, Master}->
       commit2( LogID ),
-      Master ! {commit2, self()};
+      Master ! {commit2, self()},
+      on_commit(DBs);
     {rollback, Master}->
       commit_rollback( LogID, DBs );
     {'DOWN', _Ref, process, Master, Reason} ->
@@ -431,3 +436,13 @@ commit_request( Master, DBs )->
       commit_rollback( LogID, DBs )
   end.
 
+commit1( DBs )->
+  LogID = ?t_id,
+  ok = ?logModule:write( ?logRef, [{LogID,DBs}] ),
+  try
+    todo
+  catch
+    _:Error->
+      commit_rollback( LogID, DBs ),
+      throw(Error)
+  end.
