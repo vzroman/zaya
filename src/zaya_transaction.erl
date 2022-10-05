@@ -51,8 +51,13 @@
 ).
 
 -define(log,{?MODULE,'$log$'}).
+-define(logRef,persistent_term:get(?log)).
+
 -define(transaction,{?MODULE,'$transaction$'}).
 -record(transaction,{data,locks,parent}).
+
+-define(index,{?MODULE,index}).
+-define(t_id, atomics:add_get(persistent_term:get(?index), 1, 1)).
 
 -define(LOCK_TIMEOUT, 60000).
 -define(ATTEMPTS,5).
@@ -74,7 +79,7 @@
   delete/3,
 
   transaction/1,
-  rollback/1
+  rollback/2
 ]).
 
 %%=================================================================
@@ -93,6 +98,7 @@ create_log( Path )->
 
 open_log( Path )->
   persistent_term:put(?log, ?logModule:open( ?logParams#{ dir=> Path } )),
+  persistent_term:put(?index, atomics:new(1,[{signed, false}])),
   ok.
 
 %%-----------------------------------------------------------
@@ -181,7 +187,7 @@ transaction(Fun)->
       run_transaction( Fun, ?ATTEMPTS )
   end.
 
-rollback( Data )->
+rollback(DB, Data)->
   todo.
 
 run_transaction(Fun, Attempts) when Attempts>0->
@@ -232,23 +238,15 @@ lock(_DB, _Keys, none, Locks)->
   Locks.
 
 do_lock([K|Rest], DB, Nodes, Type, Locks)->
-  Unlock =
+  KeyLock =
     case Locks of
-      #{K := #{Type:=_Unlock}}->
-        _Unlock;
+      #{K := {HeldType,_}} = Lock when Type=:= read; HeldType =:= write ->
+        Lock;
       _->
-        lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, Nodes )
+        {Type, lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, Nodes )}
     end,
 
-  KeyLocks=
-    if
-      Type =:= write->
-        #{ read => Unlock, write => Unlock };
-      true->
-        #{ read => Unlock }
-    end,
-
-  do_lock( Rest, DB, Nodes, Type, Locks#{ K => KeyLocks } );
+  do_lock( Rest, DB, Nodes, Type, Locks#{ K => KeyLock } );
 
 do_lock([], _DB, _Nodes, _Type, Locks )->
   Locks.
@@ -261,24 +259,27 @@ lock_key( Key, IsShared, Timeout, Nodes )->
       throw({lock,Error})
   end.
 
-release_locks( Locks, Parent )->
+release_locks(Locks, Parent )->
   maps:fold(fun(DB,Keys,_)->
-    PDBs = maps:get(DB,Parent,#{}),
-    maps:fold(fun(K,Types,_)->
-      PTypes = maps:get(K,PDBs),
-      maps:fold(fun(Type,Unlock,_)->
-        case maps:is_key(Type,PTypes) of
-          true->ignore;
-          _->Unlock()
-        end
-      end,?undefined,Types)
+    ParentKeys = maps:get(DB,Parent,#{}),
+    maps:fold(fun(K,{_Type,Unlock},_)->
+      case maps:is_key(K,ParentKeys) of
+        true -> ignore;
+        _->Unlock()
+      end
     end,?undefined,Keys)
   end,?undefined,Locks).
 
 %%-----------------------------------------------------------
 %%  COMMIT
 %%-----------------------------------------------------------
+-record(commit,{ ns, ns_dbs, dbs_ns }).
+-record(log,{ id, commit, rollback }).
 commit( Data )->
+
+  Commit = prepare_commit( Data ),
+
+
   {Self,Ref} = {self(), make_ref()},
 
   spawn(fun()->
@@ -307,6 +308,22 @@ commit( Data )->
     end
 
   end).
+
+prepare_commit( Data )->
+
+  DBs = ordsets:from_list( maps:keys(Data) ),
+
+  DBsNs =
+    [ {DB,?dbAvailableNodes(DB)} || DB <- maps:keys(Data) ],
+
+  Ns =
+    ordsets:from_list( lists:append([ Ns || {_DB,Ns} <- DBs ])),
+
+  NsDBs =
+    [ {N, ordsets:intersection( DBs, ordsets:from_list(?nodeDBs(N)) )} || N <- Ns ],
+
+  #commit{ ns=Ns, ns_dbs = NsDBs, dbs_ns = DBsNs }.
+
 
 wait_confirm( Workers, Data )->
   todo.
