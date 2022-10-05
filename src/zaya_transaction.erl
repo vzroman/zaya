@@ -81,7 +81,7 @@
   delete/3,
 
   transaction/1,
-  rollback/2
+  rollback/3
 ]).
 
 %%=================================================================
@@ -196,8 +196,16 @@ transaction(Fun)->
       run_transaction( Fun, ?ATTEMPTS )
   end.
 
-rollback(DB, Data)->
-  todo.
+rollback(Module, Ref,{_Commit, {Write,Delete}})->
+  if
+    length( Write ) > 0-> ok = Module:write(Ref, Write );
+    true->ignore
+  end,
+  if
+    length( Delete ) > 0-> ok = Module:delete(Ref, Delete );
+    true->ignore
+  end,
+  ok.
 
 run_transaction(Fun, Attempts) when Attempts>0->
   put(?transaction,#transaction{ data = #{}, locks = #{} }),
@@ -370,7 +378,7 @@ prepare_commit( Data )->
 %%-----------------------------------------------------------
 single_node_commit( DBs )->
   LogID = commit1( DBs ),
-  commit2( LogID, DBs ),
+  commit2( LogID ),
   spawn(fun()-> on_commit( DBs ) end).
 
 %%-----------------------------------------------------------
@@ -428,7 +436,15 @@ commit_request( Master, DBs )->
     {commit, Master}->
       commit2( LogID ),
       Master ! {commit2, self()},
-      on_commit(DBs);
+      receive
+        {committed,Master}->
+          on_commit(DBs);
+        {rollback, Master}->
+          commit_rollback( LogID, DBs );
+        {'DOWN', _Ref, process, Master, Reason}->
+          ?LOGDEBUG("not confirmed commit master down ~p",[Reason]),
+          on_commit(DBs)
+      end;
     {rollback, Master}->
       commit_rollback( LogID, DBs );
     {'DOWN', _Ref, process, Master, Reason} ->
@@ -439,10 +455,58 @@ commit_request( Master, DBs )->
 commit1( DBs )->
   LogID = ?t_id,
   ok = ?logModule:write( ?logRef, [{LogID,DBs}] ),
-  try
-    todo
+  try dump_dbs([{DB,Commit} || {DB,{Commit,_Rollback}} <- DBs] )
   catch
     _:Error->
       commit_rollback( LogID, DBs ),
       throw(Error)
+  end.
+
+commit2( LogID )->
+  try ?logModule:delete( ?logRef,[ LogID ])
+  catch
+    _:E->
+      ?LOGERROR("commit log ~p delete error ~p",[ LogID, E ])
+  end.
+
+on_commit(DBs)->
+  [ begin
+      if
+        length(Write) > 0-> catch zaya_db:on_update( DB, write, Write );
+        true->ignore
+      end,
+      if
+        length(Delete) > 0-> catch zaya_db:on_update( DB, delete, Delete );
+        true->ignore
+      end
+    end || {DB,{{Write,Delete},_Rollback}} <- DBs].
+
+dump_dbs([{DB, {Write,Delete}}|Rest])->
+  Module = ?dbModule(DB),
+  Ref = ?dbRef(DB),
+  if
+    length(Write)> 0 -> ok = Module:write( Ref, Write );
+    true-> ignore
+  end,
+  if
+    length(Delete) > 0-> ok = Module:delete( Ref, Delete );
+    true-> ignore
+  end,
+  dump_dbs(Rest);
+dump_dbs([])->
+  ok.
+
+
+
+commit_rollback( LogID, DBs )->
+  [ try rollback(?dbModule(DB) ,?dbRef( DB ), Data )
+    catch
+      _:E->
+        ?LOGERROR("unable to rollback commit ~p database ~p, error ~p, data ~p",[ LogID, DB, E, Data ])
+    end|| {DB,Data} <- DBs ],
+
+  try ?logModule:delete( ?logRef,[ LogID ])
+  catch
+    _:E->
+      ?LOGERROR("rollback commit log ~p error ~p",[ LogID, E ])
   end.

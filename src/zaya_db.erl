@@ -72,7 +72,8 @@
   add_copy/3,
   remove_copy/2, do_remove_copy/1,
 
-  params/2
+  params/2,
+  on_update/3
 ]).
 
 %%=================================================================
@@ -154,7 +155,7 @@ remote_result(Type,Result) ->
         ?not_available->
           ?not_available;
         _@Res->
-          esubscribe:notify( _@DB, {?FUNCTION_NAME,Args} ),
+          on_update(_@DB, ?FUNCTION_NAME, Args),
           _@Res
       end;
     _->
@@ -498,6 +499,10 @@ params(DB,Params)->
     dir => filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
   },Params).
 
+on_update( DB, Action, Args )->
+  esubscribe:notify( DB, {Action,Args} ),
+  % TODO. Update hash tree
+  ok.
 
 
 
