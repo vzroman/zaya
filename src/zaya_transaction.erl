@@ -109,7 +109,7 @@ open_log( Path )->
 %%  READ
 %%-----------------------------------------------------------
 read(DB, Keys, Lock)->
-  #{DB:=DBData} = in_context(DB, Keys, Lock, fun(Data)->
+  DBData = in_context(DB, Keys, Lock, fun(Data)->
     do_read(DB, Keys, Data)
   end),
   data_keys(Keys, DBData).
@@ -183,17 +183,22 @@ do_delete([], Data)->
 transaction(Fun)->
   case get(?transaction) of
     #transaction{locks = PLocks}=Parent->
+      % Internal transaction
       try { ok, Fun() }
       catch
         _:{lock,Error}->
+          % Lock errors restart the whole transaction starting from external
           throw({lock,Error});
         _:Error->
+          % Other errors rollback just internal transaction changes and release only it's locks
           #transaction{locks = Locks} = get(?transaction),
           release_locks(Locks, PLocks),
           put(?transaction, Parent),
+          % The user should decide to abort the whole transaction or not
           {error,Error}
       end;
     _->
+      % The transaction entry point
       run_transaction( Fun, ?ATTEMPTS )
   end.
 
@@ -204,33 +209,51 @@ drop_log( DB )->
   todo.
 
 run_transaction(Fun, Attempts) when Attempts>0->
+  % Create the transaction storage
   put(?transaction,#transaction{ data = #{}, locks = #{} }),
   try
     Result = Fun(),
+
+    % The transaction is ok, try to commit the changes.
+    % The locks are held until committed or aborted
     #transaction{data = Data} = get(?transaction),
     commit( Data ),
+
+    % Committed
     Result
   catch
-    _:{lock,_} when Attempts>1->
+    _:{lock,_} when Attempts > 1->
+      % In the case of lock errors all held locks are released and the transaction starts from scratch
       ?LOGDEBUG("lock error ~p"),
       run_transaction(Fun, Attempts-1 );
     _:Error->
+      % Other errors lead to transaction abort
       {abort,Error}
   after
+    % Always release locks
     #transaction{locks = Locks} = erase( ?transaction ),
     release_locks( Locks, #{} )
   end.
 
 in_context(DB, Keys, Lock, Fun)->
+  % read / write / delete actions transaction context
   case get(?transaction) of
     #transaction{data = Data,locks = Locks}=T->
+
+      % Obtain locks on all keys before the action starts
       DBLocks = lock(DB, Keys, Lock, maps:get(DB,Locks) ),
+
+      % Perform the action
       DBData = Fun( maps:get(DB,Data,#{}) ),
+
+      % Update the transaction data
       put( ?transaction, T#transaction{
         data = Data#{ DB => DBData },
         locks = Locks#{ DB => DBLocks }
       }),
-      ok;
+
+      % Return new database context
+      DBData;
     _ ->
       throw(no_transaction)
   end.
@@ -248,8 +271,11 @@ lock(DB, Keys, Type, Locks) when Type=:=read; Type=:=write->
       })
   end;
 lock(_DB, _Keys, none, Locks)->
+  % The lock is not needed
   Locks.
 
+do_lock(_Keys, DB, []= _Nodes, _Type, _Locks)->
+  throw({unavailable,DB});
 do_lock([K|Rest], DB, Nodes, Type, Locks)->
   KeyLock =
     case Locks of
@@ -287,7 +313,6 @@ release_locks(Locks, Parent )->
 %%  COMMIT
 %%-----------------------------------------------------------
 -record(commit,{ ns, ns_dbs, dbs_ns }).
-
 commit( Data0 )->
 
   case prepare_data( Data0 ) of
@@ -311,44 +336,78 @@ commit( Data0 )->
   end.
 
 prepare_data( Data )->
+
+  % Data has structure:
+  % #{
+  %   DB1 => #{
+  %     Key1 => {PreviousValue, NewValue},
+  %     ...
+  %   }
+  %   .....
+  % }
+  % If the PreviousValue is {?none} then it is not known yet
+  % If the PreviousValue is ?none the Key doesn't exists in the DB yet
+  % If the New is ?none then the Key has to be deleted.
+
+  % The result has the form:
+  % #{
+  %   DB1 => { Commit, Rollback },
+  %   ...
+  % }
+  % The Commit and the Rollback has the same form: {ToWrite, ToDelete }
+  % ToWrite is [{Key1,Value1},{Key2,Value2}|...]
+  % ToDelete is [K1,K2|...]
+
   maps:fold(fun(DB, Changes, Acc)->
 
     case maps:filter(fun(_K,{V0,V1})-> V0=/=V1 end, Changes) of
       ToCommit when map_size( ToCommit ) > 0->
 
+        % Read the keys that are not read yet to be able to rollback them
         ToReadKeys =
           [K || {K,{?none},_} <- maps:to_list( ToCommit )],
-
         Values =
           maps:from_list( zaya_db:read(DB, ToReadKeys) ),
 
-        Commit =
+        % Prepare the DB's Commit and Rollback
+        CommitRollback =
           maps:fold(fun(K,{V0,V1},{{CW,CD},{RW,RD}})->
-            CAcc=
+            % Commits
+            Commits=
               if
-                V1 =:= ?none-> {CW,[K|CD]};
-                true-> {[{K,V1}|CW],CD}
-              end,
-
-            RAcc =
-              if
-                V0 =:= ?none->
-                  {RW,[K|RD]};
-                V0=:={?none}->
-                  case Values of
-                    #{K:=V}->{[{K,V}|RW],RD};
-                    _-> {RW,[K|RD]}
-                  end;
+                V1 =:= ?none->
+                  {CW, [K|CD]}; % The Key has to be deleted
                 true->
-                  {[{K,V0}|RW],RD}
+                  {[{K,V1}|CW], CD} % The Key has to be written with a V1 value
               end,
 
-            {CAcc,RAcc}
+            % Rollbacks
+            ActualV0 =
+              if
+                V0=:={?none}-> % The Key doesn't exist in the transaction data, check it in the read results
+                  case Values of
+                    #{K:=V}->V; % The key has the value
+                    _-> ?none   % The Key does not exist
+                  end;
+                true-> % The Key is in the transaction data already, accept it's value
+                  V0
+              end,
+
+            Rollbacks =
+              if
+                ActualV0 =:= ?none->
+                  {RW,[K|RD]}; % The Key doesn't exist, it has to be deleted in the case of rollback
+                true->
+                  {[{K,ActualV0}|RW],RD} % The Key has the value, it has to be written back in the case of rollback
+              end,
+
+            {Commits, Rollbacks}
 
           end,{{[],[]}, {[],[]}},ToCommit),
 
-        Acc#{DB => Commit};
+        Acc#{DB => CommitRollback};
       _->
+        % DB has no changes to commit
         Acc
     end
 
@@ -356,26 +415,46 @@ prepare_data( Data )->
 
 prepare_commit( Data )->
 
+  % Databases that has changes to be committed
   DBs = ordsets:from_list( maps:keys(Data) ),
 
+  % The nodes hosting the database
   DBsNs =
-    [ {DB,?dbAvailableNodes(DB)} || DB <- maps:keys(Data) ],
+    [ {DB,
+        case ?dbAvailableNodes(DB) of
+          [] -> throw({unavailable, DB});
+          Nodes -> Nodes
+        end
+      } || DB <- maps:keys(Data) ],
 
+  % All participating nodes
   Ns =
     ordsets:from_list( lists:append([ Ns || {_DB,Ns} <- DBs ])),
 
+  % Databases that each node has to commit
   NsDBs =
     [ {N, ordsets:intersection( DBs, ordsets:from_list(?nodeDBs(N)) )} || N <- Ns ],
 
-  #commit{ ns=Ns, ns_dbs = maps:from_list(NsDBs), dbs_ns = maps:from_list(DBsNs) }.
+  #commit{
+    ns=Ns,
+    ns_dbs = maps:from_list(NsDBs),
+    dbs_ns = maps:from_list(DBsNs)
+  }.
 
 %%-----------------------------------------------------------
 %%  SINGLE NODE COMMIT
 %%-----------------------------------------------------------
 single_node_commit( DBs )->
   LogID = commit1( DBs ),
-  commit2( LogID ),
-  spawn(fun()-> on_commit( DBs ) end).
+  try
+    commit2( LogID ),
+    spawn(fun()-> on_commit( DBs ) end)
+  catch
+    _:E->
+      ?LOGDEBUG("phase 2 single node commit error ~p",[E]),
+      commit_rollback(LogID, DBs),
+      throw(E)
+  end.
 
 %%-----------------------------------------------------------
 %%  MULTI NODE COMMIT
@@ -576,3 +655,7 @@ rollback_dbs( DBs )->
       true-> ignore
     end
   end, ?undefined, DBs).
+
+
+
+
