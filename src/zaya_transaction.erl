@@ -62,6 +62,8 @@
 -define(LOCK_TIMEOUT, 60000).
 -define(ATTEMPTS,5).
 
+-define(none,{?MODULE,?undefined}).
+
 %%=================================================================
 %%	Environment API
 %%=================================================================
@@ -86,7 +88,8 @@
 %%	Internal API
 %%=================================================================
 -export([
-  do_commit/2
+  single_node_commit/1,
+  commit_request/2
 ]).
 
 %%=================================================================
@@ -112,21 +115,21 @@ read(DB, Keys, Lock)->
 
 do_read(DB, Keys, Data)->
   ToRead =
-    [K || K <- Keys, not maps:is_key(K,Data)],
+    [K || K <- Keys, maps:is_key(K, Data)],
   Values =
     maps:from_list( zaya_db:read( DB, ToRead ) ),
   lists:foldl(fun(K,Acc)->
-    Value =
-      case Values of
-        #{K:=V}-> {V,V};
-        _->?undefined
-      end,
-    Acc#{K => Value}
+    case Values of
+      #{K:=V}->
+        Acc#{ K => {V,V} };
+      _->
+        Acc#{ K=> {?none,?none} }
+    end
   end, Data, ToRead).
 
 data_keys([K|Rest], Data)->
   case Data of
-    #{ K:= {_,V} }->
+    #{ K:= {_,V} } when V=/=?none->
       [{K,V} | data_keys(Rest,Data)];
     _->
       data_keys(Rest, Data)
@@ -148,7 +151,7 @@ do_write([{K,V}|Rest], Data )->
     #{K := {V0,_}}->
       do_write(Rest, Data#{K => {V0,V} });
     _->
-      do_write(Rest, Data#{K=>{{V}, V}})
+      do_write(Rest, Data#{K=>{{?none}, V}})
   end;
 do_write([], Data )->
   Data.
@@ -163,6 +166,12 @@ delete(DB, Keys, Lock)->
   ok.
 
 do_delete([K|Rest], Data)->
+  case Data of
+    #{K := {V0,_}}->
+      do_delete( Rest, Data#{ K=> {V0,?none} });
+    _->
+      do_delete( Rest, Data#{ K => {{?none}, ?none}})
+  end,
   do_delete(Rest, Data#{K=>delete});
 do_delete([], Data)->
   Data.
@@ -274,40 +283,70 @@ release_locks(Locks, Parent )->
 %%  COMMIT
 %%-----------------------------------------------------------
 -record(commit,{ ns, ns_dbs, dbs_ns }).
--record(log,{ id, commit, rollback }).
-commit( Data )->
 
-  Commit = prepare_commit( Data ),
+commit( Data0 )->
 
+  case prepare_data( Data0 ) of
+    Data when map_size(Data) > 0->
+      Commit = prepare_commit( Data ),
+      case prepare_commit( Data ) of
+        #commit{ns = [Node],ns_dbs = NsDBs} = Commit->
+          % Single node commit
+          case rpc:call(Node,?MODULE, single_node_commit,[maps:get(Node,NsDBs)]) of
+            ok-> ok;
+            Error-> throw( Error )
+          end;
+        Commit->
+          multi_node_commit( Commit )
+      end;
+    _->
+      % Nothing to commit
+      ok
+  end.
 
-  {Self,Ref} = {self(), make_ref()},
+prepare_data( Data )->
+  maps:fold(fun(DB, Changes, Acc)->
 
-  spawn(fun()->
-    Master = self(),
+    case maps:filter(fun(_K,{V0,V1})-> V0=/=V1 end, Changes) of
+      ToCommit when map_size( ToCommit ) > 0->
 
-    Nodes =
-      lists:usort( lists:append([ ?dbAvailableNodes(DB) || DB <- maps:keys(Data) ])),
+        ToReadKeys =
+          [K || {K,{?none},_} <- maps:to_list( ToCommit )],
 
-    Workers =
-      [ {N, spawn_opt(N, ?MODULE, do_commit, [Master, Ref, maps:with( ?nodeDBs(N), Data )],[ monitor ])} || N <- Nodes],
+        Values =
+          maps:from_list( zaya_db:read(DB, ToReadKeys) ),
 
-    Workers1 =
-      maps:from_list([{W,N} || {N,{W,_}} <- Workers]),
+        Commit =
+          maps:fold(fun(K,{V0,V1},{{CW,CD},{RW,RD}})->
+            CAcc=
+              if
+                V1 =:= ?none-> {CW,[K|CD]};
+                true-> {[{K,V1}|CW],CD}
+              end,
 
-    try
-      Workers2 = wait_confirm( Workers1, Data ),
+            RAcc =
+              if
+                V0 =:= ?none->
+                  {RW,[K|RD]};
+                V0=:={?none}->
+                  case Values of
+                    #{K:=V}->{[{K,V}|RW],RD};
+                    _-> {RW,[K|RD]}
+                  end;
+                true->
+                  {[{K,V0}|RW],RD}
+              end,
 
-      [ W ! {commit, Master} || {_,{W,_}} <- Workers2 ],
+            {CAcc,RAcc}
 
-      wait_committed( Workers2, Data ),
+          end,{{[],[]}, {[],[]}},ToCommit),
 
-      Self ! {committed, Ref}
-    catch
-      _:Error->
-        Self ! {abort, Error}
+        Acc#{DB => Commit};
+      _->
+        Acc
     end
 
-  end).
+  end, #{}, Data).
 
 prepare_commit( Data )->
 
@@ -322,8 +361,51 @@ prepare_commit( Data )->
   NsDBs =
     [ {N, ordsets:intersection( DBs, ordsets:from_list(?nodeDBs(N)) )} || N <- Ns ],
 
-  #commit{ ns=Ns, ns_dbs = NsDBs, dbs_ns = DBsNs }.
+  #commit{ ns=Ns, ns_dbs = maps:from_list(NsDBs), dbs_ns = maps:from_list(DBsNs) }.
 
+%%-----------------------------------------------------------
+%%  SINGLE NODE COMMIT
+%%-----------------------------------------------------------
+single_node_commit( DBs )->
+  LogID = commit1( DBs ),
+  commit2( LogID ).
+
+%%-----------------------------------------------------------
+%%  MULTI NODE COMMIT
+%%-----------------------------------------------------------
+multi_node_commit(#commit{ns = Nodes, ns_dbs = NsDBs} = Commit)->
+
+  Self = self(),
+
+  Master = spawn(fun()->
+
+    Workers =
+      [ {N, spawn_opt(N, ?MODULE, commit_request, [self(), maps:get(N,NsDBs)],[ monitor ])} || N <- Nodes],
+
+    Workers1 =
+      maps:from_list([{W,N} || {N,{W,_}} <- Workers]),
+
+    try
+      Workers2 = wait_confirm( Workers1, Commit, #{} ),
+
+      [ W ! {commit, Master} || {_,{W,_}} <- Workers2 ],
+
+      wait_committed( Workers2, Commit ),
+
+      Self ! {committed, self()}
+    catch
+      _:Error->
+        Self ! {abort, self(), Error}
+    end
+
+  end),
+
+  receive
+    {committed, Master}->
+      ok;
+    {abort, Master, Error}->
+      throw( Error )
+  end.
 
 wait_confirm( Workers, Data )->
   todo.
@@ -331,5 +413,21 @@ wait_confirm( Workers, Data )->
 wait_committed( Workers, Data )->
   todo.
 
-do_commit( Master, Data )->
-  todo.
+commit_request( Master, DBs )->
+
+  erlang:monitor(process, Master),
+
+  LogID = commit1( DBs ),
+  Master ! { commit1, self() },
+
+  receive
+    {commit, Master}->
+      commit2( LogID ),
+      Master ! {commit2, self()};
+    {rollback, Master}->
+      commit_rollback( LogID, DBs );
+    {'DOWN', _Ref, process, Master, Reason} ->
+      ?LOGDEBUG("rollback commit master down ~p",[Reason]),
+      commit_rollback( LogID, DBs )
+  end.
+
