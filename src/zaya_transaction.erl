@@ -396,24 +396,16 @@ multi_node_commit(#commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs} = Commit1)
       maps:from_list([{W,N} || {N,{W,_}} <- Workers]),
 
     try
-      LeftWorkers = wait_commit1( Workers1, Commit1 ),
-      LeftWorkersList = maps:to_list( LeftWorkers ),
+      {Workers2,Commit2} = wait_phase(commit1, maps:keys(DBsNs), Workers1, Commit1 ),
+      Workers2List = maps:to_list( Workers2 ),
 %-----------phase 2------------------------------------------
-      [ catch W ! {commit, MasterSelf} || {W,_N} <- LeftWorkersList ],
+      [ catch W ! {commit, MasterSelf} || {W,_N} <- Workers2List ],
 
-      LeftNodes = ordsets:from_list([ N || {N,_} <- LeftWorkersList]),
-
-      Commit2 = Commit1#commit{
-        ns = LeftNodes,
-        ns_dbs = maps:with( LeftNodes, NsDBs ),
-        dbs_ns = maps:map(fun(_DB,Nodes)->ordsets:intersection(Nodes,LeftNodes) end, DBsNs)
-      },
-
-      wait_commit2( LeftWorkers, Commit2 ),
+      wait_phase(commit2,maps:keys(DBsNs), Workers2, Commit2 ),
 
       catch Self ! {committed, MasterSelf},
 %-----------confirm------------------------------------------
-      [ catch W ! {committed, MasterSelf} || {W,_N} <- LeftWorkersList ]
+      [ catch W ! {committed, MasterSelf} || {W,_N} <- Workers2List ]
     catch
       _:Error->
 %-----------rollback------------------------------------------
@@ -430,52 +422,51 @@ multi_node_commit(#commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs} = Commit1)
       throw( Error )
   end.
 
-wait_commit1( Workers, #commit{ns_dbs = NsDBs, dbs_ns = DBsNs} = Commit ) when map_size(DBsNs) > 0->
+wait_phase(Phase, [], Workers, Commit )->
+  ?LOGDEBUG("~p phase ready",[Phase]),
+  {Workers, Commit};
+wait_phase(Phase, DBs, Workers, #commit{ns = Ns, ns_dbs = NsDBs, dbs_ns = DBsNs} = Commit )->
   receive
-    {commit1, W}->
+    {Phase, W}->
       case Workers of
         #{W := N}->
+          % At least one node is ready to commit it's DBs. It's enough for these DBs to move to the phase2
           ReadyDBs = maps:get(N,NsDBs),
-          wait_commit1( Workers, Commit#commit{ dbs_ns = maps:without(ReadyDBs, DBsNs ) } );
+          wait_phase(Phase, DBs -- ReadyDBs, Workers, Commit );
         _->
           % Who was it?
-          wait_commit1( Workers, Commit )
+          wait_phase(Phase,DBs, Workers, Commit )
       end;
     {'DOWN', _Ref, process, W, Reason}->
+      % One node down
       case maps:take(W, Workers ) of
         {N, RestWorkers}->
+
+          % Rest nodes
+          Ns1 = Ns -- [N],
           NodeDBs = maps:get(N, NsDBs),
-          ?LOGDEBUG("~p node worker down ~p, databases ~p",[N,Reason,NodeDBs]),
+          ?LOGDEBUG("~p phase commit node ~p worker down ~p",[Phase,N,Reason,NodeDBs]),
+
+          % Remove the node from the databases active nodes
           DBsNs1 =
             maps:map(fun(DB,DBNodes)->
               case DBNodes -- [N] of
                 []->
-                  ?LOGDEBUG("~p database is unavailable, abort transaction",[DB]),
+                  ?LOGDEBUG("~p phase commit database ~p is unavailable, abort transaction",[Phase,DB]),
                   throw({unavailable, DB});
                 RestNodes->
                   RestNodes
               end
             end, DBsNs),
-          wait_commit1( RestWorkers, Commit#commit{ dbs_ns = DBsNs1 } );
+
+          % Remove the node from actors
+          NsDBs1 = maps:remove(N,NsDBs),
+
+          wait_phase(Phase, DBs, RestWorkers, Commit#commit{ ns = Ns1, ns_dbs = NsDBs1, dbs_ns = DBsNs1 } );
         _->
           % Who was it?
-          wait_commit1( Workers, Commit )
-      end;
-    _->
-      wait_commit1( Workers, Commit )
-  end;
-wait_commit1( Workers, _Commit )->
-  % All the databases are ready to commit
-  Workers.
-
-wait_commit2( Workers, #commit{}=Commit )->
-  receive
-    {commit2, W}->
-      todo;
-    {'DOWN', _Ref, process, W, Reason}->
-      todo;
-    _->
-      wait_commit2( Workers, Commit )
+          wait_phase(Phase, DBs, Workers, Commit )
+      end
   end.
 
 commit_request( Master, DBs )->
@@ -541,7 +532,7 @@ on_commit(DBs)->
 dump_dbs( DBs )->
   maps:fold(fun(DB,{{Write,Delete},_Rollback},_)->
     Module = ?dbModule(DB),
-    Ref = ?dbRef(DB),
+    Ref = ?dbRef(DB,node()),
     if
       length(Write)> 0 -> ok = Module:write( Ref, Write );
       true-> ignore
@@ -565,7 +556,7 @@ commit_rollback( LogID, DBs )->
 rollback_dbs( DBs )->
   maps:fold(fun(DB,{_Commit,{Write,Delete}},_)->
     Module = ?dbModule(DB),
-    Ref = ?dbRef(DB),
+    Ref = ?dbRef(DB,node()),
     if
       length(Write)> 0 ->
         try Module:write( Ref, Write )
