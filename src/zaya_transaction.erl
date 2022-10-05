@@ -81,7 +81,7 @@
   delete/3,
 
   transaction/1,
-  rollback/3
+  rollback_log/2
 ]).
 
 %%=================================================================
@@ -196,16 +196,8 @@ transaction(Fun)->
       run_transaction( Fun, ?ATTEMPTS )
   end.
 
-rollback(Module, Ref,{_Commit, {Write,Delete}})->
-  if
-    length( Write ) > 0-> ok = Module:write(Ref, Write );
-    true->ignore
-  end,
-  if
-    length( Delete ) > 0-> ok = Module:delete(Ref, Delete );
-    true->ignore
-  end,
-  ok.
+rollback_log(Ref, DB)->
+  todo.
 
 run_transaction(Fun, Attempts) when Attempts>0->
   put(?transaction,#transaction{ data = #{}, locks = #{} }),
@@ -455,7 +447,7 @@ commit_request( Master, DBs )->
 commit1( DBs )->
   LogID = ?t_id,
   ok = ?logModule:write( ?logRef, [{LogID,DBs}] ),
-  try dump_dbs([{DB,Commit} || {DB,{Commit,_Rollback}} <- DBs] )
+  try dump_dbs( DBs )
   catch
     _:Error->
       commit_rollback( LogID, DBs ),
@@ -481,32 +473,50 @@ on_commit(DBs)->
       end
     end || {DB,{{Write,Delete},_Rollback}} <- DBs].
 
-dump_dbs([{DB, {Write,Delete}}|Rest])->
-  Module = ?dbModule(DB),
-  Ref = ?dbRef(DB),
-  if
-    length(Write)> 0 -> ok = Module:write( Ref, Write );
-    true-> ignore
-  end,
-  if
-    length(Delete) > 0-> ok = Module:delete( Ref, Delete );
-    true-> ignore
-  end,
-  dump_dbs(Rest);
-dump_dbs([])->
-  ok.
+dump_dbs( DBs )->
+  maps:fold(fun(DB,{{Write,Delete},_Rollback},_)->
+    Module = ?dbModule(DB),
+    Ref = ?dbRef(DB),
+    if
+      length(Write)> 0 -> ok = Module:write( Ref, Write );
+      true-> ignore
+    end,
+    if
+      length(Delete) > 0-> ok = Module:delete( Ref, Delete );
+      true-> ignore
+    end
+  end, ?undefined, DBs).
 
 
 
 commit_rollback( LogID, DBs )->
-  [ try rollback(?dbModule(DB) ,?dbRef( DB ), Data )
-    catch
-      _:E->
-        ?LOGERROR("unable to rollback commit ~p database ~p, error ~p, data ~p",[ LogID, DB, E, Data ])
-    end|| {DB,Data} <- DBs ],
-
+  rollback_dbs( DBs ),
   try ?logModule:delete( ?logRef,[ LogID ])
   catch
     _:E->
       ?LOGERROR("rollback commit log ~p error ~p",[ LogID, E ])
   end.
+
+rollback_dbs( DBs )->
+  maps:fold(fun(DB,{_Commit,{Write,Delete}},_)->
+    Module = ?dbModule(DB),
+    Ref = ?dbRef(DB),
+    if
+      length(Write)> 0 ->
+        try Module:write( Ref, Write )
+        catch
+          _:WE->
+            ?LOGERROR("unable to rollback write commit: database ~p, error ~p, data ~p",[DB, WE, Write ])
+        end;
+      true-> ignore
+    end,
+    if
+      length(Delete) > 0->
+        try Module:delete( Ref, Delete )
+        catch
+          _:DE->
+            ?LOGERROR("unable to rollback delete commit: database ~p, error ~p, data ~p",[DB, DE, Delete ])
+        end;
+      true-> ignore
+    end
+  end, ?undefined, DBs).
