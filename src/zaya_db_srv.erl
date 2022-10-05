@@ -169,6 +169,7 @@ handle_event(state_timeout, recover, recovery, #data{db = DB, module = Module}=D
       Params = ?dbNodeParams(DB,node()),
       try
         Module:remove( Params ),
+        zaya_transaction:drop_log( DB ),
         {next_state, init, Data, [ {state_timeout, 0, {add_copy, Params} } ] }
       catch
         _:E->

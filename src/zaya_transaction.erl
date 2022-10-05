@@ -81,7 +81,8 @@
   delete/3,
 
   transaction/1,
-  rollback_log/2
+  rollback_log/2,
+  drop_log/1
 ]).
 
 %%=================================================================
@@ -197,6 +198,9 @@ transaction(Fun)->
   end.
 
 rollback_log(Ref, DB)->
+  todo.
+
+drop_log( DB )->
   todo.
 
 run_transaction(Fun, Attempts) when Attempts>0->
@@ -376,29 +380,45 @@ single_node_commit( DBs )->
 %%-----------------------------------------------------------
 %%  MULTI NODE COMMIT
 %%-----------------------------------------------------------
-multi_node_commit(#commit{ns = Nodes, ns_dbs = NsDBs} = Commit)->
+multi_node_commit(#commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs} = Commit1)->
 
   Self = self(),
 
   Master = spawn(fun()->
 
+    MasterSelf = self(),
+
+%-----------phase 1------------------------------------------
     Workers =
-      [ {N, spawn_opt(N, ?MODULE, commit_request, [self(), maps:get(N,NsDBs)],[ monitor ])} || N <- Nodes],
+      [ {N, spawn_opt(N, ?MODULE, commit_request, [MasterSelf, maps:get(N,NsDBs)],[ monitor ])} || N <- Nodes],
 
     Workers1 =
       maps:from_list([{W,N} || {N,{W,_}} <- Workers]),
 
     try
-      Workers2 = wait_confirm( Workers1, Commit, #{} ),
+      LeftWorkers = wait_commit1( Workers1, Commit1 ),
+      LeftWorkersList = maps:to_list( LeftWorkers ),
+%-----------phase 2------------------------------------------
+      [ catch W ! {commit, MasterSelf} || {W,_N} <- LeftWorkersList ],
 
-      [ W ! {commit, Master} || {_,{W,_}} <- Workers2 ],
+      LeftNodes = ordsets:from_list([ N || {N,_} <- LeftWorkersList]),
 
-      wait_committed( Workers2, Commit ),
+      Commit2 = Commit1#commit{
+        ns = LeftNodes,
+        ns_dbs = maps:with( LeftNodes, NsDBs ),
+        dbs_ns = maps:map(fun(_DB,Nodes)->ordsets:intersection(Nodes,LeftNodes) end, DBsNs)
+      },
 
-      Self ! {committed, self()}
+      wait_commit2( LeftWorkers, Commit2 ),
+
+      catch Self ! {committed, MasterSelf},
+%-----------confirm------------------------------------------
+      [ catch W ! {committed, MasterSelf} || {W,_N} <- LeftWorkersList ]
     catch
       _:Error->
-        Self ! {abort, self(), Error}
+%-----------rollback------------------------------------------
+        [ catch W ! {rollback, MasterSelf } || {W,_N} <- Workers1],
+        catch Self ! {abort, MasterSelf, Error}
     end
 
   end),
@@ -410,24 +430,68 @@ multi_node_commit(#commit{ns = Nodes, ns_dbs = NsDBs} = Commit)->
       throw( Error )
   end.
 
-wait_confirm( Workers, Data )->
-  todo.
+wait_commit1( Workers, #commit{ns_dbs = NsDBs, dbs_ns = DBsNs} = Commit ) when map_size(DBsNs) > 0->
+  receive
+    {commit1, W}->
+      case Workers of
+        #{W := N}->
+          ReadyDBs = maps:get(N,NsDBs),
+          wait_commit1( Workers, Commit#commit{ dbs_ns = maps:without(ReadyDBs, DBsNs ) } );
+        _->
+          % Who was it?
+          wait_commit1( Workers, Commit )
+      end;
+    {'DOWN', _Ref, process, W, Reason}->
+      case maps:take(W, Workers ) of
+        {N, RestWorkers}->
+          NodeDBs = maps:get(N, NsDBs),
+          ?LOGDEBUG("~p node worker down ~p, databases ~p",[N,Reason,NodeDBs]),
+          DBsNs1 =
+            maps:map(fun(DB,DBNodes)->
+              case DBNodes -- [N] of
+                []->
+                  ?LOGDEBUG("~p database is unavailable, abort transaction",[DB]),
+                  throw({unavailable, DB});
+                RestNodes->
+                  RestNodes
+              end
+            end, DBsNs),
+          wait_commit1( RestWorkers, Commit#commit{ dbs_ns = DBsNs1 } );
+        _->
+          % Who was it?
+          wait_commit1( Workers, Commit )
+      end;
+    _->
+      wait_commit1( Workers, Commit )
+  end;
+wait_commit1( Workers, _Commit )->
+  % All the databases are ready to commit
+  Workers.
 
-wait_committed( Workers, Data )->
-  todo.
+wait_commit2( Workers, #commit{}=Commit )->
+  receive
+    {commit2, W}->
+      todo;
+    {'DOWN', _Ref, process, W, Reason}->
+      todo;
+    _->
+      wait_commit2( Workers, Commit )
+  end.
 
 commit_request( Master, DBs )->
 
   erlang:monitor(process, Master),
 
+%-----------phase 1------------------------------------------
   LogID = commit1( DBs ),
-
   Master ! { commit1, self() },
 
   receive
     {commit, Master}->
+%-----------phase 2------------------------------------------
       commit2( LogID ),
       Master ! {commit2, self()},
+%-----------confirm------------------------------------------
       receive
         {committed,Master}->
           on_commit(DBs);
@@ -437,6 +501,7 @@ commit_request( Master, DBs )->
           ?LOGDEBUG("not confirmed commit master down ~p",[Reason]),
           on_commit(DBs)
       end;
+%-----------rollback------------------------------------------
     {rollback, Master}->
       commit_rollback( LogID, DBs );
     {'DOWN', _Ref, process, Master, Reason} ->
