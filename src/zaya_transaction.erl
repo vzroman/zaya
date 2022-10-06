@@ -507,11 +507,12 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs} = Co
     MasterSelf = self(),
 
 %-----------phase 1------------------------------------------
-    Workers =
-      [ {N, spawn(N, ?MODULE, commit_request, [MasterSelf, maps:with(maps:get(N,NsDBs), Data)])} || N <- Nodes],
-
     Workers1 =
-      maps:from_list([begin erlang:monitor(process, W), {W,N} end|| {N,{W,_}} <- Workers]),
+      maps:from_list([ begin
+          W = spawn(N, ?MODULE, commit_request, [MasterSelf, maps:with(maps:get(N,NsDBs), Data)]),
+          erlang:monitor(process, W),
+          {W,N}
+        end || N <- Nodes]),
 
     try
       {Workers2,Commit2} = wait_phase(commit1, maps:keys(DBsNs), Workers1, Commit1 ),
