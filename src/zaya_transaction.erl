@@ -305,7 +305,7 @@ lock(DB, Keys, Type, Locks) when Type=:=read; Type=:=write->
       do_lock( Keys, DB, ?dbAvailableNodes(DB), Type, Locks );
     _->
       lock( DB, Keys, Type, Locks#{
-        {?MODULE,DB} => lock_key( DB, _IsShared=true, _Timeout=?infinity, ?dbAvailableNodes(DB) )
+        {?MODULE,DB} => {read,lock_key( DB, _IsShared=true, _Timeout=?infinity, ?dbAvailableNodes(DB) )}
       })
   end;
 lock(_DB, _Keys, none, Locks)->
@@ -629,7 +629,7 @@ commit1( DBs )->
   end.
 
 commit2( LogID )->
-  try ?logModule:delete( ?logRef,[ LogID ])
+  try ok = ?logModule:delete( ?logRef,[ LogID ])
   catch
     _:E->
       ?LOGERROR("commit log ~p delete error ~p",[ LogID, E ])
@@ -702,7 +702,7 @@ rollback_log(Module, Ref, DB)->
   fold_log(DB, fun({Commit,{Write,Delete}})->
     if
       length(Write) >0->
-        try Module:write(Ref,Write)
+        try ok = Module:write(Ref,Write)
         catch
           _:WE->
             ?LOGERROR("~p database rollback write error: ~p\r\ncommit: ~p\r\nrollback write: ~p",[DB,WE,Commit,Write])
@@ -711,7 +711,7 @@ rollback_log(Module, Ref, DB)->
     end,
     if
       length(Delete) >0->
-        try Module:delete(Ref,Delete)
+        try ok = Module:delete(Ref,Delete)
         catch
           _:DE->
             ?LOGERROR("~p database rollback delete error: ~p\r\ncommit: ~p\r\nrollback delete: ~p",[DB,DE,Commit,Delete])
@@ -734,9 +734,9 @@ fold_log( DB, Fun )->
           Fun( Data ),
           if
             map_size(Rest) > 0 ->
-              ?logModule:write(LogRef,[{LogID,Rest}]);
+              ok = ?logModule:write(LogRef,[{LogID,Rest}]);
             true->
-              ?logModule:delete(LogRef,[LogID])
+              ok = ?logModule:delete(LogRef,[LogID])
           end;
         _->
           ignore
