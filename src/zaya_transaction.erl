@@ -511,7 +511,7 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
         {W,N}
       end || N <- Nodes]),
 
-    wait_confirm(DBsNs, NsDBs, Workers )
+    wait_confirm(maps:keys(DBsNs), DBsNs, NsDBs, Workers )
 %-----------phase 2------------------------------------------
     % Every participant is waiting {'DOWN', _, process, Master, normal}
     % It's accepted as the phase2 confirmation
@@ -524,19 +524,19 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
       throw( Error )
   end.
 
-wait_confirm(DBsNs, _NsDBs, _Workers ) when map_size(DBsNs) =:=0->
+wait_confirm([], _DBsNs, _NsDBs, _Workers )->
   ?LOGDEBUG("transaction confirmed");
-wait_confirm(DBsNs, NsDBs, Workers )->
+wait_confirm(DBs, DBsNs, NsDBs, Workers )->
   receive
     {confirm, W}->
       case Workers of
         #{W := N}->
           % At least one node is ready to commit it's DBs. It's enough for these DBs to move to the phase2
           ReadyDBs = maps:get(N,NsDBs),
-          wait_confirm( maps:without(ReadyDBs,DBsNs), NsDBs, Workers );
+          wait_confirm(DBs -- ReadyDBs, DBsNs, NsDBs, Workers );
         _->
           % Who was it?
-          wait_confirm(DBsNs, NsDBs, Workers )
+          wait_confirm(DBs, DBsNs, NsDBs, Workers )
       end;
     {'DOWN', _Ref, process, W, Reason}->
       % One node went down
@@ -557,10 +557,10 @@ wait_confirm(DBsNs, NsDBs, Workers )->
               end
             end, DBsNs),
 
-          wait_confirm(DBsNs1, maps:remove(N,NsDBs),  RestWorkers );
+          wait_confirm(DBs, DBsNs1, maps:remove(N,NsDBs),  RestWorkers );
         _->
           % Who was it?
-          wait_confirm(DBsNs, NsDBs, Workers )
+          wait_confirm(DBs, DBsNs, NsDBs, Workers )
       end
   end.
 
