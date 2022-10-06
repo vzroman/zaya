@@ -528,7 +528,7 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs} = Co
     catch
       _:Error->
 %-----------rollback------------------------------------------
-        [ catch W ! {rollback, MasterSelf } || {W,_N} <- Workers1],
+        [ catch W ! {rollback, MasterSelf } || {W,_N} <- maps:to_list(Workers1)],
         catch Self ! {abort, MasterSelf, Error}
     end
 
@@ -668,7 +668,7 @@ dump_dbs( DBs )->
 
 commit_rollback( LogID, DBs )->
   rollback_dbs( DBs ),
-  try ?logModule:delete( ?logRef,[ LogID ])
+  try ok = ?logModule:delete( ?logRef,[ LogID ])
   catch
     _:E->
       ?LOGERROR("rollback commit log ~p error ~p",[ LogID, E ])
@@ -680,7 +680,7 @@ rollback_dbs( DBs )->
     Ref = ?dbRef(DB,node()),
     if
       length(Write)> 0 ->
-        try Module:write( Ref, Write )
+        try ok = Module:write( Ref, Write )
         catch
           _:WE->
             ?LOGERROR("unable to rollback write commit: database ~p, error ~p, data ~p",[DB, WE, Write ])
@@ -689,7 +689,7 @@ rollback_dbs( DBs )->
     end,
     if
       length(Delete) > 0->
-        try Module:delete( Ref, Delete )
+        try ok =  Module:delete( Ref, Delete )
         catch
           _:DE->
             ?LOGERROR("unable to rollback delete commit: database ~p, error ~p, data ~p",[DB, DE, Delete ])
