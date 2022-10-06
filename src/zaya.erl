@@ -94,6 +94,17 @@
   update/2
 ]).
 
+%%=================================================================
+%%	Transaction API
+%%=================================================================
+-export([
+  read/3,
+  write/3,
+  delete/3,
+
+  transaction/1
+]).
+
 %%%%---------------------------------------------------------------
 %%%%	Nodes Service API
 %%%%---------------------------------------------------------------
@@ -278,3 +289,17 @@ foldr( DB, Query, Fun, InAcc)->
 update(DB, Query)->
   zaya_db:update( DB, Query ).
 
+%%%%---------------------------------------------------------------
+%%%%	TRANSACTION API
+%%%%---------------------------------------------------------------
+read(DB, Keys, Lock)->
+  zaya_transaction:read( DB, Keys, Lock ).
+
+write(DB, KVs, Lock)->
+  zaya_transaction:write( DB, KVs, Lock ).
+
+delete(DB, Keys, Lock)->
+  zaya_transaction:delete( DB, Keys, Lock ).
+
+transaction( Fun )->
+  zaya_transaction:transaction( Fun ).

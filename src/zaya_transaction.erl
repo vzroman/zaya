@@ -224,7 +224,7 @@ do_delete([], Data)->
 %%-----------------------------------------------------------
 %%  TRANSACTION
 %%-----------------------------------------------------------
-transaction(Fun)->
+transaction(Fun) when is_function(Fun,0)->
   case get(?transaction) of
     #transaction{locks = PLocks}=Parent->
       % Internal transaction
@@ -244,7 +244,9 @@ transaction(Fun)->
     _->
       % The transaction entry point
       run_transaction( Fun, ?ATTEMPTS )
-  end.
+  end;
+transaction(_Fun)->
+  throw(bad_argument).
 
 run_transaction(Fun, Attempts) when Attempts>0->
   % Create the transaction storage
