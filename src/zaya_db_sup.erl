@@ -20,7 +20,7 @@ init([]) ->
   ChildConfig = #{
     id=> zaya_db_srv,
     start=>{zaya_db_srv,start_link,[]},
-    restart=> permanent,
+    restart=> transient,
     shutdown=> ?env(stop_timeout, ?DEFAULT_STOP_TIMEOUT),
     type=>worker,
     modules=>[zaya_db_srv]

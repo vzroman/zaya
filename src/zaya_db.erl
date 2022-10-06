@@ -357,18 +357,10 @@ force_open( DB, Node )->
   rpc:call( Node, zaya_db_srv, force_open, [DB]).
 
 close(DB)->
-  {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, _Timeout = ?infinity, ?readyNodes ),
-  try ecall:call_all_wait( ?dbReadyNodes(DB), zaya_db_srv, close, [DB] )
-  after
-    Unlock()
-  end.
+  ecall:call_all_wait( ?dbReadyNodes(DB), zaya_db_srv, close, [DB] ).
 
 close(DB, Node )->
-  {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, _Timeout = ?infinity, [Node] ),
-  try rpc:call( Node, zaya_db_srv, close, [DB])
-  after
-    Unlock()
-  end.
+  rpc:call( Node, zaya_db_srv, close, [DB]).
 
 remove( DB )->
 
@@ -385,11 +377,7 @@ remove( DB )->
       throw({not_closed, Nodes})
   end,
 
-  {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, _Timeout = ?infinity, ?readyNodes ),
-  try ecall:call_all_wait(?readyNodes, ?MODULE, do_remove, [DB] )
-  after
-    Unlock()
-  end.
+  ecall:call_all_wait(?readyNodes, ?MODULE, do_remove, [DB] ).
 
 do_remove( DB )->
   Module = ?dbModule( DB ),
@@ -480,11 +468,7 @@ remove_copy(DB, Node)->
       ok
   end,
 
-  {ok,Unlock} = elock:lock(?locks, DB, _IsShared = false, [Node], _Timeout = ?infinity ),
-  try rpc:call(Node, ?MODULE, do_remove_copy, [ DB ])
-  after
-    Unlock()
-  end.
+  rpc:call(Node, ?MODULE, do_remove_copy, [ DB ]).
 
 do_remove_copy( DB )->
   Module = ?dbModule( DB ),

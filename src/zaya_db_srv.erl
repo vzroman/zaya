@@ -62,7 +62,7 @@ add_copy( DB, InParams )->
 close( DB )->
   case whereis( DB ) of
     PID when is_pid( PID )->
-      supervisor:terminate_child(zaya_db_sup, PID);
+      gen_statem:cast(DB, close);
     _->
       {error, not_registered}
   end.
@@ -79,58 +79,38 @@ start_link( DB, Action )->
   gen_statem:start_link({local,DB},?MODULE, [DB, Action], []).
 
 -record(data,{db, module, params, ref}).
-init([DB, Action])->
+init([DB, State])->
 
   process_flag(trap_exit,true),
 
-  ?LOGINFO("~p starting database server ~p",[DB ,self()]),
+  ?LOGINFO("~p starting database server ~p, state ~p",[DB ,self(),State]),
 
   Module = ?dbModule( DB ),
 
-  {ok, init, #data{db = DB, module = Module }, [ {state_timeout, 0, Action } ]}.
+  {ok, State, #data{db = DB, module = Module }, [ {state_timeout, 0, run } ]}.
 
-handle_event(state_timeout, open, init, #data{db = DB, module = Module} = Data) ->
+%%---------------------------------------------------------------------------
+%%   OPEN
+%%---------------------------------------------------------------------------
+handle_event(state_timeout, run, open, #data{db = DB, module = Module} = Data) ->
   Params = ?dbNodeParams(DB,node()),
   try
     Ref = Module:open( Params ),
     ?LOGINFO("~p database open",[DB]),
-    {next_state, rollback_transactions, Data#data{ ref = Ref }, [ {state_timeout, 0, rollback } ] }
+    {next_state, rollback_transactions, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
   catch
     _:E->
       ?LOGERROR("~p open error ~p",[DB,E]),
-      { keep_state_and_data, [ {state_timeout, 5000, open } ] }
+      { keep_state_and_data, [ {state_timeout, 5000, run } ] }
   end;
 
-handle_event(state_timeout, rollback, rollback_transactions, #data{ ref = Ref, db = DB, module = Module } = Data) ->
+handle_event(state_timeout, run, rollback_transactions, #data{ ref = Ref, db = DB, module = Module } = Data) ->
 
   zaya_transaction:rollback_log(Module, Ref, DB),
 
-  {next_state, register, Data, [ {state_timeout, 0, register } ] };
+  {next_state, register, Data, [ {state_timeout, 0, run } ] };
 
-handle_event(state_timeout, {add_copy, Params}, init, #data{db = DB, module = Module} = Data) ->
-  try
-    Ref = zaya_copy:copy( DB, Module, Params, #{ live => true}),
-    {next_state, register_copy, Data#data{ ref = Ref }, [ {state_timeout, 0, {register_copy,Params} } ] }
-  catch
-    _:E->
-      ?LOGERROR("~p copy error ~p",[DB,E]),
-      { keep_state_and_data, [ {state_timeout, 5000, {add_copy, Params} } ] }
-  end;
-
-handle_event(state_timeout, recover, init, Data ) ->
-  {next_state, recovery, Data, [ {state_timeout, 0, recover } ] };
-
-handle_event(state_timeout, {register_copy,Params}, register_copy, #data{db = DB} = Data) ->
-  case ecall:call_all(?readyNodes, zaya_schema_srv, add_db_copy, [DB, node(), Params] ) of
-    {ok,_}->
-      ?LOGINFO("~p copy registered",[DB]),
-      {next_state, register, Data, [ {state_timeout, 0, register } ] };
-    {error,Error}->
-      ?LOGERROR("~p register copy error ~p",[ DB, Error ]),
-      { keep_state_and_data, [ {state_timeout, 5000, {register_copy,Params} } ] }
-  end;
-
-handle_event(state_timeout, register, register, #data{db = DB, ref = Ref} = Data) ->
+handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
 
   case elock:lock( ?locks, DB, _IsShared=false, 5000, ?dbAvailableNodes(DB)) of
     {ok, Unlock}->
@@ -144,23 +124,49 @@ handle_event(state_timeout, register, register, #data{db = DB, ref = Ref} = Data
       end;
     {error,LockError}->
       ?LOGINFO("~p register lock error ~p, retry",[DB, LockError]),
-      { keep_state_and_data, [ {state_timeout, 0, register } ] }
+      { keep_state_and_data, [ {state_timeout, 0, run } ] }
   end;
 
-handle_event(state_timeout, recover, recovery, #data{db = DB, module = Module}=Data ) ->
+%%---------------------------------------------------------------------------
+%%   ADD COPY
+%%---------------------------------------------------------------------------
+handle_event(state_timeout, run, {add_copy, Params}, #data{db = DB, module = Module} = Data) ->
+  try
+    Ref = zaya_copy:copy( DB, Module, Params, #{ live => true}),
+    {next_state, {register_copy,Params}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+  catch
+    _:E->
+      ?LOGERROR("~p copy error ~p",[DB,E]),
+      { keep_state_and_data, [ {state_timeout, 5000, run } ] }
+  end;
+
+handle_event(state_timeout, run, {register_copy,Params}, #data{db = DB} = Data) ->
+  case ecall:call_all(?readyNodes, zaya_schema_srv, add_db_copy, [DB, node(), Params] ) of
+    {ok,_}->
+      ?LOGINFO("~p copy registered",[DB]),
+      {next_state, register, Data, [ {state_timeout, 0, run } ] };
+    {error,Error}->
+      ?LOGERROR("~p register copy error ~p",[ DB, Error ]),
+      { keep_state_and_data, [ {state_timeout, 5000, run } ] }
+  end;
+
+%%---------------------------------------------------------------------------
+%%   RECOVER
+%%---------------------------------------------------------------------------
+handle_event(state_timeout, run, recover, #data{db = DB, module = Module}=Data ) ->
   case ?dbAvailableNodes(DB) of
     []->
       case os:getenv("FORCE_START") of
         "true"->
           ?LOGWARNING("~p force open",[DB]),
-          {next_state, init, Data, [ {state_timeout, 0, open } ] };
+          {next_state, open, Data, [ {state_timeout, 0, run } ] };
         _->
           ?LOGERROR("~p database recover error: database is unavailable.\r\n"++
             "If you sure that the local copy is the latest you can try to load it with:\r\n"++
             "  zaya:db_force_open(~p, ~p).\r\n" ++
             "Execute this command from erlang console at any attached node.\r\n"++
             "WARNING!!! All the data changes made in other nodes copies will be LOST!",[DB,DB,node()]),
-          { keep_state_and_data, [ {state_timeout, 5000, recover } ] }
+          { keep_state_and_data, [ {state_timeout, 5000, run } ] }
       end;
     _->
       % TODO. Hash tree
@@ -168,24 +174,58 @@ handle_event(state_timeout, recover, recovery, #data{db = DB, module = Module}=D
       try
         Module:remove( Params ),
         zaya_transaction:drop_log( DB ),
-        {next_state, init, Data, [ {state_timeout, 0, {add_copy, Params} } ] }
+        {next_state, {add_copy, Params}, Data, [ {state_timeout, 0, run } ] }
       catch
         _:E->
           ?LOGERROR("~p remove copy error ~p",[DB,E]),
-          { keep_state_and_data, [ {state_timeout, 5000, recover } ] }
+          { keep_state_and_data, [ {state_timeout, 5000, run } ] }
       end
   end;
-handle_event(cast, force_load, recovery, #data{db = DB} = Data ) ->
+handle_event(cast, force_load, recover, #data{db = DB} = Data ) ->
   ?LOGWARNING("~p FORCE LOAD. ALL THE DATA CHANGES MADE IN OTHER NODES COPIES WILL BE LOST!",[DB]),
-  {next_state, init, Data, [ {state_timeout, 0, open } ] };
+  {next_state, open, Data, [ {state_timeout, 0, run } ] };
 
-handle_event(cast, recover, ready, #data{db = DB, module = Module, ref = Ref}=Data) ->
-  ?LOGWARNING("~p recovery",[DB]),
+%%---------------------------------------------------------------------------
+%%   DB IS READY
+%%---------------------------------------------------------------------------
+handle_event(cast, recover, ready, #data{db = DB}=Data) ->
+  case ?dbAvailableNodes(DB) -- [node()] of
+    []->
+      ?LOGERROR("~p recovery is impossible: the only copy"),
+      keep_state_and_data;
+    _->
+      ?LOGWARNING("~p recovery",[DB]),
+      {next_state, close, Data, [ {state_timeout, 0, recover } ]}
+  end;
 
-  ecall:call_all_wait(?readyNodes, zaya_schema_srv, close_db, [DB, node()]),
-  Module:close(Ref),
+handle_event(cast, close, ready, #data{db = DB}=Data) ->
 
-  {next_state, recovery, Data, [ {state_timeout, 0, recover } ]};
+  ?LOGINFO("~p close",[DB]),
+
+  {next_state, close, Data, [ {state_timeout, 0, shutdown } ]};
+
+%%---------------------------------------------------------------------------
+%%   CLOSE
+%%---------------------------------------------------------------------------
+handle_event(state_timeout, NextState, close, #data{db = DB, module = Module, ref = Ref} = Data) ->
+
+  case elock:lock( ?locks, DB, _IsShared=false, 30000, ?dbAvailableNodes(DB)) of
+    {ok, Unlock}->
+      try
+        ecall:call_all_wait(?readyNodes, zaya_schema_srv, close_db, [DB, node()]),
+        Module:close(Ref),
+
+        {next_state, NextState, Data, [ {state_timeout, 0, run } ]}
+      after
+        Unlock()
+      end;
+    {error,LockError}->
+      ?LOGINFO("~p close lock error ~p, retry",[DB, LockError]),
+      { keep_state_and_data, [ {state_timeout, 0, NextState } ] }
+  end;
+
+handle_event(state_timeout, run, shutdown, _Data) ->
+  {stop, shutdown};
 
 handle_event(EventType, EventContent, _AnyState, #data{db = DB}) ->
   ?LOGWARNING("~p database server received unexpected event type ~p, content ~p",[

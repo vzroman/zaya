@@ -395,6 +395,7 @@ try_attach_to([])->
               ++"Try to restart them first. If those nodes are lost or this node has the latest data you can restart it with:\r\n"
                 ++" env FORCE_START=true <your application>\r\n"
                 ++"ATTENTION! All the latest data on other nodes will be lost.",[ReadyNodes]),
+              timer:sleep(5000),
               try_attach_to(?allNodes)
           end
       end;
