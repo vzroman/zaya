@@ -497,93 +497,70 @@ single_node_commit( DBs )->
 %%-----------------------------------------------------------
 %%  MULTI NODE COMMIT
 %%-----------------------------------------------------------
-multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs} = Commit1)->
+multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
 
-  Self = self(),
+  {_,Ref} = spawn_monitor(fun()->
 
-  Master = spawn(fun()->
-
-    MasterSelf = self(),
+    Master = self(),
 
 %-----------phase 1------------------------------------------
-    Workers1 =
+    Workers =
       maps:from_list([ begin
-          W = spawn(N, ?MODULE, commit_request, [MasterSelf, maps:with(maps:get(N,NsDBs), Data)]),
-          erlang:monitor(process, W),
-          {W,N}
-        end || N <- Nodes]),
+        W = spawn(N, ?MODULE, commit_request, [Master, maps:with(maps:get(N,NsDBs), Data)]),
+        erlang:monitor(process, W),
+        {W,N}
+      end || N <- Nodes]),
 
-    try
-      {Workers2,Commit2} = wait_phase(commit1, maps:keys(DBsNs), Workers1, Commit1 ),
-      Workers2List = maps:to_list( Workers2 ),
+    wait_confirm(DBsNs, NsDBs, Workers )
 %-----------phase 2------------------------------------------
-      [ catch W ! {commit, MasterSelf} || {W,_N} <- Workers2List ],
-
-      wait_phase(commit2,maps:keys(DBsNs), Workers2, Commit2 ),
-
-      catch Self ! {committed, MasterSelf},
-%-----------confirm------------------------------------------
-      [ catch W ! {committed, MasterSelf} || {W,_N} <- Workers2List ]
-    catch
-      _:Error->
-%-----------rollback------------------------------------------
-        [ catch W ! {rollback, MasterSelf } || {W,_N} <- maps:to_list(Workers1)],
-        catch Self ! {abort, MasterSelf, Error}
-    end
-
+    % Every participant is waiting {'DOWN', _, process, Master, normal}
+    % It's accepted as the phase2 confirmation
   end),
 
   receive
-    {committed, Master}->
+    {'DOWN', Ref, process, _, normal}->
       ok;
-    {abort, Master, Error}->
+    {'DOWN', Ref, process, _, Error}->
       throw( Error )
   end.
 
-wait_phase(Phase, [], Workers, Commit )->
-  ?LOGDEBUG("~p phase ready",[Phase]),
-  {Workers, Commit};
-wait_phase(Phase, DBs, Workers, #commit{ns = Ns, ns_dbs = NsDBs, dbs_ns = DBsNs} = Commit )->
+wait_confirm(DBsNs, _NsDBs, _Workers ) when map_size(DBsNs) =:=0->
+  ?LOGDEBUG("transaction confirmed");
+wait_confirm(DBsNs, NsDBs, Workers )->
   receive
-    {Phase, W}->
+    {confirm, W}->
       case Workers of
         #{W := N}->
           % At least one node is ready to commit it's DBs. It's enough for these DBs to move to the phase2
           ReadyDBs = maps:get(N,NsDBs),
-          wait_phase(Phase, DBs -- ReadyDBs, Workers, Commit );
+          wait_confirm( maps:without(ReadyDBs,DBsNs), NsDBs, Workers );
         _->
           % Who was it?
-          wait_phase(Phase,DBs, Workers, Commit )
+          wait_confirm(DBsNs, NsDBs, Workers )
       end;
     {'DOWN', _Ref, process, W, Reason}->
-      % One node down
+      % One node went down
       case maps:take(W, Workers ) of
         {N, RestWorkers}->
 
-          % Rest nodes
-          Ns1 = Ns -- [N],
-          NodeDBs = maps:get(N, NsDBs),
-          ?LOGDEBUG("~p phase commit node ~p worker down ~p",[Phase,N,Reason,NodeDBs]),
+          ?LOGDEBUG("commit node ~p down ~p",[N,Reason]),
 
           % Remove the node from the databases active nodes
           DBsNs1 =
             maps:map(fun(DB,DBNodes)->
               case DBNodes -- [N] of
                 []->
-                  ?LOGDEBUG("~p phase commit database ~p is unavailable, abort transaction",[Phase,DB]),
+                  ?LOGDEBUG("~p database is unavailable, reason ~p, abort transaction",[DB,Reason]),
                   throw({unavailable, DB});
                 RestNodes->
                   RestNodes
               end
             end, DBsNs),
 
-          % Remove the node from actors
-          NsDBs1 = maps:remove(N,NsDBs),
-
-          wait_phase(Phase, DBs, RestWorkers, Commit#commit{ ns = Ns1, ns_dbs = NsDBs1, dbs_ns = DBsNs1 } );
+          wait_confirm(DBsNs1, maps:remove(N,NsDBs),  RestWorkers );
         _->
           % Who was it?
-          wait_phase(Phase, DBs, Workers, Commit )
+          wait_confirm(DBsNs, NsDBs, Workers )
       end
   end.
 
@@ -593,26 +570,13 @@ commit_request( Master, DBs )->
 
 %-----------phase 1------------------------------------------
   LogID = commit1( DBs ),
-  Master ! { commit1, self() },
+  Master ! { confirm, self() },
 
   receive
-    {commit, Master}->
+    {'DOWN', _Ref, process, Master, normal} ->
 %-----------phase 2------------------------------------------
-      commit2( LogID ),
-      Master ! {commit2, self()},
-%-----------confirm------------------------------------------
-      receive
-        {committed,Master}->
-          on_commit(DBs);
-        {rollback, Master}->
-          commit_rollback( LogID, DBs );
-        {'DOWN', _Ref, process, Master, Reason}->
-          ?LOGDEBUG("not confirmed commit master down ~p",[Reason]),
-          on_commit(DBs)
-      end;
+      commit2( LogID );
 %-----------rollback------------------------------------------
-    {rollback, Master}->
-      commit_rollback( LogID, DBs );
     {'DOWN', _Ref, process, Master, Reason} ->
       ?LOGDEBUG("rollback commit master down ~p",[Reason]),
       commit_rollback( LogID, DBs )
@@ -669,8 +633,7 @@ commit_rollback( LogID, DBs )->
   rollback_dbs( DBs ),
   try ok = ?logModule:delete( ?logRef,[ LogID ])
   catch
-    _:E->
-      ?LOGERROR("rollback commit log ~p error ~p",[ LogID, E ])
+    _:E->?LOGWARNING("rollback log ~p delete error ~p, data: ~p",[ LogID, E, DBs ])
   end.
 
 rollback_dbs( DBs )->
