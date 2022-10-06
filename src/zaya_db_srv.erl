@@ -103,9 +103,9 @@ handle_event(state_timeout, open, init, #data{db = DB, module = Module} = Data) 
       { keep_state_and_data, [ {state_timeout, 5000, open } ] }
   end;
 
-handle_event(state_timeout, rollback, rollback_transactions, #data{ ref = Ref, db = DB } = Data) ->
+handle_event(state_timeout, rollback, rollback_transactions, #data{ ref = Ref, db = DB, module = Module } = Data) ->
 
-  zaya_transaction:rollback_log(Ref, DB),
+  zaya_transaction:rollback_log(Module, Ref, DB),
 
   {next_state, register, Data, [ {state_timeout, 0, register } ] };
 

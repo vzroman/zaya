@@ -88,7 +88,7 @@
 %%  Database server API
 %%=================================================================
 -export([
-  rollback_log/2,
+  rollback_log/3,
   drop_log/1
 ]).
 
@@ -666,16 +666,40 @@ rollback_dbs( DBs )->
 %%-----------------------------------------------------------
 %%  Database server
 %%-----------------------------------------------------------
-rollback_log(Ref, DB)->
-  todo.
+rollback_log(Module, Ref, DB)->
+  fold_log(DB, fun({Commit,{Write,Delete}})->
+    if
+      length(Write) >0->
+        try Module:write(Ref,Write)
+        catch
+          _:WE->
+            ?LOGERROR("~p database rollback write error: ~p\r\ncommit: ~p\r\nrollback write: ~p",[DB,WE,Commit,Write])
+        end;
+      true->ignore
+    end,
+    if
+      length(Delete) >0->
+        try Module:delete(Ref,Delete)
+        catch
+          _:DE->
+            ?LOGERROR("~p database rollback delete error: ~p\r\ncommit: ~p\r\nrollback delete: ~p",[DB,DE,Commit,Delete])
+        end;
+      true->ignore
+    end
+  end).
 
 drop_log( DB )->
+  fold_log(DB, fun(_)-> ignore end).
+
+
+fold_log( DB, Fun )->
   LogRef = ?logRef,
   ?logModule:foldl(LogRef,#{},fun({LogID,DBs},_)->
     {ok,Unlock} = elock:lock(?locks,{?MODULE,log,LogID},_IsShared=false,?infinity),
     try
       case maps:take(DB,DBs) of
-        {_Data, Rest} ->
+        {Data, Rest} ->
+          Fun( Data ),
           if
             map_size(Rest) > 0 ->
               ?logModule:write(LogRef,[{LogID,Rest}]);
@@ -691,10 +715,7 @@ drop_log( DB )->
     after
       Unlock()
     end
-                              end,?undefined).
-
-fold_log( DB )->
-  todo.
+  end,?undefined).
 
 
 
