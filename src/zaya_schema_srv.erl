@@ -175,7 +175,7 @@ handle_call({open_db, DB, Node, Ref}, From, State) ->
   try
     ?OPEN_DB(DB,Node,Ref),
     gen_server:reply(From,ok),
-    ?LOGINFO("~p db opened, ref ~p",[DB, Ref])
+    ?LOGINFO("~p db opened at ~p",[DB, Node])
   catch
     _:E:S->
       gen_server:reply(From, {error,E}),
@@ -267,34 +267,64 @@ try_load()->
   case ?schemaExists of
     true->
       ?LOGINFO("schema initialization"),
-      try ?SCHEMA_OPEN
-      catch
-        _:E:S->
-          ?LOGERROR("CRITICAL ERROR! UNABLE TO OPEN SCHMA \r\n~p\r\n ERROR ~p STACK ~p",[?schemaPath,E,S]),
-          ?LOGINFO("close the application, fix the problem and try start again"),
-          timer:sleep( ?infinity )
-      end,
+      schema_open(),
+      log_open(),
       restart(?allNodes);
     _->
-      try
-        ?SCHEMA_CREATE,
-        ?SCHEMA_OPEN
-      catch
-        _:E:S->
-          ?LOGERROR("CRITICAL ERROR! UNABLE TO CREATE SCHMA ERROR ~p STACK ~p",[E,S]),
-          ?LOGINFO("check schema path: \r\n"
-            ++" ~p\r\n"
-            ++" is available, check acces for writing and try to start again.\r\n"
-            ++" if the schema moved to another path, close the application edit config file, and try to start again",
-            [ ?schemaPath ]),
-          timer:sleep( ?infinity )
-      end,
+      schema_create(),
+      log_create(),
       case os:getenv("ATTACH_TO") of
         false->
           ?LOGINFO("single node first start");
         Node->
           try_attach_to([list_to_atom( Node )])
       end
+  end.
+
+schema_create()->
+  try
+    ?SCHEMA_CREATE,
+    ?SCHEMA_OPEN
+  catch
+    _:E:S->
+      ?LOGERROR("CRITICAL ERROR! UNABLE TO CREATE SCHEMA ERROR ~p STACK ~p",[E,S]),
+      ?LOGINFO("check schema path: \r\n"
+      ++" ~p\r\n"
+        ++" is available, check acces for writing and try to start again.\r\n"
+        ++" if the schema moved to another path, close the application edit config file, and try to start again",
+        [ ?schemaPath ]),
+      timer:sleep( ?infinity )
+  end.
+
+log_create()->
+  try zaya_transaction:create_log( ?transactionLogPath )
+  catch
+    _:E:S->
+      ?LOGERROR("CRITICAL ERROR! UNABLE TO CREATE TRANSACTION LOG ERROR ~p STACK ~p",[E,S]),
+      ?LOGINFO("check transactiuon log path: \r\n"
+      ++" ~p\r\n"
+        ++" is available, check acces for writing and try to start again.\r\n"
+        ++" if the transaction log moved return it back, close the application and try to start again",
+        [ ?transactionLogPath ]),
+      timer:sleep( ?infinity )
+  end.
+
+schema_open()->
+  try ?SCHEMA_OPEN
+  catch
+    _:E:S->
+      ?LOGERROR("CRITICAL ERROR! UNABLE TO OPEN SCHEMA \r\n~p\r\n ERROR ~p STACK ~p",[?schemaPath,E,S]),
+      ?LOGINFO("close the application, fix the problem and try start again"),
+      timer:sleep( ?infinity )
+  end.
+
+log_open()->
+  try zaya_transaction:open_log( ?transactionLogPath )
+  catch
+    _:E:S->
+      ?LOGERROR("CRITICAL ERROR! UNABLE TO OPEN TRANSACTION \r\n~p\r\n ERROR ~p STACK ~p",[?transactionLogPath,E,S]),
+      ?LOGINFO("close the application, fix the problem and try start again"),
+      timer:sleep( ?infinity )
   end.
 
 restart([Node]) when Node =:= node()->
@@ -346,25 +376,31 @@ try_attach_to([Node|Rest])->
       try_attach_to( Rest )
   end;
 try_attach_to([])->
-  case ?readyNodes -- [node()] of
-    []->
-      ?LOGINFO("multi node application full restart"),
-      [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
-      ok;
-    ReadyNodes->
-      case os:getenv("FORCE_START") of
-        "true"->
-          ?LOGWARNING("FORCE RESTART"),
-          [ ?NODE_DOWN(N) || N <- ?allNodes],
+  case os:getenv("ATTACH_TO") of
+    false->
+      case ?readyNodes -- [node()] of
+        []->
+          ?LOGINFO("multi node application full restart"),
           [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
           ok;
-        _->
-          ?LOGWARNING("There were active nodes ~p, when the node went down. They might have more actual data.\r\n"
-          ++"Try to restart them first. If those nodes are lost or this node has the latest data you can restart it with:\r\n"
-          ++" env FORCE_START=true <your application>\r\n"
-          ++"ATTENTION! All the latest data on other nodes will be lost.",[ReadyNodes]),
-          try_attach_to(?allNodes)
-      end
+        ReadyNodes->
+          case os:getenv("FORCE_START") of
+            "true"->
+              ?LOGWARNING("FORCE RESTART"),
+              [ ?NODE_DOWN(N) || N <- ?allNodes],
+              [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
+              ok;
+            _->
+              ?LOGWARNING("There were active nodes ~p, when the node went down. They might have more actual data.\r\n"
+              ++"Try to restart them first. If those nodes are lost or this node has the latest data you can restart it with:\r\n"
+                ++" env FORCE_START=true <your application>\r\n"
+                ++"ATTENTION! All the latest data on other nodes will be lost.",[ReadyNodes]),
+              try_attach_to(?allNodes)
+          end
+      end;
+    Node->
+      ?LOGERROR("unable to attach to ~p, close application, fix the problem and try start again",[Node]),
+      timer:sleep(?infinity)
   end.
 
 get_schema_from( Node )->

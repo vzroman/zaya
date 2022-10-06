@@ -94,12 +94,18 @@ handle_event(state_timeout, open, init, #data{db = DB, module = Module} = Data) 
   try
     Ref = Module:open( Params ),
     ?LOGINFO("~p database open",[DB]),
-    {next_state, register, Data#data{ ref = Ref }, [ {state_timeout, 0, register } ] }
+    {next_state, rollback_transactions, Data#data{ ref = Ref }, [ {state_timeout, 0, rollback } ] }
   catch
     _:E->
       ?LOGERROR("~p open error ~p",[DB,E]),
       { keep_state_and_data, [ {state_timeout, 5000, open } ] }
   end;
+
+handle_event(state_timeout, rollback, rollback_transactions, #data{ ref = Ref, db = DB, module = Module } = Data) ->
+
+  zaya_transaction:rollback_log(Module, Ref, DB),
+
+  {next_state, register, Data, [ {state_timeout, 0, register } ] };
 
 handle_event(state_timeout, {add_copy, Params}, init, #data{db = DB, module = Module} = Data) ->
   try
@@ -126,10 +132,20 @@ handle_event(state_timeout, {register_copy,Params}, register_copy, #data{db = DB
 
 handle_event(state_timeout, register, register, #data{db = DB, ref = Ref} = Data) ->
 
-  {OKs, Errs} = ecall:call_all_wait( ?readyNodes, zaya_schema_srv, open_db, [ DB, node(), Ref ] ),
-  ?LOGINFO("~p registered at ~p nodes, errors at ~p nodes",[ DB, [N || {N,_} <- OKs], [N || {N,_} <- Errs] ]),
+  case elock:lock( ?locks, DB, _IsShared=false, 5000, ?dbAvailableNodes(DB)) of
+    {ok, Unlock}->
+      try
+        {OKs, Errs} = ecall:call_all_wait( ?readyNodes, zaya_schema_srv, open_db, [ DB, node(), Ref ] ),
+        ?LOGINFO("~p registered at ~p nodes, errors at ~p nodes",[ DB, [N || {N,_} <- OKs], [N || {N,_} <- Errs] ]),
 
-  {next_state, ready, Data};
+        {next_state, ready, Data}
+      after
+        Unlock()
+      end;
+    {error,LockError}->
+      ?LOGINFO("~p register lock error ~p, retry",[DB, LockError]),
+      { keep_state_and_data, [ {state_timeout, 0, register } ] }
+  end;
 
 handle_event(state_timeout, recover, recovery, #data{db = DB, module = Module}=Data ) ->
   case ?dbAvailableNodes(DB) of
@@ -151,6 +167,7 @@ handle_event(state_timeout, recover, recovery, #data{db = DB, module = Module}=D
       Params = ?dbNodeParams(DB,node()),
       try
         Module:remove( Params ),
+        zaya_transaction:drop_log( DB ),
         {next_state, init, Data, [ {state_timeout, 0, {add_copy, Params} } ] }
       catch
         _:E->

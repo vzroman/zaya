@@ -61,6 +61,10 @@
 
 ).
 
+-define(transactionLogPath,
+                                ?schemaDir ++ "/LOG"
+).
+
 -define(getSchema,
                        ?schemaFind( [{
                          {'$1','$2'},
@@ -83,7 +87,7 @@
     ets => #{},
     leveldb => #{
       dir => ?schemaPath,
-      leveld_params => #{
+      eleveldb => #{
         %compression_algorithm => todo,
         open_options=>#{
           create_if_missing => false,
