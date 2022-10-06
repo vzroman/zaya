@@ -376,25 +376,31 @@ try_attach_to([Node|Rest])->
       try_attach_to( Rest )
   end;
 try_attach_to([])->
-  case ?readyNodes -- [node()] of
-    []->
-      ?LOGINFO("multi node application full restart"),
-      [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
-      ok;
-    ReadyNodes->
-      case os:getenv("FORCE_START") of
-        "true"->
-          ?LOGWARNING("FORCE RESTART"),
-          [ ?NODE_DOWN(N) || N <- ?allNodes],
+  case os:getenv("ATTACH_TO") of
+    false->
+      case ?readyNodes -- [node()] of
+        []->
+          ?LOGINFO("multi node application full restart"),
           [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
           ok;
-        _->
-          ?LOGWARNING("There were active nodes ~p, when the node went down. They might have more actual data.\r\n"
-          ++"Try to restart them first. If those nodes are lost or this node has the latest data you can restart it with:\r\n"
-          ++" env FORCE_START=true <your application>\r\n"
-          ++"ATTENTION! All the latest data on other nodes will be lost.",[ReadyNodes]),
-          try_attach_to(?allNodes)
-      end
+        ReadyNodes->
+          case os:getenv("FORCE_START") of
+            "true"->
+              ?LOGWARNING("FORCE RESTART"),
+              [ ?NODE_DOWN(N) || N <- ?allNodes],
+              [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
+              ok;
+            _->
+              ?LOGWARNING("There were active nodes ~p, when the node went down. They might have more actual data.\r\n"
+              ++"Try to restart them first. If those nodes are lost or this node has the latest data you can restart it with:\r\n"
+                ++" env FORCE_START=true <your application>\r\n"
+                ++"ATTENTION! All the latest data on other nodes will be lost.",[ReadyNodes]),
+              try_attach_to(?allNodes)
+          end
+      end;
+    Node->
+      ?LOGERROR("unable to attach to ~p, close application, fix the problem and try start again",[Node]),
+      timer:sleep(?infinity)
   end.
 
 get_schema_from( Node )->
