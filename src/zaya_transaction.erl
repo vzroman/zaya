@@ -58,6 +58,7 @@
 
 -define(index,{?MODULE,index}).
 -define(t_id, atomics:add_get(persistent_term:get(?index), 1, 1)).
+-define(initIndex,persistent_term:get({?MODULE,init_index})).
 
 -define(LOCK_TIMEOUT, 60000).
 -define(ATTEMPTS,5).
@@ -80,7 +81,13 @@
   write/3,
   delete/3,
 
-  transaction/1,
+  transaction/1
+]).
+
+%%=================================================================
+%%  Database server API
+%%=================================================================
+-export([
   rollback_log/2,
   drop_log/1
 ]).
@@ -103,6 +110,12 @@ create_log( Path )->
 open_log( Path )->
   persistent_term:put(?log, ?logModule:open( ?logParams#{ dir=> Path } )),
   persistent_term:put(?index, atomics:new(1,[{signed, false}])),
+  try
+    {InitLogId,_} = ?logModule:first(?logRef),
+    atomics:put(?index,1,InitLogId)
+  catch
+    _:_->no_entries
+  end,
   ok.
 
 %%-----------------------------------------------------------
@@ -201,12 +214,6 @@ transaction(Fun)->
       % The transaction entry point
       run_transaction( Fun, ?ATTEMPTS )
   end.
-
-rollback_log(Ref, DB)->
-  todo.
-
-drop_log( DB )->
-  todo.
 
 run_transaction(Fun, Attempts) when Attempts>0->
   % Create the transaction storage
@@ -655,6 +662,39 @@ rollback_dbs( DBs )->
       true-> ignore
     end
   end, ?undefined, DBs).
+
+%%-----------------------------------------------------------
+%%  Database server
+%%-----------------------------------------------------------
+rollback_log(Ref, DB)->
+  todo.
+
+drop_log( DB )->
+  LogRef = ?logRef,
+  ?logModule:foldl(LogRef,#{},fun({LogID,DBs},_)->
+    {ok,Unlock} = elock:lock(?locks,{?MODULE,log,LogID},_IsShared=false,?infinity),
+    try
+      case maps:take(DB,DBs) of
+        {_Data, Rest} ->
+          if
+            map_size(Rest) > 0 ->
+              ?logModule:write(LogRef,[{LogID,Rest}]);
+            true->
+              ?logModule:delete(LogRef,[LogID])
+          end;
+        _->
+          ignore
+      end
+    catch
+      _:E->
+        ?LOGERROR("~p database drop transaction log ~p error ~p",[DB,LogID,E])
+    after
+      Unlock()
+    end
+                              end,?undefined).
+
+fold_log( DB )->
+  todo.
 
 
 
