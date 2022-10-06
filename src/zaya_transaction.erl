@@ -54,7 +54,7 @@
 -define(logRef,persistent_term:get(?log)).
 
 -define(transaction,{?MODULE,'$transaction$'}).
--record(transaction,{data,locks,parent}).
+-record(transaction,{data,locks}).
 
 -define(index,{?MODULE,index}).
 -define(t_id, atomics:add_get(persistent_term:get(?index), 1, 1)).
@@ -100,6 +100,11 @@
   commit_request/2
 ]).
 
+%%TODO. Remove me
+-export([
+  debug/0
+]).
+
 %%=================================================================
 %%	Environment
 %%=================================================================
@@ -108,38 +113,64 @@ create_log( Path )->
   open_log( Path ).
 
 open_log( Path )->
+
   persistent_term:put(?log, ?logModule:open( ?logParams#{ dir=> Path } )),
   persistent_term:put(?index, atomics:new(1,[{signed, false}])),
   try
-    {InitLogId,_} = ?logModule:first(?logRef),
-    atomics:put(?index,1,InitLogId)
+    {InitLogId,_} = ?logModule:last(?logRef),
+    atomics:put(persistent_term:get(?index),1,InitLogId),
+    persistent_term:put({?MODULE,init_index}, InitLogId)
   catch
-    _:_->no_entries
+    _:_->
+      % no entries
+      persistent_term:put({?MODULE,init_index}, 0)
   end,
   ok.
 
 %%-----------------------------------------------------------
 %%  READ
 %%-----------------------------------------------------------
-read(DB, Keys, Lock)->
+read(DB, Keys, Lock) when Lock=:=read; Lock=:=write->
   DBData = in_context(DB, Keys, Lock, fun(Data)->
     do_read(DB, Keys, Data)
   end),
-  data_keys(Keys, DBData).
+  data_keys(Keys, DBData);
+
+read(DB, Keys, Lock = none)->
+  %--------Dirty read (no lock)---------------------------
+  % If the key is already in the transaction data we return it's transaction value.
+  % Otherwise we don't add any new keys in the transaction data but read them in dirty mode
+  TData = in_context(DB, Keys, Lock, fun(Data)->
+    % We don't add anything in transaction data if the keys are not locked
+    Data
+  end),
+
+  Data =
+    case Keys -- maps:keys( TData ) of
+      []-> TData;
+      DirtyKeys->
+        % Add dirty keys
+        lists:foldl(fun({K,V},Acc)->
+          Acc#{K => {V,V}}
+        end, TData, zaya_db:read(DB,DirtyKeys))
+    end,
+  data_keys(Keys, Data).
 
 do_read(DB, Keys, Data)->
-  ToRead =
-    [K || K <- Keys, maps:is_key(K, Data)],
-  Values =
-    maps:from_list( zaya_db:read( DB, ToRead ) ),
-  lists:foldl(fun(K,Acc)->
-    case Values of
-      #{K:=V}->
-        Acc#{ K => {V,V} };
-      _->
-        Acc#{ K=> {?none,?none} }
-    end
-  end, Data, ToRead).
+  case [K || K <- Keys, not maps:is_key(K, Data)] of
+    [] ->
+      Data;
+    ToRead->
+      Values = maps:from_list( zaya_db:read( DB, ToRead ) ),
+      lists:foldl(fun(K,Acc)->
+        case Values of
+          #{K:=V}->
+            Acc#{ K => {V,V} };
+          _->
+            Acc#{ K=> {?none,?none} }
+        end
+      end, Data, ToRead)
+  end.
 
 data_keys([K|Rest], Data)->
   case Data of
@@ -248,7 +279,7 @@ in_context(DB, Keys, Lock, Fun)->
     #transaction{data = Data,locks = Locks}=T->
 
       % Obtain locks on all keys before the action starts
-      DBLocks = lock(DB, Keys, Lock, maps:get(DB,Locks) ),
+      DBLocks = lock(DB, Keys, Lock, maps:get(DB,Locks,#{}) ),
 
       % Perform the action
       DBData = Fun( maps:get(DB,Data,#{}) ),
@@ -324,11 +355,10 @@ commit( Data0 )->
 
   case prepare_data( Data0 ) of
     Data when map_size(Data) > 0->
-      Commit = prepare_commit( Data ),
       case prepare_commit( Data ) of
-        #commit{ns = [Node],ns_dbs = NsDBs} = Commit->
+        #commit{ns = [Node]}->
           % Single node commit
-          case rpc:call(Node,?MODULE, single_node_commit, [maps:get(Node,NsDBs)]) of
+          case rpc:call(Node,?MODULE, single_node_commit, [ Data ]) of
             {badrpc, Reason}->
               throw( Reason );
             _->
@@ -372,7 +402,7 @@ prepare_data( Data )->
 
         % Read the keys that are not read yet to be able to rollback them
         ToReadKeys =
-          [K || {K,{?none},_} <- maps:to_list( ToCommit )],
+          [K || {K,{{?none},_}} <- maps:to_list( ToCommit )],
         Values =
           maps:from_list( zaya_db:read(DB, ToReadKeys) ),
 
@@ -436,7 +466,7 @@ prepare_commit( Data )->
 
   % All participating nodes
   Ns =
-    ordsets:from_list( lists:append([ Ns || {_DB,Ns} <- DBs ])),
+    ordsets:from_list( lists:append([ Ns || {_DB,Ns} <- DBsNs ])),
 
   % Databases that each node has to commit
   NsDBs =
@@ -589,7 +619,9 @@ commit_request( Master, DBs )->
 commit1( DBs )->
   LogID = ?t_id,
   ok = ?logModule:write( ?logRef, [{LogID,DBs}] ),
-  try dump_dbs( DBs )
+  try
+    dump_dbs( DBs ),
+    LogID
   catch
     _:Error->
       commit_rollback( LogID, DBs ),
@@ -604,16 +636,16 @@ commit2( LogID )->
   end.
 
 on_commit(DBs)->
-  [ begin
-      if
-        length(Write) > 0-> catch zaya_db:on_update( DB, write, Write );
-        true->ignore
-      end,
-      if
-        length(Delete) > 0-> catch zaya_db:on_update( DB, delete, Delete );
-        true->ignore
-      end
-    end || {DB,{{Write,Delete},_Rollback}} <- DBs].
+  maps:fold(fun(DB,{{Write,Delete},_Rollback},_)->
+    if
+      length(Write) > 0-> catch zaya_db:on_update( DB, write, Write );
+      true->ignore
+    end,
+    if
+      length(Delete) > 0-> catch zaya_db:on_update( DB, delete, Delete );
+      true->ignore
+    end
+  end,?undefined,DBs).
 
 dump_dbs( DBs )->
   maps:fold(fun(DB,{{Write,Delete},_Rollback},_)->
@@ -694,7 +726,7 @@ drop_log( DB )->
 
 fold_log( DB, Fun )->
   LogRef = ?logRef,
-  ?logModule:foldl(LogRef,#{},fun({LogID,DBs},_)->
+  ?logModule:foldl(LogRef,#{stop => ?initIndex},fun({LogID,DBs},_)->
     {ok,Unlock} = elock:lock(?locks,{?MODULE,log,LogID},_IsShared=false,?infinity),
     try
       case maps:take(DB,DBs) of
@@ -717,6 +749,15 @@ fold_log( DB, Fun )->
     end
   end,?undefined).
 
+debug()->
+  zaya_transaction:transaction(fun()->
 
+    zaya_transaction:write(test,[{x1,y1}],none),
+
+    zaya_transaction:read(test,[x1],read),
+
+    zaya_transaction:write(test,[{x1,y11},{x2,y2}],write)
+
+  end).
 
 
