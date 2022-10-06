@@ -175,7 +175,7 @@ handle_call({open_db, DB, Node, Ref}, From, State) ->
   try
     ?OPEN_DB(DB,Node,Ref),
     gen_server:reply(From,ok),
-    ?LOGINFO("~p db opened, ref ~p",[DB, Ref])
+    ?LOGINFO("~p db opened at ~p",[DB, Node])
   catch
     _:E:S->
       gen_server:reply(From, {error,E}),
