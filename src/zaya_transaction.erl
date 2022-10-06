@@ -367,7 +367,7 @@ commit( Data0 )->
               ok
           end;
         Commit->
-          multi_node_commit( Commit )
+          multi_node_commit(Data, Commit)
       end;
     _->
       % Nothing to commit
@@ -498,7 +498,7 @@ single_node_commit( DBs )->
 %%-----------------------------------------------------------
 %%  MULTI NODE COMMIT
 %%-----------------------------------------------------------
-multi_node_commit(#commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs} = Commit1)->
+multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs} = Commit1)->
 
   Self = self(),
 
@@ -508,10 +508,10 @@ multi_node_commit(#commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs} = Commit1)
 
 %-----------phase 1------------------------------------------
     Workers =
-      [ {N, spawn_opt(N, ?MODULE, commit_request, [MasterSelf, maps:get(N,NsDBs)],[ monitor ])} || N <- Nodes],
+      [ {N, spawn(N, ?MODULE, commit_request, [MasterSelf, maps:with(maps:get(N,NsDBs), Data)])} || N <- Nodes],
 
     Workers1 =
-      maps:from_list([{W,N} || {N,{W,_}} <- Workers]),
+      maps:from_list([begin erlang:monitor(process, W), {W,N} end|| {N,{W,_}} <- Workers]),
 
     try
       {Workers2,Commit2} = wait_phase(commit1, maps:keys(DBsNs), Workers1, Commit1 ),
