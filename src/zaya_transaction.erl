@@ -216,8 +216,7 @@ do_delete([K|Rest], Data)->
       do_delete( Rest, Data#{ K=> {V0,?none} });
     _->
       do_delete( Rest, Data#{ K => {{?none}, ?none}})
-  end,
-  do_delete(Rest, Data#{K=>delete});
+  end;
 do_delete([], Data)->
   Data.
 
