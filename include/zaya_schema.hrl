@@ -377,6 +377,14 @@
   ?nodeDBs(node())
 ).
 
+-define(dbMasters(DB),
+  case ?schemaRead({db,DB,'@masters@'}) of
+    ?undefined -> [];
+    _@Ns -> _@Ns
+  end
+).
+-define(dbMasters(DB,Ns), ?SCHEMA_WRITE({db,DB,'@masters@'},Ns)).
+
 %=======================================================================================
 %             SCHEMA TRANSFORMATION
 %=======================================================================================

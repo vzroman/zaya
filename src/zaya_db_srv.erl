@@ -40,15 +40,21 @@ open( DB )->
   end.
 
 recover( DB )->
-  case supervisor:start_child(zaya_db_sup,[DB, recover]) of
-    {ok, PID} when is_pid( PID )->
-      ok;
-    Error->
-      Error
+  case whereis( DB ) of
+    PID when is_pid( PID )->
+      gen_statem:cast(DB, recover);
+    _->
+      case supervisor:start_child(zaya_db_sup,[DB, recover]) of
+        {ok, PID} when is_pid( PID )->
+          ok;
+        Error->
+          Error
+      end
   end.
 
 force_load( DB )->
   gen_statem:cast(DB, force_load).
+
 
 add_copy( DB, InParams )->
   Params = zaya_db:params(DB,InParams),
@@ -189,9 +195,9 @@ handle_event(cast, force_load, recover, #data{db = DB} = Data ) ->
 %%   DB IS READY
 %%---------------------------------------------------------------------------
 handle_event(cast, recover, ready, #data{db = DB}=Data) ->
-  case ?dbAvailableNodes(DB) -- [node()] of
+  case ?dbAvailableNodes(DB) of
     []->
-      ?LOGERROR("~p recovery is impossible: the only copy"),
+      ?LOGERROR("~p recovery is impossible: no other copies are available"),
       keep_state_and_data;
     _->
       ?LOGWARNING("~p recovery",[DB]),

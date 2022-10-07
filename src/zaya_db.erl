@@ -351,6 +351,7 @@ open( DB )->
   ecall:call_all_wait( ?dbReadyNodes(DB), zaya_db_srv, open, [DB] ).
 
 open( DB, Node )->
+  % TODO. Open or recover?
   rpc:call( Node, zaya_db_srv, open, [DB]).
 
 force_open( DB, Node )->
