@@ -15,7 +15,8 @@
 -export([
   node_up/2,
   node_down/2,
-  remove_node/1
+  remove_node/1,
+  split_brain/1
 ]).
 
 %%=================================================================
@@ -55,6 +56,9 @@ node_down( Node, Info )->
 
 remove_node( Node )->
   gen_server:call(?MODULE, {remove_node, Node}).
+
+split_brain( Node )->
+  gen_server:cast(?MODULE, {split_brain, Node}).
 
 %%=================================================================
 %%	DBs
@@ -243,6 +247,18 @@ handle_call({remove_db_copy, DB, Node}, From, State) ->
 handle_call(Request, From, State) ->
   ?LOGWARNING("schema server got an unexpected call resquest ~p from ~p",[Request,From]),
   {noreply,State}.
+
+handle_cast({split_brain, Node},State)->
+  ?LOGWARNING("~p node split brain",[Node]),
+
+  if
+    node() < Node->
+      i_m_the_master;
+    true ->
+      merge_brain( Node )
+  end,
+
+  {noreply,State};
 
 handle_cast(Request,State)->
   ?LOGWARNING("schema server got an unexpected cast resquest ~p",[Request]),
@@ -444,6 +460,7 @@ merge_schema([DB|Rest],OldSchema)->
   case {?dbNodeParams(DB,node()), maps:get(DB, OldSchema, ?undefined) } of
     {?undefined, #{module := Module, params:=Params } } when Params=/=?undefined->
       ?LOGINFO("~p local copy was removed, try remove",[DB]),
+      zaya_transaction:drop_log( DB ),
       try Module:remove( Params )
       catch
         _:E->?LOGERROR("~p remove local copy error ~p",[DB,E])
@@ -470,11 +487,54 @@ merge_schema([DB|Rest],OldSchema)->
 merge_schema([], _OldSchema)->
   ok.
 
+merge_brain( Node )->
+  case get_schema_from( Node ) of
+    {?schema,Schema}->
+
+      split_merge_add(Schema),
+      split_merge_remove( ?getSchema, maps:from_list(Schema) );
+
+    {error,Error}->
+      ?LOGERROR("~p node schema request error ~p",[Node,Error])
+  end.
+
+split_merge_add([{K,V0}=Entry|Rest])->
+  case ?SCHEMA_VALUE(K) of
+    V0->
+      ?LOGDEBUG("~p the same",[ Entry ]);
+    V1->
+      split( Entry, {K,V1} )
+  end,
+  split_merge_add(Rest);
+split_merge_add([])->
+  ok.
+
+split({{db,DB,'@module@'},Module1},{{db,DB,'@module@'},Module2})->
+  todo;
+split({{db,DB,'@nodes@'}, Nodes1},{{db,DB,'@nodes@'}, Nodes2})->
+  todo;
+split({{db,DB,'@ref@',N},Ref1},{{db,DB,'@ref@',N},Ref2})->
+  todo;
+split({{db,DB,'@node@',N,'@params@'},Params1},{{db,DB,'@node@',N,'@params@'},Params2})->
+  todo;
+split({{node,N},State1},{{node,N},State2})->
+  todo.
 
 
-
-
-
+split_merge_remove([{K,V}|Rest], Schema )->
+  case maps:is_key(K, Schema) of
+    true->
+      ignore;
+    _->
+      try ?SCHEMA_DELETE( K )
+      catch
+        _:E:S->
+          ?LOGERROR("~p split merge error ~p, stack ~p",[{K,V},E,S])
+      end
+  end,
+  split_merge_remove( Rest, Schema );
+split_merge_remove([], _Schema)->
+  ok.
 
 
 
