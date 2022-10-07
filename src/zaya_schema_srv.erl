@@ -249,14 +249,15 @@ handle_call(Request, From, State) ->
   {noreply,State}.
 
 handle_cast({split_brain, Node},State)->
-  ?LOGWARNING("~p node split brain",[Node]),
 
-  if
-    node() < Node->
-      i_m_the_master;
-    true ->
-      merge_brain( Node )
+  ?LOGWARNING("~p node split brain",[Node]),
+  try ?NODE_UP( Node )
+  catch
+    _:E:S->
+      ?LOGERROR("~p node up schema error ~p stack ~p",[Node,E,S])
   end,
+
+  merge_brain( Node ),
 
   {noreply,State};
 
@@ -487,6 +488,43 @@ merge_schema([DB|Rest],OldSchema)->
 merge_schema([], _OldSchema)->
   ok.
 
+%%===========================================================================
+%%  Network recovery (split brain)
+%%===========================================================================
+% When the network recovered each recovered node <--> node  connection will
+% trigger the split brain procedure.
+% There is no need to merge node's states because them updated automatically when
+% the connection recovered. Here we need just to remove 'stale' nodes.
+%
+% The task is to merge databases. On a node <--> node connection recovery
+% the nodes exchange their schemas and do their databases merge.
+%-----------Database merge-----------------------------
+% Cases:
+% * Database is not known (it was added on the other node) or has no local copy.
+%   Add it's: '@module@', '@nodes@', '@masters@', '@ref@'s, '@params@'s
+% * Database was removed.
+% * Database has local copy. Recovery.
+%---------Database recovery----------------------------
+% Who is the master. :
+% * '@masters@' is not defined nor locally either remotely. The master is the node with a smaller name.
+% * '@masters@' is defined
+% The master is the node with smaller index in the:
+%   '@masters@' -- ('@nodes@' -- [Node]) ++ (('@nodes@' ++ [Node]) -- '@masters@')
+%
+% Cases are:
+% * if node() < Node
+%  * database was added or updated to the Node (update: '@module@', '@params@', '@ref@', '@nodes@','@masters@')
+%  * databases was removed from the Node (update: '@params@', '@ref@', '@nodes@','@masters@', remove if no other copies)
+% From this point node() is not in the database's '@nodes@'.
+% If the database has no local copy then all reads and writes are switched to new '@nodes@'.
+% If the database has local copy then it enters the 'recovery' state:
+% * all database writes are switched to '@nodes@'
+% * dirty reads go to the local copy as {'@ref@', node()} is alive
+% * transactional reads go to the '@nodes@'
+%  * database has no local copy - ignore
+%  * node() is not in the '@nodes@' (local copy is not ready) - ignore
+%  * node() is in the '@nodes@' (local copy copy is ready):
+%   - set '@nodes@' [Node]. It will stop all the writes to the local copy
 merge_brain( Node )->
   case get_schema_from( Node ) of
     {?schema,Schema}->
