@@ -697,7 +697,7 @@ rollback_dbs( DBs )->
 %%  Database server
 %%-----------------------------------------------------------
 rollback_log(Module, Ref, DB)->
-  fold_log(DB, fun({Commit,{Write,Delete}})->
+  fold_log(DB, ?initIndex, fun({Commit,{Write,Delete}})->
     if
       length(Write) >0->
         try ok = Module:write(Ref,Write)
@@ -719,12 +719,12 @@ rollback_log(Module, Ref, DB)->
   end).
 
 drop_log( DB )->
-  fold_log(DB, fun(_)-> ignore end).
+  fold_log(DB, ?t_id, fun(_)-> ignore end).
 
 
-fold_log( DB, Fun )->
+fold_log( DB, Stop, Fun )->
   LogRef = ?logRef,
-  ?logModule:foldl(LogRef,#{stop => ?initIndex},fun({LogID,DBs},_)->
+  ?logModule:foldl(LogRef,#{stop => Stop},fun({LogID,DBs},_)->
     {ok,Unlock} = elock:lock(?locks,{?MODULE,log,LogID},_IsShared=false,?infinity),
     try
       case maps:take(DB,DBs) of
