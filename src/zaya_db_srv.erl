@@ -14,7 +14,8 @@
   add_copy/2,
   recover/1,
   force_load/1,
-  close/1
+  close/1,
+  split_brain/1
 ]).
 %%=================================================================
 %%	OTP API
@@ -72,6 +73,10 @@ close( DB )->
     _->
       {error, not_registered}
   end.
+
+split_brain(DB)->
+  spawn(fun()->merge_brain( DB ) end),
+  ok.
 
 %%=================================================================
 %%	OTP
@@ -159,7 +164,7 @@ handle_event(state_timeout, run, {register_copy,Params}, #data{db = DB} = Data) 
 %%---------------------------------------------------------------------------
 %%   RECOVER
 %%---------------------------------------------------------------------------
-handle_event(state_timeout, run, recover, #data{db = DB, module = Module}=Data ) ->
+handle_event(state_timeout, run, recover, #data{db = DB}=Data ) ->
   case ?dbAvailableNodes(DB) of
     []->
       case os:getenv("FORCE_START") of
@@ -175,17 +180,7 @@ handle_event(state_timeout, run, recover, #data{db = DB, module = Module}=Data )
           { keep_state_and_data, [ {state_timeout, 5000, run } ] }
       end;
     _->
-      % TODO. Hash tree
-      Params = ?dbNodeParams(DB,node()),
-      try
-        Module:remove( Params ),
-        zaya_transaction:drop_log( DB ),
-        {next_state, {add_copy, Params}, Data, [ {state_timeout, 0, run } ] }
-      catch
-        _:E->
-          ?LOGERROR("~p remove copy error ~p",[DB,E]),
-          { keep_state_and_data, [ {state_timeout, 5000, run } ] }
-      end
+      {next_state, recovery, Data, [ {state_timeout, 0, run } ] }
   end;
 handle_event(cast, force_load, recover, #data{db = DB} = Data ) ->
   ?LOGWARNING("~p FORCE LOAD. ALL THE DATA CHANGES MADE IN OTHER NODES COPIES WILL BE LOST!",[DB]),
@@ -194,43 +189,66 @@ handle_event(cast, force_load, recover, #data{db = DB} = Data ) ->
 %%---------------------------------------------------------------------------
 %%   DB IS READY
 %%---------------------------------------------------------------------------
-handle_event(cast, recover, ready, #data{db = DB}=Data) ->
-  case ?dbAvailableNodes(DB) of
-    []->
-      ?LOGERROR("~p recovery is impossible: no other copies are available"),
-      keep_state_and_data;
-    _->
-      ?LOGWARNING("~p recovery",[DB]),
-      {next_state, close, Data, [ {state_timeout, 0, recover } ]}
-  end;
+handle_event(cast, recover, ready, Data) ->
+  {next_state, unregister, Data, [ {state_timeout, 0, recovery } ]};
 
 handle_event(cast, close, ready, #data{db = DB}=Data) ->
 
   ?LOGINFO("~p close",[DB]),
+  {next_state, unregister, Data, [ {state_timeout, 0, close } ]};
 
-  {next_state, close, Data, [ {state_timeout, 0, shutdown } ]};
+%%---------------------------------------------------------------------------
+%%   RECOVERY
+%%---------------------------------------------------------------------------
+handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref = Ref}=Data ) ->
+
+  case ?dbAvailableNodes(DB) of
+    []->
+      ?LOGERROR("~p recovery is impossible: no other copies are available"),
+      { keep_state_and_data, [ {state_timeout, 5000, run } ] };
+    _->
+      ?LOGWARNING("~p recovery",[DB]),
+      % TODO. Hash tree
+      Params = ?dbNodeParams(DB,node()),
+      try
+        ok = zaya_schema_srv:close_db(DB,node()),
+        Module:close( Ref ),
+        Module:remove( Params ),
+        zaya_transaction:drop_log( DB ),
+        {next_state, {add_copy, Params}, Data, [ {state_timeout, 0, run } ] }
+      catch
+        _:E:S->
+          ?LOGERROR("~p recovery error ~p, stack ~p",[DB,E,S]),
+          { keep_state_and_data, [ {state_timeout, 5000, run } ] }
+      end
+  end;
+handle_event(cast, force_load, recovery, #data{db = DB} = Data ) ->
+  ?LOGWARNING("~p FORCE LOAD. ALL THE DATA CHANGES MADE IN OTHER NODES COPIES WILL BE LOST!",[DB]),
+  {next_state, register, Data, [ {state_timeout, 0, run } ] };
 
 %%---------------------------------------------------------------------------
 %%   CLOSE
 %%---------------------------------------------------------------------------
-handle_event(state_timeout, NextState, close, #data{db = DB, module = Module, ref = Ref} = Data) ->
+handle_event(state_timeout, NextState, unregister, #data{db = DB} = Data) ->
 
   case elock:lock( ?locks, DB, _IsShared=false, 30000, ?dbAvailableNodes(DB)) of
     {ok, Unlock}->
       try
         ecall:call_all_wait(?readyNodes, zaya_schema_srv, close_db, [DB, node()]),
-        Module:close(Ref),
-
         {next_state, NextState, Data, [ {state_timeout, 0, run } ]}
       after
         Unlock()
       end;
     {error,LockError}->
-      ?LOGINFO("~p close lock error ~p, retry",[DB, LockError]),
-      { keep_state_and_data, [ {state_timeout, 0, NextState } ] }
+      ?LOGINFO("~p unregister lock error ~p, retry",[DB, LockError]),
+      { keep_state_and_data, [ {state_timeout, 5000, NextState } ] }
   end;
 
-handle_event(state_timeout, run, shutdown, _Data) ->
+handle_event(state_timeout, run, close, #data{db = DB, module = Module, ref = Ref}) ->
+  try  Module:close(Ref)
+  catch
+    _:E->?LOGERROR("~p close error ~p",[DB,E])
+  end,
   {stop, shutdown};
 
 handle_event(EventType, EventContent, _AnyState, #data{db = DB}) ->
@@ -258,13 +276,69 @@ code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
 
+%%------------------------------------------------------------------------------------
+%%  SPLIT BRAIN:
+%%
+%%------------------------------------------------------------------------------------
+merge_brain( DB )->
 
+  update_masters( DB ),
 
+  case update_nodes( DB ) of
+    ok->
+      % No need to recover local copy
+      ok;
+    recover->
+      case whereis( DB ) of
+        PID when is_pid( PID )->
+          gen_statem:cast(DB, recover);
+        _->
+          db_is_not_opened
+      end
+  end.
 
+update_masters( DB )->
+  case update_masters( ?dbMasters(DB), DB ) of
+    error->
+      update_masters( ?allNodes, DB )
+  end.
 
+update_masters([N|_Rest], _DB ) when N=:=node()->
+  ok;
+update_masters([N|Rest], DB )->
+  case rpc:call( N, zaya_db, masters, [DB] ) of
+    Masters when is_list(Masters)->
+      zaya_schema_srv:set_db_masters( DB, Masters ),
+      ok;
+    _->
+      update_masters( Rest, DB )
+  end;
+update_masters( [], _DB )->
+  error.
 
+update_nodes( DB )->
+  case update_nodes( ?dbMasters(DB), DB ) of
+    error ->
+      update_nodes( ?dbAllNodes(DB), DB );
+    OkOrRecover->
+      OkOrRecover
+  end.
 
-
-
-
+update_nodes( [N|_Rest], _DB ) when N=:=node()->
+  ok;
+update_nodes( [N|Rest], DB )->
+  case rpc:call( N, zaya_db, available_nodes, [DB] ) of
+    Nodes  when is_list(Nodes)->
+      case {ordsets:from_list( Nodes ), ordsets:from_list(?dbAvailableNodes(DB))} of
+        {Same,Same}->
+          ok;
+        _->
+          zaya_schema_srv:set_db_nodes( DB, Nodes ),
+          recover
+      end;
+    _->
+      update_nodes( Rest, DB )
+  end;
+update_nodes([], _DB )->
+  error.
 

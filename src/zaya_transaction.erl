@@ -174,7 +174,7 @@ do_read(DB, Keys, Data)->
   end.
 
 read_keys( DB, Keys )->
-  case ?dbRef( DB ) of
+  case ?dbRef( DB, node() ) of
     ?undefined ->
       zaya_db:read( DB, Keys );
     _->

@@ -31,7 +31,7 @@
 
 handshake(Node, PID)->
   case whereis(?MODULE) of
-    LocalPID->
+    LocalPID when is_pid(LocalPID)->
       gen_server:cast(?MODULE, {handshake, Node, PID}),
       LocalPID;
     _->

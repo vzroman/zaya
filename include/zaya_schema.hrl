@@ -423,8 +423,8 @@
   begin
     ?SCHEMA_DELETE({db,DB,'@node@',N,'@params@'}),
     case ?dbMasters(DB) of
-      _@Ns when length(_@Ns) >0 ->
-        ?SCHEMA_WRITE({db,DB,'@masters@'},_@Ns -- [N]);
+      _@Ms when length(_@Ms) >0 ->
+        ?SCHEMA_WRITE({db,DB,'@masters@'},_@Ms -- [N]);
       _->
         ignore
     end,
@@ -440,6 +440,10 @@
     end,
     ?SCHEMA_NOTIFY({db_masters,DB,Ns})
   end
+).
+
+-define(SET_DB_NODES(DB,Ns),
+  ?SCHEMA_WRITE({db,DB,'@nodes@'}, Ns )
 ).
 
 -define(REMOVE_DB(DB),

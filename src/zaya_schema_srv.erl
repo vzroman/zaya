@@ -31,7 +31,8 @@
   add_db_copy/3,
   remove_db_copy/2,
 
-  set_db_masters/2
+  set_db_masters/2,
+  set_db_nodes/2
 ]).
 
 %%=================================================================
@@ -85,6 +86,9 @@ remove_db_copy( DB, Node )->
 
 set_db_masters( DB, Masters )->
   gen_server:call(?MODULE, {set_db_masters, DB, Masters}, ?infinity).
+
+set_db_nodes( DB, Nodes )->
+  gen_server:call(?MODULE, {set_db_nodes, DB, Nodes}, ?infinity).
 
 %%=================================================================
 %%	OTP
@@ -257,6 +261,20 @@ handle_call({set_db_masters, DB, Masters}, From, State) ->
     _:E:S->
       gen_server:reply(From, {error,E}),
       ?LOGERROR("~p set master nodes ~p schema error ~p stack ~p",[DB,Masters,E,S])
+  end,
+
+  {noreply,State};
+
+handle_call({set_db_nodes, DB, Nodes}, From, State) ->
+
+  try
+    ?SET_DB_NODES( DB, Nodes ),
+    gen_server:reply(From,ok),
+    ?LOGINFO("~p set available nodes ~p",[DB, Nodes])
+  catch
+    _:E:S->
+      gen_server:reply(From, {error,E}),
+      ?LOGERROR("~p set available nodes ~p schema error ~p stack ~p",[DB,Nodes,E,S])
   end,
 
   {noreply,State};
@@ -510,169 +528,50 @@ merge_schema([], _OldSchema)->
 %%===========================================================================
 % When the network is recovered each recovered node <--> node  connection will
 % trigger the split brain procedure.
-% There is no need to merge node's states because them updated automatically when
-% the connection recovered. Here we need just to remove 'stale' nodes.
-%
-% The task is to merge databases. On a node <--> node connection recovery
-% the nodes exchange their schemas and do their databases merge.
-%-----------Database merge-----------------------------
-% Cases:
-% * Database is not known (it was added on the other node) or has no local copy.
-%   Add it's: '@module@', '@nodes@', '@masters@', '@ref@'s, '@params@'s
-% * Database was removed.
-% * Database has local copy. Recovery.
-%---------Database recovery----------------------------
-% Who is the master. :
-% * '@masters@' is not defined nor locally either remotely. The master is the node with a smaller name.
-% * '@masters@' is defined
-% The master is the node with smaller index in the:
-%   '@masters@' -- ('@nodes@' -- [Node]) ++ (('@nodes@' ++ [Node]) -- '@masters@')
-%
-% Cases are:
-% * if node() < Node
-%  * database was added or updated to the Node (update: '@module@', '@params@', '@ref@', '@nodes@','@masters@')
-%  * databases was removed from the Node (update: '@params@', '@ref@', '@nodes@','@masters@', remove if no other copies)
-% From this point node() is not in the database's '@nodes@'.
-% If the database has no local copy then all reads and writes are switched to new '@nodes@'.
-% If the database has local copy then it enters the 'recovery' state:
-% * all database writes are switched to '@nodes@'
-% * dirty reads go to the local copy as {'@ref@', node()} is alive
-% * transactional reads go to the '@nodes@'
-%  * database has no local copy - ignore
-%  * node() is not in the '@nodes@' (local copy is not ready) - ignore
-%  * node() is in the '@nodes@' (local copy copy is ready):
-%   - set '@nodes@' [Node]. It will stop all the writes to the local copy
+% There is no need to merge node's states because they are updated automatically when
+% the connection recovered. The task is to merge databases.
 merge_brain( Node )->
-  case get_schema_from( Node ) of
-    {?schema,Schema}->
-      NodeKnownDBs =
-        lists:foldl(fun({Key, Value}, Acc)->
-          case Key of
-            {db,DB,'@module@'} ->
-              DBSchema = maps:get(DB,Acc,#{}),
-              Acc#{ DB => DBSchema#{ '@module@' => Value } };
-            {db,DB,'@nodes@'}->
-              DBSchema = maps:get(DB,Acc,#{}),
-              Acc#{ DB => DBSchema#{ '@nodes@' => Value } };
-            {db,DB,'@masters@'}->
-              DBSchema = maps:get(DB,Acc,#{}),
-              Acc#{ DB => DBSchema#{ '@masters@' => Value } };
-            {db,DB,'@ref@',N} when N=:=Node->
-              DBSchema = maps:get(DB,Acc,#{}),
-              Acc#{ DB => DBSchema#{ '@ref@' => Value } };
-            {db,DB,'@node@',N,'@params@'} when N=:=Node->
-              DBSchema = maps:get(DB,Acc,#{}),
-              Acc#{ DB => DBSchema#{ '@params@' => Value } };
-            _->
-              Acc
-          end
-        end,#{},Schema),
+  case rpc:call( Node, zaya_node, node_dbs_params, [Node] ) of
+    {badrpc,Error}->
+      ?LOGERROR("~p node merge brain error ~p",[Node,Error]);
+    NodeDBs->
+      Remote = maps:from_list( NodeDBs ),
+      Local = maps:from_list( ?nodeDBsParams( Node ) ),
 
-      NodeDBs =
-        maps:filter(fun(_DB,DBSchema)->
-          maps:is_key('@params@', DBSchema )
-        end, NodeKnownDBs),
+      % Remove stale
+      maps:map(fun(DB,_Ps)->
+        case maps:is_key(DB, Remote ) of
+          true -> ignore;
+          _->
+            try ?REMOVE_DB_COPY( DB,Node )
+            catch
+              E->?LOGERROR("~p remove copy ~p error ~p",[DB,Node,E])
+            end
+        end
+      end, Local ),
 
-      merge_databases(maps:to_list(NodeDBs), Node ),
+      % Add/Update
+      maps:map(fun(DB,Ps)->
+        case Local of
+          #{ DB := Ps }->
+            ignore;
+          #{DB:=_}->
+            try ?SCHEMA_WRITE({db,DB,'@node@',Node,'@params@'},Ps)
+            catch
+              _:E->?LOGERROR("~p update ~p copy params error ~p",[DB,Node,E])
+            end;
+          _->
+            try ?ADD_DB_COPY( DB,Node, Ps )
+            catch
+              E->?LOGERROR("~p add copy ~p error ~p",[DB,Node,E])
+            end
+        end
+      end, Remote ),
 
-      % TODO. Remove stale nodes
-      ok;
-    {error,Error}->
-      ?LOGERROR("~p node schema request error ~p",[Node,Error])
+      [ zaya_db_srv:split_brain( DB ) || DB <- ?nodeDBs(node()) -- ?nodeDBs(Node)]
+
   end.
 
-merge_databases([{DB,Config}|Rest], Node )->
-  case ?dbNodeParams(DB,node()) of
-    ?undefined->
-      % Database has no local copy
-      update_db_config(DB, Node, Config);
-    _->
-      case lists:member(node(),?dbAvailableNodes(DB)) of
-        true ->
-          % The database is in the conflict state
-          merge_db_config(DB,Node,Config);
-        _->
-          % The local copy is not ready yet
-          update_db_config(DB, Node, Config)
-      end
-  end,
-  merge_databases(Rest, Node);
-merge_databases([],_Node)->
-  ok.
-
-update_db_config(DB, Node, Config)->
-  maps:map(fun(Key, Value)->
-    try
-      case Key of
-        '@module@' -> ?SCHEMA_WRITE({db,DB,'@module@'}, Value );
-        '@nodes@' -> ?SCHEMA_WRITE({db,DB,'@nodes@'}, Value );
-        '@masters@' -> ?SCHEMA_WRITE({db,DB,'@masters@'}, Value );
-        '@ref@'-> ?SCHEMA_WRITE({db,DB,'@ref@',Node}, Value );
-        '@params@' -> ?SCHEMA_WRITE({db,DB,'@node@',Node,'@params@'}, Value );
-        _->ignore
-      end
-    catch
-      _:E->
-        ?LOGERROR("~p database merge config ~p with node ~p error ~p",[DB,Key,Node,E])
-    end
-  end, Config).
-
-merge_db_config(DB,Node,Config)->
-
-  % Node private configs
-  update_db_config(DB,Node, maps:with(['@ref@','@params@'], Config)),
-
-  % If DB '@masters@' are also in the conflict state the node with a smaller name has priority
-  if
-    Node < node()->
-      update_db_config(DB,Node, maps:with(['@masters@'], maps:merge(#{'@masters@'=>[]},Config)) );
-    _->
-      accept_local
-  end,
-
-  case ?dbMasters(DB) of
-    []->
-      % By default the node with a smaller name is the master
-      if
-        Node < node()->
-          recover_db(DB, maps:get('@nodes',Config,[]));
-        true ->
-          ?LOGINFO("~p database conflict with ~p node, accept local copy",[DB,Node])
-      end;
-    Masters->
-      case {lists:member(node(),Masters),lists:member(Node,Masters)} of
-        {true,false}->
-          ?LOGINFO("~p database conflict with ~p node, accept local copy",[DB,Node]);
-        {false,true}->
-          recover_db(DB, Node);
-        {true,true}->
-          if
-            Node < node()->
-              recover_db(DB, Node);
-            true ->
-              ?LOGINFO("~p database conflict with ~p node, accept local copy",[DB,Node])
-          end;
-        {false,false}->
-          todo
-      end
-  end.
-
-
-recover_db( DB, Nodes )->
-  case lists:member(node(),?dbAvailableNodes(DB)) of
-    true->
-      try
-        ?SCHEMA_WRITE({db,DB,'@nodes@'}, Nodes ),
-        zaya_db_srv:recover(DB)
-      catch
-        _:E->
-          ?LOGERROR("~p database recovery error, unable to update schema with available copies ~p, error ~p",[DB,Nodes,E])
-      end;
-    _->
-      % The database is either closed and will be recovered during on open
-      % or is under recovery already
-      ok
-  end.
 
 
 
