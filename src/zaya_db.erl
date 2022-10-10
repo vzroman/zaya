@@ -72,6 +72,8 @@
   add_copy/3,
   remove_copy/2, do_remove_copy/1,
 
+  masters/1, masters/2,
+
   params/2,
   on_update/3
 ]).
@@ -478,6 +480,34 @@ do_remove_copy( DB )->
     fun(_) -> ecall:call_all(?readyNodes, zaya_schema_srv, remove_db_copy, [DB, node()] ) end,
     fun(_)-> Module:remove( Params ) end
   ],?undefined).
+
+masters( DB )->
+  ?dbMasters( DB ).
+
+masters( DB, Masters )->
+  case ?dbModule(DB) of
+    ?undefined->
+      throw(db_not_exists);
+    _->
+      ok
+  end,
+
+  if
+    Masters =:= ?undefined->
+      ok;
+    is_list( Masters ) ->
+      case Masters -- ?dbAllNodes( DB ) of
+        []->
+          ok;
+        InvalidCopies->
+          throw({invalid_copies, InvalidCopies})
+      end;
+    true->
+      throw({badarg,Masters})
+  end,
+
+  ecall:call_all_wait(?readyNodes, zaya_schema_srv, db_masters, [DB,Masters] ).
+
 
 params(DB,Params)->
   maps:merge(#{

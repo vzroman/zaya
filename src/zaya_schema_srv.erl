@@ -29,7 +29,9 @@
   remove_db/1,
 
   add_db_copy/3,
-  remove_db_copy/2
+  remove_db_copy/2,
+
+  set_db_masters/2
 ]).
 
 %%=================================================================
@@ -81,7 +83,8 @@ add_db_copy(DB,Node,Params)->
 remove_db_copy( DB, Node )->
   gen_server:call(?MODULE, {remove_db_copy, DB, Node}, ?infinity).
 
-
+set_db_masters( DB, Masters )->
+  gen_server:call(?MODULE, {set_db_masters, DB, Masters}, ?infinity).
 
 %%=================================================================
 %%	OTP
@@ -240,6 +243,20 @@ handle_call({remove_db_copy, DB, Node}, From, State) ->
     _:E:S->
       gen_server:reply(From, {error,E}),
       ?LOGERROR("~p remove copy from ~p schema error ~p stack ~p",[DB,Node,E,S])
+  end,
+
+  {noreply,State};
+
+handle_call({set_db_masters, DB, Masters}, From, State) ->
+
+  try
+    ?SET_DB_MASTERS( DB, Masters ),
+    gen_server:reply(From,ok),
+    ?LOGINFO("~p set master nodes ~p",[DB, Masters])
+  catch
+    _:E:S->
+      gen_server:reply(From, {error,E}),
+      ?LOGERROR("~p set master nodes ~p schema error ~p stack ~p",[DB,Masters,E,S])
   end,
 
   {noreply,State};

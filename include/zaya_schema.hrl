@@ -422,7 +422,23 @@
 -define(REMOVE_DB_COPY(DB,N),
   begin
     ?SCHEMA_DELETE({db,DB,'@node@',N,'@params@'}),
+    case ?dbMasters(DB) of
+      _@Ns when length(_@Ns) >0 ->
+        ?SCHEMA_WRITE({db,DB,'@masters@'},_@Ns -- [N]);
+      _->
+        ignore
+    end,
     ?SCHEMA_NOTIFY({remove_db_copy,DB,N})
+  end
+).
+
+-define(SET_DB_MASTERS(DB,Ns),
+  begin
+    if
+      is_list(Ns) -> ?SCHEMA_WRITE({db,DB,'@masters@'},Ns);
+      true-> ?SCHEMA_DELETE({db,DB,'@masters@'})
+    end,
+    ?SCHEMA_NOTIFY({db_masters,DB,Ns})
   end
 ).
 
@@ -430,6 +446,7 @@
   begin
     [ ?REMOVE_DB_COPY(DB,_@N) || _@N <- ?dbAllNodes(DB)],
     ?SCHEMA_DELETE({db,DB,'@module@'}),
+    ?SCHEMA_DELETE({db,DB,'@masters@'}),
     ?SCHEMA_DELETE({db,DB,'@nodes@'}),
     ?SCHEMA_NOTIFY({remove_db,DB})
   end
