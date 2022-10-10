@@ -292,9 +292,9 @@ copy_request(#{
     batch = []
   },
 
-  ?LOGINFO("~p set shared lock..."),
+  ?LOGINFO("~p set shared lock...",[Source]),
   {ok, Unlock} = elock:lock(?locks, Source, _IsShared = true, _Timeout = ?infinity ),
-  ?LOGINFO("~p locked"),
+  ?LOGINFO("~p locked",[Source]),
 
   try
       #s_acc{ batch = TailBatch, hash = TailHash } = TailState =
