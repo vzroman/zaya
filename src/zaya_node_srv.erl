@@ -74,7 +74,6 @@ handle_call(Request, From, State) ->
 handle_cast({handshake, Node, PID},#state{ nodes = Nodes }=State)->
 
   erlang:monitor(process, PID),
-  gen_server:cast({?MODULE, Node}, {handshake, node(), self()}),
 
   zaya_schema_srv:node_up(Node, init),
 
