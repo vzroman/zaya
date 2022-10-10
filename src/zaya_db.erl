@@ -506,7 +506,7 @@ masters( DB, Masters )->
       throw({badarg,Masters})
   end,
 
-  ecall:call_all_wait(?readyNodes, zaya_schema_srv, db_masters, [DB,Masters] ).
+  ecall:call_all_wait(?readyNodes, zaya_schema_srv, set_db_masters, [DB,Masters] ).
 
 
 params(DB,Params)->
