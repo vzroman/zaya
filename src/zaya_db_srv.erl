@@ -12,7 +12,6 @@
 -export([
   open/1,
   add_copy/2,
-  recover/1,
   force_load/1,
   close/1,
   split_brain/1
@@ -38,19 +37,6 @@ open( DB )->
       ok;
     Error->
       Error
-  end.
-
-recover( DB )->
-  case whereis( DB ) of
-    PID when is_pid( PID )->
-      gen_statem:cast(DB, recover);
-    _->
-      case supervisor:start_child(zaya_db_sup,[DB, recover]) of
-        {ok, PID} when is_pid( PID )->
-          ok;
-        Error->
-          Error
-      end
   end.
 
 force_load( DB )->
@@ -103,15 +89,23 @@ init([DB, State])->
 %%   OPEN
 %%---------------------------------------------------------------------------
 handle_event(state_timeout, run, open, #data{db = DB, module = Module} = Data) ->
-  Params = ?dbNodeParams(DB,node()),
-  try
-    Ref = Module:open( Params ),
-    ?LOGINFO("~p database open",[DB]),
-    {next_state, rollback_transactions, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
-  catch
-    _:E->
-      ?LOGERROR("~p open error ~p",[DB,E]),
-      { keep_state_and_data, [ {state_timeout, 5000, run } ] }
+
+  update_masters( DB ),
+
+  case update_nodes( DB ) of
+    recover ->
+      {next_state, recover, Data, [ {state_timeout, 0, run } ] };
+    ok->
+      Params = ?dbNodeParams(DB,node()),
+      try
+        Ref = Module:open( Params ),
+        ?LOGINFO("~p database open",[DB]),
+        {next_state, rollback_transactions, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+      catch
+        _:E->
+          ?LOGERROR("~p open error ~p",[DB,E]),
+          { keep_state_and_data, [ {state_timeout, 5000, run } ] }
+      end
   end;
 
 handle_event(state_timeout, run, rollback_transactions, #data{ ref = Ref, db = DB, module = Module } = Data) ->

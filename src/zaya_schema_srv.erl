@@ -510,14 +510,7 @@ merge_schema([DB|Rest],OldSchema)->
       ?LOGINFO("~p add local copy",[DB]),
       zaya_db_srv:add_copy(DB, Params);
     _->
-      case ?dbAllNodes(DB) of
-        [Node] when Node =:= node()->
-          ?LOGINFO("~p has only local copy, open",[ DB ]),
-          zaya_db_srv:open( DB );
-        Nodes->
-          ?LOGINFO("~p has copies at ~p nodes which can have more actual data, try to recover",[DB, Nodes--[node()]]),
-          zaya_db_srv:recover( DB )
-      end
+      zaya_db_srv:open( DB )
   end,
   merge_schema(Rest, OldSchema);
 merge_schema([], _OldSchema)->
