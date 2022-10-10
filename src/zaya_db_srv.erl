@@ -212,7 +212,10 @@ handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref =
       Params = ?dbNodeParams(DB,node()),
       try
         ok = zaya_schema_srv:close_db(DB,node()),
-        Module:close( Ref ),
+        if
+          Ref =/=?undefined -> Module:close( Ref );
+          true->ignore
+        end,
         Module:remove( Params ),
         zaya_transaction:drop_log( DB ),
         {next_state, {add_copy, Params}, Data, [ {state_timeout, 0, run } ] }

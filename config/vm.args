@@ -3,7 +3,7 @@
 ######################################################################
 
 ## Name of the node
--name zaya@node.1
+-name zaya1@127.0.0.1
 
 ## Cookie for distributed erlang
 -setcookie zaya
