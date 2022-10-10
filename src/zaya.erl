@@ -46,7 +46,9 @@
   db_remove/1,
 
   db_add_copy/3,
-  db_remove_copy/2
+  db_remove_copy/2,
+
+  db_masters/1, db_masters/2
 ]).
 
 %%=================================================================
@@ -188,6 +190,12 @@ db_add_copy(DB,Node,Params)->
 
 db_remove_copy(DB, Node)->
   zaya_db:remove_copy( DB, Node ).
+
+db_masters(DB)->
+  zaya_db:masters( DB ).
+
+db_masters(DB, Masters)->
+  zaya_db:masters( DB, Masters ).
 
 %%%%---------------------------------------------------------------
 %%%%	DBs Info API

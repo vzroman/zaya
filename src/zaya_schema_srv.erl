@@ -15,7 +15,8 @@
 -export([
   node_up/2,
   node_down/2,
-  remove_node/1
+  remove_node/1,
+  split_brain/1
 ]).
 
 %%=================================================================
@@ -28,7 +29,10 @@
   remove_db/1,
 
   add_db_copy/3,
-  remove_db_copy/2
+  remove_db_copy/2,
+
+  set_db_masters/2,
+  set_db_nodes/2
 ]).
 
 %%=================================================================
@@ -56,6 +60,9 @@ node_down( Node, Info )->
 remove_node( Node )->
   gen_server:call(?MODULE, {remove_node, Node}).
 
+split_brain( Node )->
+  gen_server:cast(?MODULE, {split_brain, Node}).
+
 %%=================================================================
 %%	DBs
 %%=================================================================
@@ -77,7 +84,11 @@ add_db_copy(DB,Node,Params)->
 remove_db_copy( DB, Node )->
   gen_server:call(?MODULE, {remove_db_copy, DB, Node}, ?infinity).
 
+set_db_masters( DB, Masters )->
+  gen_server:call(?MODULE, {set_db_masters, DB, Masters}, ?infinity).
 
+set_db_nodes( DB, Nodes )->
+  gen_server:call(?MODULE, {set_db_nodes, DB, Nodes}, ?infinity).
 
 %%=================================================================
 %%	OTP
@@ -189,7 +200,7 @@ handle_call({close_db, DB, Node}, From, State) ->
   try
     ?CLOSE_DB(DB, Node),
     gen_server:reply(From,ok),
-    ?LOGINFO("~p db closed",[DB])
+    ?LOGINFO("~p db closed at ~p",[DB,Node])
   catch
     _:E:S->
       gen_server:reply(From, {error,E}),
@@ -240,9 +251,50 @@ handle_call({remove_db_copy, DB, Node}, From, State) ->
 
   {noreply,State};
 
+handle_call({set_db_masters, DB, Masters}, From, State) ->
+
+  try
+    ?SET_DB_MASTERS( DB, Masters ),
+    gen_server:reply(From,ok),
+    ?LOGINFO("~p set master nodes ~p",[DB, Masters])
+  catch
+    _:E:S->
+      gen_server:reply(From, {error,E}),
+      ?LOGERROR("~p set master nodes ~p schema error ~p stack ~p",[DB,Masters,E,S])
+  end,
+
+  {noreply,State};
+
+handle_call({set_db_nodes, DB, Nodes}, From, State) ->
+
+  try
+    ?SET_DB_NODES( DB, Nodes ),
+    gen_server:reply(From,ok),
+    ?LOGINFO("~p set available nodes ~p",[DB, Nodes])
+  catch
+    _:E:S->
+      gen_server:reply(From, {error,E}),
+      ?LOGERROR("~p set available nodes ~p schema error ~p stack ~p",[DB,Nodes,E,S])
+  end,
+
+  {noreply,State};
+
 handle_call(Request, From, State) ->
   ?LOGWARNING("schema server got an unexpected call resquest ~p from ~p",[Request,From]),
   {noreply,State}.
+
+handle_cast({split_brain, Node},State)->
+
+  ?LOGWARNING("~p node split brain",[Node]),
+  try ?NODE_UP( Node )
+  catch
+    _:E:S->
+      ?LOGERROR("~p node up schema error ~p stack ~p",[Node,E,S])
+  end,
+
+  merge_brain( Node ),
+
+  {noreply,State};
 
 handle_cast(Request,State)->
   ?LOGWARNING("schema server got an unexpected cast resquest ~p",[Request]),
@@ -336,7 +388,7 @@ restart([])->
   ok;
 restart(Nodes)->
   ?LOGINFO("multi-node application restart, nodes ~p",[Nodes]),
-  try_attach_to( Nodes -- [node()] ).
+  try_attach_to( ordsets:from_list(Nodes -- [node()]) ).
 
 try_attach_to([Node|Rest])->
   ?LOGINFO("trying to connect to ~p node",[Node]),
@@ -444,6 +496,7 @@ merge_schema([DB|Rest],OldSchema)->
   case {?dbNodeParams(DB,node()), maps:get(DB, OldSchema, ?undefined) } of
     {?undefined, #{module := Module, params:=Params } } when Params=/=?undefined->
       ?LOGINFO("~p local copy was removed, try remove",[DB]),
+      zaya_transaction:drop_log( DB ),
       try Module:remove( Params )
       catch
         _:E->?LOGERROR("~p remove local copy error ~p",[DB,E])
@@ -470,11 +523,54 @@ merge_schema([DB|Rest],OldSchema)->
 merge_schema([], _OldSchema)->
   ok.
 
+%%===========================================================================
+%%  Network recovery (split brain)
+%%===========================================================================
+% When the network is recovered each recovered node <--> node  connection will
+% trigger the split brain procedure.
+% There is no need to merge node's states because they are updated automatically when
+% the connection recovered. The task is to merge databases.
+merge_brain( Node )->
+  case rpc:call( Node, zaya_node, node_dbs_params, [Node] ) of
+    {badrpc,Error}->
+      ?LOGERROR("~p node merge brain error ~p",[Node,Error]);
+    NodeDBs->
+      Remote = maps:from_list( NodeDBs ),
+      Local = maps:from_list( ?nodeDBsParams( Node ) ),
 
+      % Remove stale
+      maps:map(fun(DB,_Ps)->
+        case maps:is_key(DB, Remote ) of
+          true -> ignore;
+          _->
+            try ?REMOVE_DB_COPY( DB,Node )
+            catch
+              E->?LOGERROR("~p remove copy ~p error ~p",[DB,Node,E])
+            end
+        end
+      end, Local ),
 
+      % Add/Update
+      maps:map(fun(DB,Ps)->
+        case Local of
+          #{ DB := Ps }->
+            ignore;
+          #{DB:=_}->
+            try ?SCHEMA_WRITE({db,DB,'@node@',Node,'@params@'},Ps)
+            catch
+              _:E->?LOGERROR("~p update ~p copy params error ~p",[DB,Node,E])
+            end;
+          _->
+            try ?ADD_DB_COPY( DB,Node, Ps )
+            catch
+              E->?LOGERROR("~p add copy ~p error ~p",[DB,Node,E])
+            end
+        end
+      end, Remote ),
 
+      [ zaya_db_srv:split_brain( DB ) || DB <- ?nodeDBs(Node)]
 
-
+  end.
 
 
 

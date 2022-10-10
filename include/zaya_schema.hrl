@@ -377,6 +377,14 @@
   ?nodeDBs(node())
 ).
 
+-define(dbMasters(DB),
+  case ?schemaRead({db,DB,'@masters@'}) of
+    ?undefined -> [];
+    _@Ns -> _@Ns
+  end
+).
+-define(dbMasters(DB,Ns), ?SCHEMA_WRITE({db,DB,'@masters@'},Ns)).
+
 %=======================================================================================
 %             SCHEMA TRANSFORMATION
 %=======================================================================================
@@ -414,14 +422,35 @@
 -define(REMOVE_DB_COPY(DB,N),
   begin
     ?SCHEMA_DELETE({db,DB,'@node@',N,'@params@'}),
+    case ?dbMasters(DB) of
+      _@Ms when length(_@Ms) >0 ->
+        ?SCHEMA_WRITE({db,DB,'@masters@'},_@Ms -- [N]);
+      _->
+        ignore
+    end,
     ?SCHEMA_NOTIFY({remove_db_copy,DB,N})
   end
+).
+
+-define(SET_DB_MASTERS(DB,Ns),
+  begin
+    if
+      is_list(Ns) -> ?SCHEMA_WRITE({db,DB,'@masters@'},Ns);
+      true-> ?SCHEMA_DELETE({db,DB,'@masters@'})
+    end,
+    ?SCHEMA_NOTIFY({db_masters,DB,Ns})
+  end
+).
+
+-define(SET_DB_NODES(DB,Ns),
+  ?SCHEMA_WRITE({db,DB,'@nodes@'}, Ns )
 ).
 
 -define(REMOVE_DB(DB),
   begin
     [ ?REMOVE_DB_COPY(DB,_@N) || _@N <- ?dbAllNodes(DB)],
     ?SCHEMA_DELETE({db,DB,'@module@'}),
+    ?SCHEMA_DELETE({db,DB,'@masters@'}),
     ?SCHEMA_DELETE({db,DB,'@nodes@'}),
     ?SCHEMA_NOTIFY({remove_db,DB})
   end
