@@ -211,7 +211,6 @@ handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref =
       % TODO. Hash tree
       Params = ?dbNodeParams(DB,node()),
       try
-        ok = zaya_schema_srv:close_db(DB,node()),
         if
           Ref =/=?undefined -> Module:close( Ref );
           true->ignore
