@@ -300,7 +300,7 @@ merge_brain( DB )->
 update_masters( DB )->
   case update_masters( ?dbMasters(DB), DB ) of
     error->
-      update_masters( ?allNodes, DB )
+      update_masters( ordsets:from_list(?allNodes), DB )
   end.
 
 update_masters([N|_Rest], _DB ) when N=:=node()->
