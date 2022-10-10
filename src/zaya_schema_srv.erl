@@ -200,7 +200,7 @@ handle_call({close_db, DB, Node}, From, State) ->
   try
     ?CLOSE_DB(DB, Node),
     gen_server:reply(From,ok),
-    ?LOGINFO("~p db closed",[DB])
+    ?LOGINFO("~p db closed at ~p",[DB,Node])
   catch
     _:E:S->
       gen_server:reply(From, {error,E}),
