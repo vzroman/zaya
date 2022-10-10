@@ -319,7 +319,7 @@ update_masters( [], _DB )->
 update_nodes( DB )->
   case update_nodes( ?dbMasters(DB), DB ) of
     error ->
-      update_nodes( ?dbAllNodes(DB), DB );
+      update_nodes( ordsets:from_list(?dbAllNodes(DB)), DB );
     OkOrRecover->
       OkOrRecover
   end.

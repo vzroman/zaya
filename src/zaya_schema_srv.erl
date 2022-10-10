@@ -388,7 +388,7 @@ restart([])->
   ok;
 restart(Nodes)->
   ?LOGINFO("multi-node application restart, nodes ~p",[Nodes]),
-  try_attach_to( Nodes -- [node()] ).
+  try_attach_to( ordsets:from_list(Nodes -- [node()]) ).
 
 try_attach_to([Node|Rest])->
   ?LOGINFO("trying to connect to ~p node",[Node]),
