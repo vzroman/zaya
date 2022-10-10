@@ -568,7 +568,7 @@ merge_brain( Node )->
         end
       end, Remote ),
 
-      [ zaya_db_srv:split_brain( DB ) || DB <- ?nodeDBs(node()) -- ?nodeDBs(Node)]
+      [ zaya_db_srv:split_brain( DB ) || DB <- ?nodeDBs(Node)]
 
   end.
 
