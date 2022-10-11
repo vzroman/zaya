@@ -271,7 +271,7 @@ transaction(Fun) when is_function(Fun,0)->
           release_locks(Locks, PLocks),
           put(?transaction, Parent),
           % The user should decide to abort the whole transaction or not
-          {error,Error}
+          {abort,Error}
       end;
     _->
       % The transaction entry point
@@ -280,7 +280,7 @@ transaction(Fun) when is_function(Fun,0)->
 transaction(_Fun)->
   throw(bad_argument).
 
-run_transaction(Fun, Attempts) when Attempts>0->
+run_transaction(Fun, Attempts)->
   % Create the transaction storage
   put(?transaction,#transaction{ data = #{}, locks = #{} }),
   try
@@ -292,7 +292,7 @@ run_transaction(Fun, Attempts) when Attempts>0->
     commit( Data ),
 
     % Committed
-    Result
+    {ok,Result}
   catch
     _:{lock,_} when Attempts > 1->
       % In the case of lock errors all held locks are released and the transaction starts from scratch
