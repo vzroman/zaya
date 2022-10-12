@@ -10,6 +10,7 @@
 %%	API
 %%=================================================================
 -export([
+  create/1,
   open/1,
   add_copy/2,
   force_load/1,
@@ -31,6 +32,14 @@
 %%=================================================================
 %%	API
 %%=================================================================
+create( DB )->
+  case supervisor:start_child(zaya_db_sup,[DB, create]) of
+    {ok, _PID}->
+      ok;
+    Error->
+      Error
+  end.
+
 open( DB )->
   case supervisor:start_child(zaya_db_sup,[DB, open]) of
     {ok, _PID}->
@@ -74,7 +83,7 @@ callback_mode() ->
 start_link( DB, Action )->
   gen_statem:start_link({local,DB},?MODULE, [DB, Action], []).
 
--record(data,{db, module, params, ref}).
+-record(data,{db, module, ref}).
 init([DB, State])->
 
   process_flag(trap_exit,true),
@@ -84,6 +93,22 @@ init([DB, State])->
   Module = ?dbModule( DB ),
 
   {ok, State, #data{db = DB, module = Module }, [ {state_timeout, 0, run } ]}.
+
+%%---------------------------------------------------------------------------
+%%   CREATE
+%%---------------------------------------------------------------------------
+handle_event(state_timeout, run, create, #data{db = DB, module = Module} = Data) ->
+
+  try
+    Params = ?dbNodeParams(DB,node()),
+    Ref = Module:open( Params ),
+    ?LOGINFO("~p database open",[DB]),
+    {next_state, register, Data#data{ref = Ref}, [ {state_timeout, 0, run } ] }
+  catch
+    _:E->
+      ?LOGERROR("~p open error ~p",[DB,E]),
+      { keep_state_and_data, [ {state_timeout, 5000, run } ] }
+  end;
 
 %%---------------------------------------------------------------------------
 %%   OPEN
@@ -96,8 +121,8 @@ handle_event(state_timeout, run, open, #data{db = DB, module = Module} = Data) -
     recover ->
       {next_state, recover, Data, [ {state_timeout, 0, run } ] };
     ok->
-      Params = ?dbNodeParams(DB,node()),
       try
+        Params = ?dbNodeParams(DB,node()),
         Ref = Module:open( Params ),
         ?LOGINFO("~p database open",[DB]),
         {next_state, rollback_transactions, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }

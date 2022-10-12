@@ -311,13 +311,16 @@ create(DB, Module, Params)->
 
   {OKs, Errors} = ecall:call_all_wait( ?readyNodes ,?MODULE, do_create, [DB,Module,Params]),
 
-  if
-    length( OKs) =:= 0->
+  case [OK || OK = {_N,{ok,created}} <- OKs ] of
+    []->
       ecall:cast_all( ?readyNodes, ?MODULE, do_remove, [DB] ),
       throw(Errors);
-    true->
-      {OKs,Errors}
+    CreateOKs->
+      ?LOGINFO("~p database created at ~p nodes",[DB,[N || {N,_} <- CreateOKs]]),
+      ecall:call_all_wait( ?dbReadyNodes(DB), zaya_db_srv, create, [DB] )
   end.
+
+
 
 do_create(DB, Module, InParams)->
 
