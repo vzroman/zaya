@@ -281,13 +281,6 @@ create(DB, Module, Params)->
       throw(invalid_name)
   end,
 
-  case lists:member( Module, ?modules ) of
-    false ->
-      throw( invalid_module );
-    _->
-      ok
-  end,
-
   if
     is_map( Params )->
       ok;
