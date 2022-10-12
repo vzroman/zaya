@@ -84,9 +84,9 @@
 
 -define(schemaParams,
   #{
+    dir => ?schemaPath,
     ets => #{},
     leveldb => #{
-      dir => ?schemaPath,
       eleveldb => #{
         %compression_algorithm => todo,
         open_options=>#{
