@@ -17,7 +17,9 @@
   force_load/1,
   close/1,
   remove/1,
-  split_brain/1
+  split_brain/1,
+
+  get_size/1
 ]).
 %%=================================================================
 %%	OTP API
@@ -113,6 +115,11 @@ remove( DB )->
 split_brain(DB)->
   spawn(fun()->merge_brain( DB ) end),
   ok.
+
+get_size(DB)->
+  Module = ?dbModule(DB),
+  Ref = ?dbRef( DB, node() ),
+  Module:get_size( Ref ).
 
 %%=================================================================
 %%	OTP

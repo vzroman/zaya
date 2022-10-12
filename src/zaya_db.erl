@@ -56,7 +56,8 @@
   available_copies/1,
   not_available_copies/1,
   all_dbs_available_copies/0,
-  all_dbs_not_available_copies/0
+  all_dbs_not_available_copies/0,
+  get_size/1
 ]).
 
 %%=================================================================
@@ -270,6 +271,13 @@ all_dbs_available_copies()->
 
 all_dbs_not_available_copies()->
   [{DB,not_available_copies( DB )} || DB <- ?allDBs ].
+
+get_size( DB )->
+  Undefined = maps:from_list([{N,?undefined} || N <- ?dbAllNodes(DB)] ),
+  {OKs,_} = ecall:call_all_wait( ?dbAvailableNodes(DB), zaya_db_srv, get_size,[DB] ),
+  lists:foldl(fun({N,Size},Acc)->
+    Acc#{ N => Size }
+  end,Undefined, OKs).
 
 %%=================================================================
 %%	SERVICE
