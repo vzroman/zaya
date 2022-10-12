@@ -517,10 +517,10 @@ merge_schema([DB|Rest],OldSchema)->
       no_local_copy;
     {Params, ?undefined}->
       ?LOGINFO("~p add local copy",[DB]),
-      zaya_db_srv:add_copy(DB, Params);
+      spawn(fun()->zaya_db_srv:add_copy(DB, Params) end);
     {Params, #{params:=?undefined}}->
       ?LOGINFO("~p add local copy",[DB]),
-      zaya_db_srv:add_copy(DB, Params);
+      spawn(fun()->zaya_db_srv:add_copy(DB, Params) end);
     _->
       zaya_db_srv:open( DB )
   end,

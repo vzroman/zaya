@@ -42,7 +42,7 @@ create( DB, Module, InParams)->
       (_NodeParams = ?undefined)->
         added;
       (NodeParams)->
-        case supervisor:start_child(zaya_db_sup,[DB, {create,NodeParams, _ReplyTo=self()}]) of
+        case supervisor:start_child(zaya_db_sup,[DB, {create, NodeParams, _ReplyTo=self()}]) of
           {ok, PID}->
             receive
               {created, PID}->
@@ -68,9 +68,14 @@ force_load( DB )->
   gen_statem:cast(DB, force_load).
 
 add_copy( DB, Params )->
-  case supervisor:start_child(zaya_db_sup,[DB, {add_copy,Params}]) of
+  case supervisor:start_child(zaya_db_sup,[DB, {add_copy,Params,_ReplyTo=self()}]) of
     {ok, PID} when is_pid( PID )->
-      ok;
+      receive
+        {added,PID}->
+          ok;
+        {error,PID,Error}->
+          {error,Error}
+      end;
     Error->
       Error
   end.
@@ -124,7 +129,7 @@ handle_event(state_timeout, run, {create, NodeParams, ReplyTo}, #data{db = DB, m
     {next_state, register, Data#data{ref = Ref}, [ {state_timeout, 0, run } ] }
   catch
     _:E->
-      ?LOGERROR("~p create error ~p",[DB,E]),
+      ?LOGERROR("~p database create error ~p",[DB,E]),
       ReplyTo ! {error,self(),E},
       {stop, shutdown}
   end;
@@ -147,7 +152,7 @@ handle_event(state_timeout, run, open, #data{db = DB, module = Module} = Data) -
         {next_state, rollback_transactions, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
       catch
         _:E->
-          ?LOGERROR("~p open error ~p",[DB,E]),
+          ?LOGERROR("~p database open error ~p",[DB,E]),
           { keep_state_and_data, [ {state_timeout, 5000, run } ] }
       end
   end;
@@ -164,40 +169,44 @@ handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
     {ok, Unlock}->
       try
         {OKs, Errs} = ecall:call_all_wait( ?readyNodes, zaya_schema_srv, open_db, [ DB, node(), Ref ] ),
-        ?LOGINFO("~p registered at ~p nodes, errors at ~p nodes",[ DB, [N || {N,_} <- OKs], [N || {N,_} <- Errs] ]),
+        ?LOGINFO("~p database registered at ~p nodes, errors at ~p nodes",[ DB, [N || {N,_} <- OKs], [N || {N,_} <- Errs] ]),
 
         {next_state, ready, Data}
       after
         Unlock()
       end;
     {error,LockError}->
-      ?LOGINFO("~p register lock error ~p, retry",[DB, LockError]),
+      ?LOGINFO("~p database register lock error ~p, retry",[DB, LockError]),
       { keep_state_and_data, [ {state_timeout, 0, run } ] }
   end;
 
 %%---------------------------------------------------------------------------
 %%   ADD COPY
 %%---------------------------------------------------------------------------
-handle_event(state_timeout, run, {add_copy, InParams}, #data{db = DB, module = Module} = Data) ->
+handle_event(state_timeout, run, {add_copy, InParams, ReplyTo}, #data{db = DB, module = Module} = Data) ->
   Params = maps:merge(#{
     dir => filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
   },InParams),
   try
     Ref = zaya_copy:copy( DB, Module, Params, #{ live => true}),
+    ecall:call_all_wait(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
+    ReplyTo ! {added, self()},
+    ?LOGINFO("~p database copy added",[DB]),
     {next_state, {register_copy,Params}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
   catch
     _:E->
-      ?LOGERROR("~p copy error ~p",[DB,E]),
-      { keep_state_and_data, [ {state_timeout, 5000, run } ] }
+      ?LOGERROR("~p database add copy error ~p",[DB,E]),
+      ReplyTo ! {error,self(),E},
+      {stop, shutdown}
   end;
 
 handle_event(state_timeout, run, {register_copy,Params}, #data{db = DB} = Data) ->
   case ecall:call_all(?readyNodes, zaya_schema_srv, add_db_copy, [DB, node(), Params] ) of
     {ok,_}->
-      ?LOGINFO("~p copy registered",[DB]),
+      ?LOGINFO("~p database copy registered",[DB]),
       {next_state, register, Data, [ {state_timeout, 0, run } ] };
     {error,Error}->
-      ?LOGERROR("~p register copy error ~p",[ DB, Error ]),
+      ?LOGERROR("~p database register copy error ~p",[ DB, Error ]),
       { keep_state_and_data, [ {state_timeout, 5000, run } ] }
   end;
 
@@ -209,7 +218,7 @@ handle_event(state_timeout, run, recover, #data{db = DB}=Data ) ->
     []->
       case os:getenv("FORCE_START") of
         "true"->
-          ?LOGWARNING("~p force open",[DB]),
+          ?LOGWARNING("~p database force open",[DB]),
           {next_state, open, Data, [ {state_timeout, 0, run } ] };
         _->
           ?LOGERROR("~p database recover error: database is unavailable.\r\n"++
@@ -223,7 +232,7 @@ handle_event(state_timeout, run, recover, #data{db = DB}=Data ) ->
       {next_state, recovery, Data, [ {state_timeout, 0, run } ] }
   end;
 handle_event(cast, force_load, recover, #data{db = DB} = Data ) ->
-  ?LOGWARNING("~p FORCE LOAD. ALL THE DATA CHANGES MADE IN OTHER NODES COPIES WILL BE LOST!",[DB]),
+  ?LOGWARNING("~p database FORCE LOAD. ALL THE DATA CHANGES MADE IN OTHER NODES COPIES WILL BE LOST!",[DB]),
   {next_state, open, Data, [ {state_timeout, 0, run } ] };
 
 %%---------------------------------------------------------------------------
@@ -234,7 +243,7 @@ handle_event(cast, recover, ready, Data) ->
 
 handle_event(cast, close, ready, #data{db = DB}=Data) ->
 
-  ?LOGINFO("~p close",[DB]),
+  ?LOGINFO("~p database close",[DB]),
   {next_state, unregister, Data, [ {state_timeout, 0, close } ]};
 
 %%---------------------------------------------------------------------------
@@ -244,10 +253,10 @@ handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref =
 
   case ?dbAvailableNodes(DB) of
     []->
-      ?LOGERROR("~p recovery is impossible: no other copies are available"),
+      ?LOGERROR("~p database recovery is impossible: no other copies are available"),
       { keep_state_and_data, [ {state_timeout, 5000, run } ] };
     _->
-      ?LOGWARNING("~p recovery",[DB]),
+      ?LOGWARNING("~p database recovery",[DB]),
       % TODO. Hash tree
       Params = ?dbNodeParams(DB,node()),
       try
@@ -260,12 +269,12 @@ handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref =
         {next_state, {add_copy, Params}, Data, [ {state_timeout, 0, run } ] }
       catch
         _:E:S->
-          ?LOGERROR("~p recovery error ~p, stack ~p",[DB,E,S]),
+          ?LOGERROR("~p database recovery error ~p, stack ~p",[DB,E,S]),
           { keep_state_and_data, [ {state_timeout, 5000, run } ] }
       end
   end;
 handle_event(cast, force_load, recovery, #data{db = DB} = Data ) ->
-  ?LOGWARNING("~p FORCE LOAD. ALL THE DATA CHANGES MADE IN OTHER NODES COPIES WILL BE LOST!",[DB]),
+  ?LOGWARNING("~p database FORCE LOAD. ALL THE DATA CHANGES MADE IN OTHER NODES COPIES WILL BE LOST!",[DB]),
   {next_state, register, Data, [ {state_timeout, 0, run } ] };
 
 %%---------------------------------------------------------------------------
@@ -282,14 +291,14 @@ handle_event(state_timeout, NextState, unregister, #data{db = DB} = Data) ->
         Unlock()
       end;
     {error,LockError}->
-      ?LOGINFO("~p unregister lock error ~p, retry",[DB, LockError]),
+      ?LOGINFO("~p database unregister lock error ~p, retry",[DB, LockError]),
       { keep_state_and_data, [ {state_timeout, 5000, NextState } ] }
   end;
 
 handle_event(state_timeout, run, close, #data{db = DB, module = Module, ref = Ref}) ->
   try  Module:close(Ref)
   catch
-    _:E->?LOGERROR("~p close error ~p",[DB,E])
+    _:E->?LOGERROR("~p database close error ~p",[DB,E])
   end,
   {stop, shutdown};
 
