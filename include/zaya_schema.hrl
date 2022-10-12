@@ -430,6 +430,13 @@
   end
 ).
 
+-define(UPDATE_DB_COPY(DB,N,Ps),
+  begin
+    ?SCHEMA_WRITE({db,DB,'@node@',N,'@params@'},Ps),
+    ?SCHEMA_NOTIFY({update_db_copy,DB,N})
+  end
+).
+
 -define(SET_DB_MASTERS(DB,Ns),
   begin
     if

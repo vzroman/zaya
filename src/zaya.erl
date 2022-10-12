@@ -48,6 +48,7 @@
 
   db_add_copy/3,
   db_remove_copy/2,
+  db_set_copy_params/3,
 
   db_masters/1, db_masters/2
 ]).
@@ -194,6 +195,9 @@ db_add_copy(DB,Node,Params)->
 
 db_remove_copy(DB, Node)->
   zaya_db:remove_copy( DB, Node ).
+
+db_set_copy_params(DB,Node,Params)->
+  zaya_db:set_copy_params(DB,Node,Params).
 
 db_masters(DB)->
   zaya_db:masters( DB ).

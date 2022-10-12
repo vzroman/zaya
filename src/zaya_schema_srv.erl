@@ -30,6 +30,7 @@
 
   add_db_copy/3,
   remove_db_copy/2,
+  set_copy_params/3,
 
   set_db_masters/2,
   set_db_nodes/2
@@ -91,6 +92,9 @@ add_db_copy(DB,Node,Params)->
 
 remove_db_copy( DB, Node )->
   gen_server:call(?MODULE, {remove_db_copy, DB, Node}, ?infinity).
+
+set_copy_params(DB, Node,Params)->
+  gen_server:call(?MODULE, {set_copy_params,DB,Node,Params}, ?infinity).
 
 set_db_masters( DB, Masters )->
   gen_server:call(?MODULE, {set_db_masters, DB, Masters}, ?infinity).
@@ -261,6 +265,19 @@ handle_call({remove_db_copy, DB, Node}, From, State) ->
     _:E:S->
       gen_server:reply(From, {error,E}),
       ?LOGERROR("~p remove copy from ~p schema error ~p stack ~p",[DB,Node,E,S])
+  end,
+
+  {noreply,State};
+
+handle_call({set_copy_params,DB,Node,Params}, From, State) ->
+  try
+    ?UPDATE_DB_COPY(DB,Node,Params),
+    gen_server:reply(From,ok),
+    ?LOGINFO("~p copy update params at ~p, params: ~p",[DB,Node,Params])
+  catch
+    _:E:S->
+      ?LOGERROR("~p update copy params at ~p schema error ~p stack ~p",[DB,Node,E,S]),
+      gen_server:reply(From, {error,E})
   end,
 
   {noreply,State};

@@ -71,6 +71,7 @@
 
   add_copy/3,
   remove_copy/2, do_remove_copy/1,
+  set_copy_params/3,
 
   masters/1, masters/2,
 
@@ -453,6 +454,36 @@ do_remove_copy( DB )->
     fun(_) -> ecall:call_all(?readyNodes, zaya_schema_srv, remove_db_copy, [DB, node()] ) end,
     fun(_)-> Module:remove( Params ) end
   ],?undefined).
+
+set_copy_params(DB,Node,Params)->
+  case ?dbModule(DB) of
+    ?undefined->
+      throw(db_not_exists);
+    _->
+      ok
+  end,
+
+  case lists:member( Node,?allNodes ) of
+    false->
+      throw(node_not_attached);
+    _->
+      ok
+  end,
+
+  case ?dbNodeParams(DB,Node) of
+    ?undefined ->
+      throw(copy_not_exists);
+    _->
+      ok
+  end,
+
+  case ecall:call_all_wait(?readyNodes, zaya_schema_srv, set_copy_params, [DB, Node,Params] ) of
+    {[],Errors}->
+      throw(Errors);
+    Result->
+      Result
+  end.
+
 
 masters( DB )->
   ?dbMasters( DB ).
