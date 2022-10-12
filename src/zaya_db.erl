@@ -403,7 +403,10 @@ add_copy(DB,Node,Params)->
       ok
   end,
 
-  rpc:call( Node, zaya_db_srv, add_copy, [ DB, Params ]).
+  case rpc:call( Node, zaya_db_srv, add_copy, [ DB, Params ]) of
+    ok->ok;
+    {error,Error}->throw(Error)
+  end.
 
 remove_copy(DB, Node)->
 
