@@ -314,7 +314,7 @@ create(DB, Module, Params)->
   if
     length( OKs) =:= 0->
       ecall:cast_all( ?readyNodes, ?MODULE, do_remove, [DB] ),
-      {error,Errors};
+      throw(Errors);
     true->
       {OKs,Errors}
   end.
