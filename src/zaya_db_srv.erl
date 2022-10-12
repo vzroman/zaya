@@ -13,8 +13,10 @@
   create/3,
   open/1,
   add_copy/2,
+  remove_copy/1,
   force_load/1,
   close/1,
+  remove/1,
   split_brain/1
 ]).
 %%=================================================================
@@ -80,6 +82,14 @@ add_copy( DB, Params )->
       Error
   end.
 
+remove_copy( DB )->
+  Module = ?dbModule( DB ),
+  Params = ?dbNodeParams(DB,node()),
+  epipe:do([
+    fun(_) -> ecall:call_all(?readyNodes, zaya_schema_srv, remove_db_copy, [DB, node()] ) end,
+    fun(_)-> Module:remove( default_params(DB,Params) ) end
+  ],?undefined).
+
 close( DB )->
   case whereis( DB ) of
     PID when is_pid( PID )->
@@ -87,6 +97,18 @@ close( DB )->
     _->
       {error, not_registered}
   end.
+
+remove( DB )->
+  Module = ?dbModule( DB ),
+  Params = ?dbNodeParams(DB,node()),
+  epipe:do([
+    fun(_) -> zaya_schema_srv:remove_db( DB ) end,
+    fun
+      (_) when Params =:= ?undefined->ok;
+      (_)-> Module:remove( default_params(DB,Params) )
+    end
+  ], ?undefined).
+
 
 split_brain(DB)->
   spawn(fun()->merge_brain( DB ) end),
@@ -117,12 +139,9 @@ init([DB, State])->
 %%---------------------------------------------------------------------------
 %%   CREATE
 %%---------------------------------------------------------------------------
-handle_event(state_timeout, run, {create, NodeParams, ReplyTo}, #data{db = DB, module = Module} = Data) ->
-  Params = maps:merge(#{
-    dir => filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
-  },NodeParams),
+handle_event(state_timeout, run, {create, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
   try
-    Ref = Module:create( Params ),
+    Ref = Module:create( default_params(DB, Params) ),
     ecall:call_all_wait(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
     ReplyTo ! {created, self()},
     ?LOGINFO("~p database created",[DB]),
@@ -146,8 +165,7 @@ handle_event(state_timeout, run, open, #data{db = DB, module = Module} = Data) -
       {next_state, recover, Data, [ {state_timeout, 0, run } ] };
     ok->
       try
-        Params = ?dbNodeParams(DB,node()),
-        Ref = Module:open( Params ),
+        Ref = Module:open( default_params(DB, ?dbNodeParams(DB,node())) ),
         ?LOGINFO("~p database open",[DB]),
         {next_state, rollback_transactions, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
       catch
@@ -183,12 +201,9 @@ handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
 %%---------------------------------------------------------------------------
 %%   ADD COPY
 %%---------------------------------------------------------------------------
-handle_event(state_timeout, run, {add_copy, InParams, ReplyTo}, #data{db = DB, module = Module} = Data) ->
-  Params = maps:merge(#{
-    dir => filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
-  },InParams),
+handle_event(state_timeout, run, {add_copy, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
   try
-    Ref = zaya_copy:copy( DB, Module, Params, #{ live => true}),
+    Ref = zaya_copy:copy( DB, Module, default_params(DB,Params), #{ live => true}),
     ecall:call_all_wait(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
     ReplyTo ! {added, self()},
     ?LOGINFO("~p database copy added",[DB]),
@@ -264,7 +279,7 @@ handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref =
           Ref =/=?undefined -> Module:close( Ref );
           true->ignore
         end,
-        Module:remove( Params ),
+        Module:remove( default_params(DB,Params) ),
         zaya_transaction:drop_log( DB ),
         {next_state, {add_copy, Params}, Data, [ {state_timeout, 0, run } ] }
       catch
@@ -325,6 +340,14 @@ terminate(Reason, _AnyState, #data{ db = DB, module = Module, ref = Ref })->
 
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
+
+%%------------------------------------------------------------------------------------
+%%  Internals
+%%------------------------------------------------------------------------------------
+default_params(DB, Params )->
+  maps:merge(#{
+    dir => filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
+  },Params).
 
 %%------------------------------------------------------------------------------------
 %%  SPLIT BRAIN:

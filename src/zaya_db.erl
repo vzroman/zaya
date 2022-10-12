@@ -67,10 +67,10 @@
   open/1, open/2,
   force_open/2,
   close/1, close/2,
-  remove/1, do_remove/1,
+  remove/1,
 
   add_copy/3,
-  remove_copy/2, do_remove_copy/1,
+  remove_copy/2,
   set_copy_params/3,
 
   masters/1, masters/2,
@@ -351,18 +351,7 @@ remove( DB )->
       throw({not_closed, Nodes})
   end,
 
-  ecall:call_all_wait(?readyNodes, ?MODULE, do_remove, [DB] ).
-
-do_remove( DB )->
-  Module = ?dbModule( DB ),
-  Params = ?dbNodeParams(DB,node()),
-  epipe:do([
-    fun(_) -> zaya_schema_srv:remove_db( DB ) end,
-    fun
-      (_) when Params =:= ?undefined->ok;
-      (_)-> Module:remove( Params )
-    end
-  ], ?undefined).
+  ecall:call_all_wait(?readyNodes, zaya_db_srv, remove, [DB] ).
 
 add_copy(DB,Node,Params)->
 
@@ -445,15 +434,7 @@ remove_copy(DB, Node)->
       ok
   end,
 
-  rpc:call(Node, ?MODULE, do_remove_copy, [ DB ]).
-
-do_remove_copy( DB )->
-  Module = ?dbModule( DB ),
-  Params = ?dbNodeParams(DB,node()),
-  epipe:do([
-    fun(_) -> ecall:call_all(?readyNodes, zaya_schema_srv, remove_db_copy, [DB, node()] ) end,
-    fun(_)-> Module:remove( Params ) end
-  ],?undefined).
+  rpc:call(Node, zaya_db_srv, remove_copy, [ DB ]).
 
 set_copy_params(DB,Node,Params)->
   case ?dbModule(DB) of
