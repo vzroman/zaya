@@ -348,9 +348,7 @@ try_load()->
   end.
 
 schema_create()->
-  try
-    ?SCHEMA_CREATE,
-    ?SCHEMA_OPEN
+  try ?SCHEMA_CREATE
   catch
     _:E:S->
       ?LOGERROR("CRITICAL ERROR! UNABLE TO CREATE SCHEMA ERROR ~p STACK ~p",[E,S]),

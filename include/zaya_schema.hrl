@@ -131,9 +131,7 @@
 ).
 
 -define(SCHEMA_CREATE,
-
-  ?schemaModule:create( ?schemaParams )
-
+  persistent_term:put(?schema, ?schemaModule:create( ?schemaParams ))
 ).
 
 -define(SCHEMA_OPEN,

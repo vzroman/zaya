@@ -10,7 +10,7 @@
 %%	API
 %%=================================================================
 -export([
-  create/1,
+  create/3,
   open/1,
   add_copy/2,
   force_load/1,
@@ -32,13 +32,29 @@
 %%=================================================================
 %%	API
 %%=================================================================
-create( DB )->
-  case supervisor:start_child(zaya_db_sup,[DB, create]) of
-    {ok, _PID}->
-      ok;
-    Error->
-      Error
-  end.
+create( DB, Module, InParams)->
+  epipe:do([
+    fun(_)->
+      zaya_schema_srv:add_db(DB,Module),
+      maps:get(node(), InParams, ?undefined)
+    end,
+    fun
+      (_NodeParams = ?undefined)->
+        added;
+      (NodeParams)->
+        case supervisor:start_child(zaya_db_sup,[DB, {create,NodeParams, _ReplyTo=self()}]) of
+          {ok, PID}->
+            receive
+              {created, PID}->
+                created;
+              {error,PID,Error}->
+                {error,Error}
+            end;
+          Error->
+            Error
+        end
+    end
+  ], ?undefined ).
 
 open( DB )->
   case supervisor:start_child(zaya_db_sup,[DB, open]) of
@@ -51,8 +67,7 @@ open( DB )->
 force_load( DB )->
   gen_statem:cast(DB, force_load).
 
-add_copy( DB, InParams )->
-  Params = zaya_db:params(DB,InParams),
+add_copy( DB, Params )->
   case supervisor:start_child(zaya_db_sup,[DB, {add_copy,Params}]) of
     {ok, PID} when is_pid( PID )->
       ok;
@@ -97,17 +112,21 @@ init([DB, State])->
 %%---------------------------------------------------------------------------
 %%   CREATE
 %%---------------------------------------------------------------------------
-handle_event(state_timeout, run, create, #data{db = DB, module = Module} = Data) ->
-
+handle_event(state_timeout, run, {create, NodeParams, ReplyTo}, #data{db = DB, module = Module} = Data) ->
+  Params = maps:merge(#{
+    dir => filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
+  },NodeParams),
   try
-    Params = ?dbNodeParams(DB,node()),
-    Ref = Module:open( Params ),
-    ?LOGINFO("~p database open",[DB]),
+    Ref = Module:create( Params ),
+    ecall:call_all_wait(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
+    ReplyTo ! {created, self()},
+    ?LOGINFO("~p database created",[DB]),
     {next_state, register, Data#data{ref = Ref}, [ {state_timeout, 0, run } ] }
   catch
     _:E->
-      ?LOGERROR("~p open error ~p",[DB,E]),
-      { keep_state_and_data, [ {state_timeout, 5000, run } ] }
+      ?LOGERROR("~p create error ~p",[DB,E]),
+      ReplyTo ! {error,self(),E},
+      {stop, shutdown}
   end;
 
 %%---------------------------------------------------------------------------
@@ -159,7 +178,10 @@ handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
 %%---------------------------------------------------------------------------
 %%   ADD COPY
 %%---------------------------------------------------------------------------
-handle_event(state_timeout, run, {add_copy, Params}, #data{db = DB, module = Module} = Data) ->
+handle_event(state_timeout, run, {add_copy, InParams}, #data{db = DB, module = Module} = Data) ->
+  Params = maps:merge(#{
+    dir => filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
+  },InParams),
   try
     Ref = zaya_copy:copy( DB, Module, Params, #{ live => true}),
     {next_state, {register_copy,Params}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
@@ -294,7 +316,6 @@ terminate(Reason, _AnyState, #data{ db = DB, module = Module, ref = Ref })->
 
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
-
 
 %%------------------------------------------------------------------------------------
 %%  SPLIT BRAIN:

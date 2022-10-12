@@ -120,8 +120,7 @@ try_copy(#copy{
   Log = ?LOG_RECEIVE(SendNode,Source),
   ?LOGINFO("~s attempt ~p",[Log, Attempts - Attempts +1]),
 
-  ok = Module:create( Params ),
-  CopyRef = Module:open( Params ),
+  CopyRef = Module:create( Params ),
 
   Live = prepare_live_copy( Source, Module, SendNode, CopyRef, Log, Options ),
 

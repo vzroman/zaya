@@ -109,12 +109,15 @@
 %%	Environment
 %%=================================================================
 create_log( Path )->
-  ?logModule:create( ?logParams#{ dir=> Path } ),
-  open_log( Path ).
+  Ref = ?logModule:create( ?logParams#{ dir=> Path } ),
+  on_init( Ref ).
 
 open_log( Path )->
+  Ref = ?logModule:open( ?logParams#{ dir=> Path } ),
+  on_init( Ref ).
 
-  persistent_term:put(?log, ?logModule:open( ?logParams#{ dir=> Path } )),
+on_init( Ref )->
+  persistent_term:put(?log, Ref),
   persistent_term:put(?index, atomics:new(1,[{signed, false}])),
   try
     {InitLogId,_} = ?logModule:last(?logRef),

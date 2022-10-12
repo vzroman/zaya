@@ -63,7 +63,7 @@
 %%	SERVICE API
 %%=================================================================
 -export([
-  create/3, do_create/3,
+  create/3,
   open/1, open/2,
   force_open/2,
   close/1, close/2,
@@ -74,7 +74,6 @@
 
   masters/1, masters/2,
 
-  params/2,
   on_update/3
 ]).
 
@@ -309,7 +308,7 @@ create(DB, Module, Params)->
     _->ok
   end,
 
-  {OKs, Errors} = ecall:call_all_wait( ?readyNodes ,?MODULE, do_create, [DB,Module,Params]),
+  {OKs, Errors} = ecall:call_all_wait( ?readyNodes ,zaya_db_srv, create, [DB,Module,Params]),
 
   case [OK || OK = {_N,{ok,created}} <- OKs ] of
     []->
@@ -317,32 +316,8 @@ create(DB, Module, Params)->
       throw(Errors);
     CreateOKs->
       ?LOGINFO("~p database created at ~p nodes",[DB,[N || {N,_} <- CreateOKs]]),
-      ecall:call_all_wait( ?dbReadyNodes(DB), zaya_db_srv, create, [DB] )
+      {OKs,Errors}
   end.
-
-
-
-do_create(DB, Module, InParams)->
-
-  epipe:do([
-    fun(_)->
-      zaya_schema_srv:add_db(DB,Module),
-      maps:get(node(), InParams, ?undefined)
-    end,
-    fun
-      (_NodeParams = ?undefined)->
-        {ok, added};
-      (NodeParams)->
-        Params = params(DB,NodeParams),
-        epipe:do([
-          fun(_) -> Module:create( Params ) end,
-          fun(_)->
-            ecall:call_all_wait(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
-            {ok, created}
-          end
-        ],?undefined)
-    end
-  ], ?undefined ).
 
 open( DB )->
 
@@ -509,12 +484,6 @@ masters( DB, Masters )->
   end,
 
   ecall:call_all_wait(?readyNodes, zaya_schema_srv, set_db_masters, [DB,Masters] ).
-
-
-params(DB,Params)->
-  maps:merge(#{
-    dir => filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
-  },Params).
 
 on_update( DB, Action, Args )->
   esubscribe:notify( DB, {Action,Args} ),
