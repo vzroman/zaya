@@ -80,6 +80,7 @@
   read/3,
   write/3,
   delete/3,
+  on_abort/2,
 
   transaction/1
 ]).
@@ -244,6 +245,27 @@ do_delete([K|Rest], Data)->
       do_delete( Rest, Data#{ K => {{?none}, ?none}})
   end;
 do_delete([], Data)->
+  Data.
+
+on_abort(DB, KVs)->
+  in_context(DB, [K || {K,_}<-KVs], none, fun(Data)->
+    do_on_abort( KVs, Data )
+  end),
+  ok.
+
+do_on_abort([{K,V}|Rest], Data )->
+  case Data of
+    #{K := {{?none},V1}}->
+      V0 =
+        if
+          V=:=delete-> ?none;
+          true-> V
+        end,
+      do_write(Rest, Data#{K => {V0,V1} });
+    _->
+      do_write(Rest, Data)
+  end;
+do_on_abort([], Data )->
   Data.
 
 ensure_editable( DB )->
