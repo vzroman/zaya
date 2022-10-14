@@ -81,6 +81,7 @@
   write/3,
   delete/3,
   on_abort/2,
+  changes/2,
 
   transaction/1
 ]).
@@ -247,8 +248,11 @@ do_delete([K|Rest], Data)->
 do_delete([], Data)->
   Data.
 
+%%-----------------------------------------------------------
+%%  ROLLBACK VALUES
+%%-----------------------------------------------------------
 on_abort(DB, KVs)->
-  in_context(DB, [K || {K,_}<-KVs], none, fun(Data)->
+  in_context(DB, [K || {K,_}<-KVs], _Lock = none, fun(Data)->
     do_on_abort( KVs, Data )
   end),
   ok.
@@ -267,6 +271,45 @@ do_on_abort([{K,V}|Rest], Data )->
   end;
 do_on_abort([], Data )->
   Data.
+
+changes(DB, Keys)->
+  case get(?transaction) of
+    #transaction{data = Data}->
+      case Data of
+        #{DB := DBChanges}->
+          lists:foldl(fun(K, Acc)->
+            case DBChanges of
+              #{K:= {V,V} }->
+                Acc;
+              #{K:={{?none},_V1}}->
+                V1 =
+                  if
+                    _V1 =:= ?none-> delete;
+                    true->_V1
+                  end,
+                Acc#{ K=> {V1} };
+              #{K:={_V0,_V1}}->
+                V0 =
+                  if
+                    _V0 =:= ?none-> delete;
+                    true->_V0
+                  end,
+                V1 =
+                  if
+                    _V1 =:= ?none-> delete;
+                    true->_V1
+                  end,
+                Acc#{K => {V0,V1}};
+              _->
+                Acc
+            end
+          end,#{},Keys);
+        _->
+          #{}
+      end;
+    _ ->
+      throw(no_transaction)
+  end.
 
 ensure_editable( DB )->
   case ?dbMasters(DB) of

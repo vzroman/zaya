@@ -106,6 +106,8 @@
   read/3,
   write/3,
   delete/3,
+  on_abort/2,
+  changes/2,
 
   transaction/1
 ]).
@@ -320,6 +322,12 @@ write(DB, KVs, Lock)->
 
 delete(DB, Keys, Lock)->
   zaya_transaction:delete( DB, Keys, Lock ).
+
+on_abort(DB, KVs)->
+  zaya_transaction:on_abort(DB, KVs).
+
+changes(DB, KVs)->
+  zaya_transaction:changes(DB, KVs).
 
 transaction( Fun )->
   zaya_transaction:transaction( Fun ).
