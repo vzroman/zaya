@@ -547,7 +547,7 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
         {W,N}
       end || N <- Nodes]),
 
-    wait_confirm(maps:keys(DBsNs), DBsNs, NsDBs, Workers )
+    wait_confirm(maps:keys(DBsNs), DBsNs, NsDBs, Workers, _Ns = [] )
 %-----------phase 2------------------------------------------
     % Every participant is waiting {'DOWN', _, process, Master, normal}
     % It's accepted as the phase2 confirmation
@@ -560,19 +560,22 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
       throw( Error )
   end.
 
-wait_confirm([], _DBsNs, _NsDBs, _Workers )->
+wait_confirm([], _DBsNs, _NsDBs, _Workers, _Ns )->
   ?LOGDEBUG("transaction confirmed");
-wait_confirm(DBs, DBsNs, NsDBs, Workers )->
+wait_confirm(DBs, DBsNs, NsDBs, Workers, Ns )->
   receive
     {confirm, W}->
       case Workers of
         #{W := N}->
-          % At least one node is ready to commit it's DBs. It's enough for these DBs to move to the phase2
-          ReadyDBs = maps:get(N,NsDBs),
-          wait_confirm(DBs -- ReadyDBs, DBsNs, NsDBs, Workers );
+          Ns1 = [N|Ns],
+          % The DB is ready when all participating ready nodes have confirmed
+          ReadyDBs =
+            [DB || DB <- maps:get(N,NsDBs), length(maps:get(DB,DBsNs) -- Ns1) =:= 0],
+
+          wait_confirm(DBs -- ReadyDBs, DBsNs, NsDBs, Workers, Ns1 );
         _->
           % Who was it?
-          wait_confirm(DBs, DBsNs, NsDBs, Workers )
+          wait_confirm(DBs, DBsNs, NsDBs, Workers, Ns )
       end;
     {'DOWN', _Ref, process, W, Reason}->
       % One node went down
@@ -593,10 +596,10 @@ wait_confirm(DBs, DBsNs, NsDBs, Workers )->
               end
             end, DBsNs),
 
-          wait_confirm(DBs, DBsNs1, maps:remove(N,NsDBs),  RestWorkers );
+          wait_confirm(DBs, DBsNs1, maps:remove(N,NsDBs),  RestWorkers, Ns );
         _->
           % Who was it?
-          wait_confirm(DBs, DBsNs, NsDBs, Workers )
+          wait_confirm(DBs, DBsNs, NsDBs, Workers, Ns )
       end
   end.
 
