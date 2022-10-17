@@ -326,8 +326,8 @@ delete(DB, Keys, Lock)->
 on_abort(DB, KVs)->
   zaya_transaction:on_abort(DB, KVs).
 
-changes(DB, KVs)->
-  zaya_transaction:changes(DB, KVs).
+changes(DB, Keys)->
+  zaya_transaction:changes(DB, Keys).
 
 transaction( Fun )->
   zaya_transaction:transaction( Fun ).
