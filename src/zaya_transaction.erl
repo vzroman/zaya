@@ -422,7 +422,23 @@ do_lock([K|Rest], DB, Nodes, Type, Locks)->
       #{K := {HeldType,_}} = Lock when Type=:= read; HeldType =:= write ->
         Lock;
       _->
-        {Type, lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, Nodes )}
+        % Write locks must be set on each DB copy.
+        % Read locks. If the DB has local copy it's
+        % enough to obtain only local lock because if the transaction
+        % origin node fails the whole transaction will be aborted. Otherwise
+        % The lock must be set at each node holding DB copy.
+        % Because if we set lock only at one (or some copies) they can fall down
+        % while the transaction is not finished then the lock will be lost and the
+        % transaction can become not isolated
+        IsLocal = lists:member(node(), Nodes),
+        LockNodes =
+          if
+            Type =:= read, IsLocal->
+              [node()];
+            true->
+              Nodes
+          end,
+        {Type, lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, LockNodes )}
     end,
 
   do_lock( Rest, DB, Nodes, Type, Locks#{ K => KeyLock } );
