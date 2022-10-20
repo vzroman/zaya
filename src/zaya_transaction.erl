@@ -265,9 +265,9 @@ do_on_abort([{K,V}|Rest], Data )->
           V=:=delete-> ?none;
           true-> V
         end,
-      do_write(Rest, Data#{K => {V0,V1} });
+      do_on_abort(Rest, Data#{K => {V0,V1} });
     _->
-      do_write(Rest, Data)
+      do_on_abort(Rest, Data)
   end;
 do_on_abort([], Data )->
   Data.
