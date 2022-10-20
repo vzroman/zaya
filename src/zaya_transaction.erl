@@ -522,7 +522,12 @@ prepare_data( Data )->
         ToReadKeys =
           [K || {K,{{?none},_}} <- maps:to_list( ToCommit )],
         Values =
-          maps:from_list( zaya_db:read(DB, ToReadKeys) ),
+          if
+            length(ToReadKeys) >0->
+              maps:from_list( zaya_db:read(DB, ToReadKeys) );
+            true->
+              #{}
+          end,
 
         % Prepare the DB's Commit and Rollback
         CommitRollback =
