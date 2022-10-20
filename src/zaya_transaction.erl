@@ -419,7 +419,7 @@ do_lock(_Keys, DB, []= _Nodes, _Type, _Locks)->
 do_lock([K|Rest], DB, Nodes, Type, Locks)->
   KeyLock =
     case Locks of
-      #{K := {HeldType,_}} = Lock when Type=:= read; HeldType =:= write ->
+      #{K := {HeldType,_} = Lock} when Type=:= read; HeldType =:= write ->
         Lock;
       _->
         % Write locks must be set on each DB copy.
