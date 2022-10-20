@@ -426,7 +426,10 @@ log_open()->
 
 restart([Node]) when Node =:= node()->
   ?LOGINFO("single node application restart"),
-  [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
+  [ begin
+      ?CLOSE_DB(DB, Node),
+      zaya_db_srv:open( DB )
+    end || DB <- ?nodeDBs(node()) ],
   ok;
 restart([])->
   ?LOGINFO("single application empty node restart"),
