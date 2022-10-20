@@ -105,7 +105,8 @@
 -export([
   db_subscribe/1, db_subscribe/2,
   notifications_lookup/1,
-  notifications_wait/2
+  notifications_wait/2,
+  schema_subscribe/0, schema_subscribe/1
 ]).
 
 %%=================================================================
@@ -331,6 +332,12 @@ notifications_lookup( DB)->
   zaya_db:lookup( DB ).
 notifications_wait(DB, Timeout)->
   zaya_db:wait(DB, Timeout).
+
+schema_subscribe()->
+  zaya_schema_srv:subscribe().
+schema_subscribe( PID )->
+  zaya_schema_srv:subscribe( PID ).
+
 %%%%---------------------------------------------------------------
 %%%%	TRANSACTION API
 %%%%---------------------------------------------------------------

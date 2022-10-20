@@ -74,8 +74,8 @@
 ).
 
 %---------------------------------Notifications-----------------------------
--define(schemaSubscribe,
-  esubscribe:subscribe(?subscriptions,?schema,self(),?readyNodes)
+-define(schemaSubscribe(PID),
+  esubscribe:subscribe(?subscriptions,?schema,PID,?readyNodes)
 ).
 
 -define(SCHEMA_NOTIFY(A),
