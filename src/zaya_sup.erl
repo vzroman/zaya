@@ -20,7 +20,7 @@ init([]) ->
 
   SubscriptionsServer = #{
     id=>esubscribe,
-    start=>{esubscribe,start_link,[]},
+    start=>{esubscribe,start_link,[?subscriptions]},
     restart=>permanent,
     shutdown=> ?env(stop_timeout, ?DEFAULT_STOP_TIMEOUT),
     type=>worker,

@@ -100,6 +100,15 @@
 ]).
 
 %%=================================================================
+%%	Subscriptions API
+%%=================================================================
+-export([
+  db_subscribe/1, db_subscribe/2,
+  notifications_lookup/1,
+  notifications_wait/2
+]).
+
+%%=================================================================
 %%	Transaction API
 %%=================================================================
 -export([
@@ -311,6 +320,17 @@ foldr( DB, Query, Fun, InAcc)->
 update(DB, Query)->
   zaya_db:update( DB, Query ).
 
+%%%%---------------------------------------------------------------
+%%%%	SUBSCRIPTIONS API
+%%%%---------------------------------------------------------------
+db_subscribe(DB)->
+  zaya_db:subscribe(DB).
+db_subscribe(DB, PID)->
+  zaya_db:subscribe(DB, PID).
+notifications_lookup( DB)->
+  zaya_db:lookup( DB ).
+notifications_wait(DB, Timeout)->
+  zaya_db:wait(DB, Timeout).
 %%%%---------------------------------------------------------------
 %%%%	TRANSACTION API
 %%%%---------------------------------------------------------------

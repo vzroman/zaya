@@ -34,6 +34,15 @@
 ]).
 
 %%=================================================================
+%%	SUBSCRIPTIONS API
+%%=================================================================
+-export([
+  subscribe/1, subscribe/2,
+  lookup/1,
+  wait/2
+]).
+
+%%=================================================================
 %%	INFO API
 %%=================================================================
 -export([
@@ -207,6 +216,27 @@ foldr( DB, Query, Fun, InAcc )->
 
 update( DB, Query )->
   ?write( DB, [ Query ]).
+
+%%=================================================================
+%%	SUBSCRIPTIONS
+%%=================================================================
+subscribe(DB)->
+  subscribe(DB, self()).
+subscribe(DB, PID)->
+  Nodes = ?dbAvailableNodes(DB),
+  case lists:member(node(), Nodes) of
+    true -> esubscribe:subscribe(?subscriptions, DB, PID);
+    _->
+      case ecall:call_one(Nodes, ?MODULE, ?FUNCTION_NAME, [DB,PID]) of
+        {ok,_}-> ok;
+        Error -> Error
+      end
+  end.
+
+lookup(DB)->
+  esubscribe:lookup(?subscriptions,DB).
+wait(DB, Timeout)->
+  esubscribe:wait(?subscriptions, DB, Timeout).
 
 %%=================================================================
 %%	INFO
@@ -502,7 +532,7 @@ masters( DB, Masters )->
   ecall:call_all_wait(?readyNodes, zaya_schema_srv, set_db_masters, [DB,Masters] ).
 
 on_update( DB, Action, Args )->
-  esubscribe:notify( DB, {Action,Args} ),
+  esubscribe:notify(?subscriptions, DB, {Action,Args} ),
   % TODO. Update hash tree
   ok.
 

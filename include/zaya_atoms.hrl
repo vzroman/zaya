@@ -12,5 +12,6 @@
 -define(undefined,undefined).
 
 -define(locks,'$zaya_locks$').
+-define(subscriptions,'$zaya_subscriptions$').
 
 -endif.

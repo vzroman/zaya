@@ -381,7 +381,7 @@ prepare_live_copy( Source, Module, SendNode, CopyRef, Log, _Options )->
   Owner = self(),
   spawn_link(fun()->
     ?LOGINFO("~s live copy, subscribe....",[Log]),
-    esubscribe:subscribe(Source, self(), [SendNode]),
+    esubscribe:subscribe(?subscriptions, Source, self(), [SendNode]),
 
     wait_live_updates(#live{
       source = Source,
@@ -413,10 +413,10 @@ roll_live_updates( Live )->
 
 wait_live_updates(#live{ source = Source, live_ets = LiveEts, owner = Owner }=Live)->
   receive
-    {'$esubscription', Source, {write,[KVs]}, _Node, _Actor}->
+    {?subscriptions, Source, {write,[KVs]}, _Node, _Actor}->
       ets:insert( LiveEts, [{K,{write,V}} || {K,V} <- KVs] ),
       wait_live_updates( Live );
-    {'$esubscription', Source, {delete,[Keys]}, _Node, _Actor}->
+    {?subscriptions, Source, {delete,[Keys]}, _Node, _Actor}->
       ets:insert( LiveEts, [{K,delete} || K <- Keys] ),
       wait_live_updates( Live );
     {roll_updates, Owner}->
@@ -501,10 +501,10 @@ wait_ready(#live{
   log = Log
 } = Live)->
   receive
-    {'$esubscription', Source, {write,[KVs]}, _Node, _Actor}->
+    {?subscriptions, Source, {write,[KVs]}, _Node, _Actor}->
       Module:write(CopyRef, KVs),
       wait_ready(Live);
-    {'$esubscription', Source, {delete,[Keys]}, _Node, _Actor}->
+    {?subscriptions, Source, {delete,[Keys]}, _Node, _Actor}->
       Module:delete(CopyRef, Keys),
       wait_ready(Live)
   after

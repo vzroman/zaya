@@ -75,11 +75,11 @@
 
 %---------------------------------Notifications-----------------------------
 -define(schemaSubscribe,
-  esubscribe:subscribe(?schema,self(),?readyNodes)
+  esubscribe:subscribe(?subscriptions,?schema,self(),?readyNodes)
 ).
 
 -define(SCHEMA_NOTIFY(A),
-  esubscribe:notify(?schema,A)
+  esubscribe:notify(?subscriptions,?schema,A)
 ).
 
 -define(schemaParams,
