@@ -167,14 +167,23 @@ do_read(Keys,DB, Ets)->
     [] ->
       TData;
     ToRead->
-      lists:foldl(fun({K,V},Acc)->
-        Acc#{ K => V }
-      end, TData, read_keys(DB, ToRead ))
+      Values =
+        maps:from_list(read_keys( DB, ToRead )),
+      lists:foldl(fun(K,Acc)->
+        case Values of
+          #{ K := V }->
+            ets:insert(Ets,{#data{db = DB,key = K},{V,V}}),
+            Acc#{ K => V };
+          _->
+            ets:insert(Ets,{#data{db = DB,key = K},{?none,?none}}),
+            Acc
+        end
+      end, TData, ToRead)
   end.
 
 t_data([K|Rest], Ets, DB, Acc)->
   case ets:lookup(Ets,#data{db = DB, key = K}) of
-    [{_,V}]->
+    [{_,{_,V}}]->
       t_data(Rest, Ets, DB, Acc#{K => V});
     _->
       Acc
