@@ -54,7 +54,6 @@
 -define(logRef,persistent_term:get(?log)).
 
 -define(transaction,{?MODULE,'$transaction$'}).
--record(transaction,{data,locks}).
 
 -define(index,{?MODULE,index}).
 -define(t_id, atomics:add_get(persistent_term:get(?index), 1, 1)).
@@ -135,19 +134,20 @@ on_init( Ref )->
 %%-----------------------------------------------------------
 %%  READ
 %%-----------------------------------------------------------
+-record(data,{db, key}).
 read(DB, Keys, Lock) when Lock=:=read; Lock=:=write->
-  DBData = in_context(DB, Keys, Lock, fun(Data)->
-    do_read(DB, Keys, Data)
+  Data = in_context(DB, Keys, Lock, fun(Ets0)->
+    do_read(Keys, DB, Ets0)
   end),
-  data_keys(Keys, DBData);
+  data_keys(Keys, Data);
 
 read(DB, Keys, Lock = none)->
   %--------Dirty read (no lock)---------------------------
   % If the key is already in the transaction data we return it's transaction value.
   % Otherwise we don't add any new keys in the transaction data but read them in dirty mode
-  TData = in_context(DB, Keys, Lock, fun(Data)->
+  TData = in_context(DB, Keys, Lock, fun(Ets)->
     % We don't add anything in transaction data if the keys are not locked
-    Data
+    t_data(Keys, Ets, DB, #{})
   end),
 
   Data =
@@ -156,27 +156,32 @@ read(DB, Keys, Lock = none)->
       DirtyKeys->
         % Add dirty keys
         lists:foldl(fun({K,V},Acc)->
-          Acc#{K => {V,V}}
+          Acc#{K => V}
         end, TData, read_keys(DB,DirtyKeys))
     end,
   data_keys(Keys, Data).
 
-do_read(DB, Keys, Data)->
-  case [K || K <- Keys, not maps:is_key(K, Data)] of
+do_read(Keys,DB, Ets)->
+  TData = t_data(Keys, Ets, DB, #{}),
+  case [K || K <- Keys, not maps:is_key(K, TData)] of
     [] ->
-      Data;
+      TData;
     ToRead->
-      Values =
-        maps:from_list( read_keys(DB, ToRead ) ),
-      lists:foldl(fun(K,Acc)->
-        case Values of
-          #{K:=V}->
-            Acc#{ K => {V,V} };
-          _->
-            Acc#{ K=> {?none,?none} }
-        end
-      end, Data, ToRead)
+      lists:foldl(fun({K,V},Acc)->
+        Acc#{ K => V }
+      end, TData, read_keys(DB, ToRead ))
   end.
+
+t_data([K|Rest], Ets, DB, Acc)->
+  case ets:lookup(Ets,#data{db = DB, key = K}) of
+    [{_,V}]->
+      t_data(Rest, Ets, DB, Acc#{K => V});
+    _->
+      Acc
+  end;
+t_data([], _Ets, _DB, Acc)->
+  Acc.
+
 
 read_keys( DB, Keys )->
   case ?dbRef( DB, node() ) of
@@ -200,7 +205,7 @@ read_keys( DB, Keys )->
 
 data_keys([K|Rest], Data)->
   case Data of
-    #{ K:= {_,V} } when V=/=?none->
+    #{ K:= V } when V=/=?none->
       [{K,V} | data_keys(Rest,Data)];
     _->
       data_keys(Rest, Data)
@@ -213,103 +218,111 @@ data_keys([],_Data)->
 %%-----------------------------------------------------------
 write(DB, KVs, Lock)->
   ensure_editable(DB),
-  in_context(DB, [K || {K,_}<-KVs], Lock, fun(Data)->
-    do_write( KVs, Data )
+  in_context(DB, [K || {K,_}<-KVs], Lock, fun(Ets)->
+    do_write(KVs, DB, Ets )
   end),
   ok.
 
-do_write([{K,V}|Rest], Data )->
-  case Data of
-    #{K := {V0,_}}->
-      do_write(Rest, Data#{K => {V0,V} });
+do_write([{K,V}|Rest], DB, Ets )->
+  Key = #data{db = DB, key = K},
+  case ets:lookup(Ets,Key) of
+    [{_,{V0,_}}]->
+      ets:insert(Ets,{Key,{V0,V}}),
+      do_write(Rest, DB, Ets);
     _->
-      do_write(Rest, Data#{K=>{{?none}, V}})
+      ets:insert(Ets,{ Key, {{?none}, V} }),
+      do_write(Rest, DB, Ets)
   end;
-do_write([], Data )->
-  Data.
+do_write([], _DB, _Data )->
+  ok.
 
 %%-----------------------------------------------------------
 %%  DELETE
 %%-----------------------------------------------------------
 delete(DB, Keys, Lock)->
   ensure_editable(DB),
-  in_context(DB, Keys, Lock, fun(Data)->
-    do_delete(Keys, Data)
+  in_context(DB, Keys, Lock, fun(Ets)->
+    do_delete(Keys, DB, Ets)
   end),
   ok.
 
-do_delete([K|Rest], Data)->
-  case Data of
-    #{K := {V0,_}}->
-      do_delete( Rest, Data#{ K=> {V0,?none} });
+do_delete([K|Rest], DB, Ets)->
+  Key = #data{db = DB, key = K},
+  case ets:lookup(Ets,Key) of
+    [{_,{V0,_}}]->
+      ets:insert(Ets,{Key,{V0,?none}}),
+      do_delete(Rest, DB, Ets);
     _->
-      do_delete( Rest, Data#{ K => {{?none}, ?none}})
+      ets:insert(Ets,{ Key, {{?none}, ?none} }),
+      do_delete(Rest, DB, Ets)
   end;
-do_delete([], Data)->
-  Data.
+do_delete([], _DB, _Ets)->
+  ok.
 
 %%-----------------------------------------------------------
 %%  ROLLBACK VALUES
 %%-----------------------------------------------------------
 on_abort(DB, KVs)->
-  in_context(DB, [K || {K,_}<-KVs], _Lock = none, fun(Data)->
-    do_on_abort( KVs, Data )
+  in_context(DB, [K || {K,_}<-KVs], _Lock = none, fun(Ets)->
+    do_on_abort( KVs, DB, Ets )
   end),
   ok.
 
-do_on_abort([{K,V}|Rest], Data )->
-  case Data of
-    #{K := {{?none},V1}}->
+do_on_abort([{K,V}|Rest], DB, Ets )->
+  Key = #data{db = DB, key = K},
+  case ets:lookup(Ets,Key) of
+    [{_,{{?none},V1}}]->
       V0 =
         if
           V=:=delete-> ?none;
           true-> V
         end,
-      do_on_abort(Rest, Data#{K => {V0,V1} });
+      ets:insert(Ets,{Key,{V0,V1}}),
+      do_on_abort(Rest, DB, Ets);
     _->
-      do_on_abort(Rest, Data)
+      do_on_abort(Rest, DB, Ets)
   end;
-do_on_abort([], Data )->
-  Data.
+do_on_abort([], _DB, _Ets )->
+  ok.
 
 changes(DB, Keys)->
   case get(?transaction) of
-    #transaction{data = Data}->
-      case Data of
-        #{DB := DBChanges}->
-          lists:foldl(fun(K, Acc)->
-            case DBChanges of
-              #{K:= {V,V} }->
-                Acc;
-              #{K:={{?none},_V1}}->
-                V1 =
-                  if
-                    _V1 =:= ?none-> delete;
-                    true->_V1
-                  end,
-                Acc#{ K=> {V1} };
-              #{K:={_V0,_V1}}->
-                V0 =
-                  if
-                    _V0 =:= ?none-> delete;
-                    true->_V0
-                  end,
-                V1 =
-                  if
-                    _V1 =:= ?none-> delete;
-                    true->_V1
-                  end,
-                Acc#{K => {V0,V1}};
-              _->
-                Acc
-            end
-          end,#{},Keys);
-        _->
-          #{}
-      end;
+    Ets when is_reference(Ets)->
+      do_get_changes(Keys,DB,Ets,#{});
     _ ->
       throw(no_transaction)
   end.
+
+do_get_changes([K|Rest],DB,Ets,Acc)->
+  Acc1 =
+    case ets:lookup(Ets,#data{db = DB, key = K}) of
+      [{_,{V,V}}]->
+        Acc;
+      [{_,{{?none},_V1}}]->
+        V1 =
+          if
+            _V1 =:= ?none-> delete;
+            true->_V1
+          end,
+        Acc#{ K=> {V1} };
+      [{_,{_V0,_V1}}]->
+        V0 =
+          if
+            _V0 =:= ?none-> delete;
+            true->_V0
+          end,
+        V1 =
+          if
+            _V1 =:= ?none-> delete;
+            true->_V1
+          end,
+        Acc#{K => {V0,V1}};
+      _->
+        Acc
+    end,
+  do_get_changes(Rest,DB,Ets,Acc1);
+do_get_changes([],_DB,_Ets,Acc)->
+  Acc.
 
 ensure_editable( DB )->
   case ?dbMasters(DB) of
@@ -326,17 +339,24 @@ ensure_editable( DB )->
 %%-----------------------------------------------------------
 transaction(Fun) when is_function(Fun,0)->
   case get(?transaction) of
-    #transaction{locks = PLocks}=Parent->
+     Parent when is_reference(Parent)->
       % Internal transaction
-      try { ok, Fun() }
+      Ets = ets:new(?MODULE,[private,set]),
+      ets:insert(Ets, ets:tab2list(Parent)),
+      put(?transaction,Ets),
+      try
+        Res = Fun(),
+        ets:delete(Parent),
+        {ok, Res}
       catch
         _:{lock,Error}->
           % Lock errors restart the whole transaction starting from external
+          ets:delete( Parent ),
           throw({lock,Error});
         _:Error->
           % Other errors rollback just internal transaction changes and release only it's locks
-          #transaction{locks = Locks} = get(?transaction),
-          release_locks(Locks, PLocks),
+          release_locks(Ets, Parent),
+          ets:delete( Ets ),
           put(?transaction, Parent),
           % The user should decide to abort the whole transaction or not
           {abort,Error}
@@ -350,14 +370,13 @@ transaction(_Fun)->
 
 run_transaction(Fun, Attempts)->
   % Create the transaction storage
-  put(?transaction,#transaction{ data = #{}, locks = #{} }),
+  put(?transaction, ets:new(?MODULE,[private,set]) ),
   try
     Result = Fun(),
 
     % The transaction is ok, try to commit the changes.
     % The locks are held until committed or aborted
-    #transaction{data = Data} = get(?transaction),
-    commit( Data ),
+    commit( get(?transaction) ),
 
     % Committed
     {ok,Result}
@@ -371,29 +390,21 @@ run_transaction(Fun, Attempts)->
       {abort,Error}
   after
     % Always release locks
-    #transaction{locks = Locks} = erase( ?transaction ),
-    release_locks( Locks, #{} )
+    Ets = erase( ?transaction ),
+    release_locks( Ets ),
+    ets:delete( Ets )
   end.
 
 in_context(DB, Keys, Lock, Fun)->
   % read / write / delete actions transaction context
   case get(?transaction) of
-    #transaction{data = Data,locks = Locks}=T->
+    Ets when is_reference(Ets)->
 
       % Obtain locks on all keys before the action starts
-      DBLocks = lock(DB, Keys, Lock, maps:get(DB,Locks,#{}) ),
+      lock(Keys, DB, Lock, Ets ),
 
       % Perform the action
-      DBData = Fun( maps:get(DB,Data,#{}) ),
-
-      % Update the transaction data
-      put( ?transaction, T#transaction{
-        data = Data#{ DB => DBData },
-        locks = Locks#{ DB => DBLocks }
-      }),
-
-      % Return new database context
-      DBData;
+      Fun( Ets );
     _ ->
       throw(no_transaction)
   end.
@@ -401,50 +412,51 @@ in_context(DB, Keys, Lock, Fun)->
 %%-----------------------------------------------------------
 %%  LOCKS
 %%-----------------------------------------------------------
-lock(DB, Keys, Type, Locks) when Type=:=read; Type=:=write->
-  case maps:is_key({?MODULE,DB}, Locks) of
-    true->
-      do_lock( Keys, DB, ?dbAvailableNodes(DB), Type, Locks );
+-record(lock,{ db, key }).
+lock(Keys, DB, Type, Ets) when Type=:=read; Type=:=write->
+  case ets:member(Ets,#lock{db = DB, key = {?MODULE,DB}}) of
+    true -> do_lock( Keys, DB, ?dbAvailableNodes(DB), Type, Ets );
     _->
-      lock( DB, Keys, Type, Locks#{
-        {?MODULE,DB} => {read,lock_key( DB, _IsShared=true, _Timeout=?infinity, ?dbAvailableNodes(DB) )}
-      })
+      Unlock = lock_key( DB, _IsShared=true, _Timeout=?infinity, ?dbAvailableNodes(DB) ),
+      ets:insert(Ets,{#lock{db = DB, key = {?MODULE,DB}},{read,Unlock}}),
+      do_lock( Keys, DB, ?dbAvailableNodes(DB), Type, Ets )
   end;
-lock(_DB, _Keys, none, Locks)->
+lock(_Keys, _DB, none, _Ets)->
   % The lock is not needed
-  Locks.
+  ok.
 
-do_lock(_Keys, DB, []= _Nodes, _Type, _Locks)->
+do_lock(_Keys, DB, []= _Nodes, _Type, _Ets)->
   throw({unavailable,DB});
-do_lock([K|Rest], DB, Nodes, Type, Locks)->
-  KeyLock =
-    case Locks of
-      #{K := {HeldType,_} = Lock} when Type=:= read; HeldType =:= write ->
-        Lock;
-      _->
-        % Write locks must be set on each DB copy.
-        % Read locks. If the DB has local copy it's
-        % enough to obtain only local lock because if the transaction
-        % origin node fails the whole transaction will be aborted. Otherwise
-        % The lock must be set at each node holding DB copy.
-        % Because if we set lock only at one (or some copies) they can fall down
-        % while the transaction is not finished then the lock will be lost and the
-        % transaction can become not isolated
-        IsLocal = lists:member(node(), Nodes),
-        LockNodes =
-          if
-            Type =:= read, IsLocal->
-              [node()];
-            true->
-              Nodes
-          end,
-        {Type, lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, LockNodes )}
-    end,
+do_lock([K|Rest], DB, Nodes, Type, Ets)->
+  LockKey = #lock{db = DB, key = K},
+  case ets:lookup(Ets,LockKey) of
+    [{_,{HeldType,_}}] when Type=:= read; HeldType =:= write->
+      ok;
+    _->
+      % Write locks must be set on each DB copy.
+      % Read locks. If the DB has local copy it's
+      % enough to obtain only local lock because if the transaction
+      % origin node fails the whole transaction will be aborted. Otherwise
+      % The lock must be set at each node holding DB copy.
+      % Because if we set lock only at one (or some copies) they can fall down
+      % while the transaction is not finished then the lock will be lost and the
+      % transaction can become not isolated
+      IsLocal = lists:member(node(), Nodes),
+      LockNodes =
+        if
+          Type =:= read, IsLocal->
+            [node()];
+          true->
+            Nodes
+        end,
+      Unlock = lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, LockNodes ),
+      ets:insert(Ets,{LockKey, {Type, Unlock}})
+  end,
 
-  do_lock( Rest, DB, Nodes, Type, Locks#{ K => KeyLock } );
+  do_lock( Rest, DB, Nodes, Type, Ets );
 
-do_lock([], _DB, _Nodes, _Type, Locks )->
-  Locks.
+do_lock([], _DB, _Nodes, _Type, _Ets )->
+  ok.
 
 lock_key( Key, IsShared, Timeout, Nodes )->
   case elock:lock( ?locks, Key, IsShared, Timeout, Nodes) of
@@ -454,25 +466,29 @@ lock_key( Key, IsShared, Timeout, Nodes )->
       throw({lock,Error})
   end.
 
-release_locks(Locks, Parent )->
-  maps:fold(fun(DB,Keys,_)->
-    ParentKeys = maps:get(DB,Parent,#{}),
-    maps:fold(fun(K,{_Type,Unlock},_)->
-      case maps:is_key(K,ParentKeys) of
-        true -> ignore;
-        _->Unlock()
-      end
-    end,?undefined,Keys)
+release_locks( Ets )->
+  do_release_locks(all_locks( Ets ), #{}).
+release_locks( Ets, ParentEts )->
+  do_release_locks(all_locks( Ets ), all_locks( ParentEts )).
+do_release_locks(Locks, Parent )->
+  maps:fold(fun(Key,Unlock,_)->
+    case maps:is_key(Key, Parent) of
+      true-> ignore;
+      _-> Unlock()
+    end
   end,?undefined,Locks).
+
+all_locks( Ets )->
+  maps:from_list([{{DB,Key}, Unlock} || [DB,Key,Unlock] <- ets:match(Ets,{#lock{db = '$1',key = '$2'},{'_','$3'}})]).
 
 %%-----------------------------------------------------------
 %%  COMMIT
 %%-----------------------------------------------------------
 -record(commit,{ ns, ns_dbs, dbs_ns }).
-commit( Data0 )->
-
-  case prepare_data( Data0 ) of
-    Data when map_size(Data) > 0->
+commit( Ets )->
+  case all_data( Ets ) of
+    Data0 when map_size( Data0 ) > 0->
+      Data = prepare_data( Data0 ),
       case prepare_commit( Data ) of
         #commit{ns = [Node]}->
           % Single node commit
@@ -489,6 +505,17 @@ commit( Data0 )->
       % Nothing to commit
       ok
   end.
+
+all_data(Ets)->
+  lists:foldl(fun([DB,K,Changes], Acc)->
+    case Changes of
+      {V,V}->Acc;
+      _->
+        DBAcc = maps:get(DB,Acc,#{}),
+        Acc#{ DB => DBAcc#{ K => Changes } }
+    end
+  end,#{}, ets:match(Ets,{#data{db = '$1',key = '$2'},'$3'})).
+
 
 prepare_data( Data )->
 
@@ -513,63 +540,56 @@ prepare_data( Data )->
   % ToWrite is [{Key1,Value1},{Key2,Value2}|...]
   % ToDelete is [K1,K2|...]
 
-  maps:fold(fun(DB, Changes, Acc)->
+  maps:fold(fun(DB, ToCommit, Acc)->
 
-    case maps:filter(fun(_K,{V0,V1})-> V0=/=V1 end, Changes) of
-      ToCommit when map_size( ToCommit ) > 0->
+    % Read the keys that are not read yet to be able to rollback them
+    ToReadKeys =
+      [K || {K,{{?none},_}} <- maps:to_list( ToCommit )],
+    Values =
+      if
+        length(ToReadKeys) >0->
+          maps:from_list( zaya_db:read(DB, ToReadKeys) );
+        true->
+          #{}
+      end,
 
-        % Read the keys that are not read yet to be able to rollback them
-        ToReadKeys =
-          [K || {K,{{?none},_}} <- maps:to_list( ToCommit )],
-        Values =
+    % Prepare the DB's Commit and Rollback
+    CommitRollback =
+      maps:fold(fun(K,{V0,V1},{{CW,CD},{RW,RD}})->
+        % Commits
+        Commits=
           if
-            length(ToReadKeys) >0->
-              maps:from_list( zaya_db:read(DB, ToReadKeys) );
+            V1 =:= ?none->
+              {CW, [K|CD]}; % The Key has to be deleted
             true->
-              #{}
+              {[{K,V1}|CW], CD} % The Key has to be written with a V1 value
           end,
 
-        % Prepare the DB's Commit and Rollback
-        CommitRollback =
-          maps:fold(fun(K,{V0,V1},{{CW,CD},{RW,RD}})->
-            % Commits
-            Commits=
-              if
-                V1 =:= ?none->
-                  {CW, [K|CD]}; % The Key has to be deleted
-                true->
-                  {[{K,V1}|CW], CD} % The Key has to be written with a V1 value
-              end,
+        % Rollbacks
+        ActualV0 =
+          if
+            V0=:={?none}-> % The Key doesn't exist in the transaction data, check it in the read results
+              case Values of
+                #{K:=V}->V; % The key has the value
+                _-> ?none   % The Key does not exist
+              end;
+            true-> % The Key is in the transaction data already, accept it's value
+              V0
+          end,
 
-            % Rollbacks
-            ActualV0 =
-              if
-                V0=:={?none}-> % The Key doesn't exist in the transaction data, check it in the read results
-                  case Values of
-                    #{K:=V}->V; % The key has the value
-                    _-> ?none   % The Key does not exist
-                  end;
-                true-> % The Key is in the transaction data already, accept it's value
-                  V0
-              end,
+        Rollbacks =
+          if
+            ActualV0 =:= ?none->
+              {RW,[K|RD]}; % The Key doesn't exist, it has to be deleted in the case of rollback
+            true->
+              {[{K,ActualV0}|RW],RD} % The Key has the value, it has to be written back in the case of rollback
+          end,
 
-            Rollbacks =
-              if
-                ActualV0 =:= ?none->
-                  {RW,[K|RD]}; % The Key doesn't exist, it has to be deleted in the case of rollback
-                true->
-                  {[{K,ActualV0}|RW],RD} % The Key has the value, it has to be written back in the case of rollback
-              end,
+        {Commits, Rollbacks}
 
-            {Commits, Rollbacks}
+      end,{{[],[]}, {[],[]}},ToCommit),
 
-          end,{{[],[]}, {[],[]}},ToCommit),
-
-        Acc#{DB => CommitRollback};
-      _->
-        % DB has no changes to commit
-        Acc
-    end
+    Acc#{DB => CommitRollback}
 
   end, #{}, Data).
 
