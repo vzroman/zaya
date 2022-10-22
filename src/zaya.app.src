@@ -16,7 +16,8 @@
      zaya_leveldb,
      zaya_ets,
      zaya_ets_leveldb,
-     zaya_rocksdb
+     zaya_rocksdb,
+     zaya_ets_rocksdb
   ]},
   {env,[]},
   {modules, []},
