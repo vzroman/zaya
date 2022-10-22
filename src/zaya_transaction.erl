@@ -348,25 +348,19 @@ ensure_editable( DB )->
 %%-----------------------------------------------------------
 transaction(Fun) when is_function(Fun,0)->
   case get(?transaction) of
-     Parent when is_reference(Parent)->
+     Ets when is_reference(Ets)->
       % Internal transaction
-      Ets = ets:new(?MODULE,[private,set]),
-      ets:insert(Ets, ets:tab2list(Parent)),
-      put(?transaction,Ets),
-      try
-        Res = Fun(),
-        ets:delete(Parent),
-        {ok, Res}
+      Rollback = ets:tab2list(Ets),
+      try {ok, Fun()}
       catch
         _:{lock,Error}->
           % Lock errors restart the whole transaction starting from external
-          ets:delete( Parent ),
           throw({lock,Error});
         _:Error->
           % Other errors rollback just internal transaction changes and release only it's locks
-          release_locks(Ets, Parent),
-          ets:delete( Ets ),
-          put(?transaction, Parent),
+          release_locks(Ets, Rollback),
+          ets:delete_all_objects( Ets ),
+          ets:insert(Ets,Rollback),
           % The user should decide to abort the whole transaction or not
           {abort,Error}
       end;
@@ -400,7 +394,7 @@ run_transaction(Fun, Attempts)->
   after
     % Always release locks
     Ets = erase( ?transaction ),
-    release_locks( Ets ),
+    release_locks( Ets, #{}),
     ets:delete( Ets )
   end.
 
@@ -475,20 +469,22 @@ lock_key( Key, IsShared, Timeout, Nodes )->
       throw({lock,Error})
   end.
 
-release_locks( Ets )->
-  do_release_locks(all_locks( Ets ), #{}).
-release_locks( Ets, ParentEts )->
-  do_release_locks(all_locks( Ets ), all_locks( ParentEts )).
-do_release_locks(Locks, Parent )->
-  maps:fold(fun(Key,Unlock,_)->
-    case maps:is_key(Key, Parent) of
-      true-> ignore;
-      _-> Unlock()
-    end
-  end,?undefined,Locks).
+release_locks(Ets, Rollback) when is_list(Rollback)->
+  Parent =
+    maps:from_list([{{DB,K},true} || {#lock{db = DB,key = K},_} <- Rollback]),
+  release_locks(Ets, Parent);
+release_locks(Ets, Parent)->
+  ets:foldl(fun
+    ({ #lock{db = DB, key = K} =Key, {_, Unlock} = Lock }, _)->
+      case maps:is_key({DB,K},Parent) of
+        false -> Unlock();
+        _->
+          % The lock might be upgraded
+          ets:insert(Ets,{Key,Lock} )
+      end;
+    (_,_)-> ignore
+  end, ignore, Ets).
 
-all_locks( Ets )->
-  maps:from_list([{{DB,Key}, Unlock} || [DB,Key,Unlock] <- ets:match(Ets,{#lock{db = '$1',key = '$2'},{'_','$3'}})]).
 
 %%-----------------------------------------------------------
 %%  COMMIT
