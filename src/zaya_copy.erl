@@ -554,7 +554,7 @@ fill(S,C) when C>0 ->
 fill(_S,_C)->
   ok.
 
-% Test = zaya_copy:debug(test, 200000000)
+% Test2 = zaya_copy:debug(test1, 200000000)
 % exit(Test,shutdown).
 % zaya_copy:get_hash(test)
 

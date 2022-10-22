@@ -15,7 +15,8 @@
      elock,
      zaya_leveldb,
      zaya_ets,
-     zaya_ets_leveldb
+     zaya_ets_leveldb,
+     zaya_rocksdb
   ]},
   {env,[]},
   {modules, []},
