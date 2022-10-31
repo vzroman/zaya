@@ -6,18 +6,19 @@
   {applications,
    [kernel,
     stdlib,
-    lager
+    lager,
+    ecall,
+    epipe,
+    esubscribe,
+    elock,
+    zaya_leveldb,
+    zaya_ets,
+    zaya_ets_leveldb,
+    zaya_rocksdb,
+    zaya_ets_rocksdb
    ]},
   {included_applications,[
-     ecall,
-     epipe,
-     esubscribe,
-     elock,
-     zaya_leveldb,
-     zaya_ets,
-     zaya_ets_leveldb,
-     zaya_rocksdb,
-     zaya_ets_rocksdb
+
   ]},
   {env,[]},
   {modules, []},
