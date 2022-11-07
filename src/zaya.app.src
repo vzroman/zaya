@@ -2,7 +2,6 @@
  [{description, "Distributed multi-database management system based on Erlang technologies"},
   {vsn, git},
   {registered, []},
-  {mod, {zaya_app, []}},
   {applications,
    [kernel,
     stdlib,
