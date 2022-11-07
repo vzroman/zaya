@@ -9,11 +9,18 @@
 
 -export([
   start_link/0,
+  stop/0,
   init/1
 ]).
 
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+
+stop()->
+  case whereis( ?MODULE ) of
+    PID when is_pid(PID)-> exit(PID, shutdown);
+    _-> not_started
+  end.
 
 
 init([]) ->
