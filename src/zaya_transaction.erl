@@ -151,7 +151,7 @@ read(DB, Keys, Lock = none)->
   end),
 
   Data =
-    case Keys -- maps:keys( TData ) of
+    case [K || K <- Keys, not maps:is_key(K, TData)] of
       []-> TData;
       DirtyKeys->
         % Add dirty keys
