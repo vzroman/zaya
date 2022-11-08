@@ -700,7 +700,8 @@ commit_request( Master, DBs )->
   receive
     {'DOWN', _Ref, process, Master, normal} ->
 %-----------phase 2------------------------------------------
-      commit2( LogID );
+      commit2( LogID ),
+      on_commit(DBs);
 %-----------rollback------------------------------------------
     {'DOWN', _Ref, process, Master, Reason} ->
       ?LOGDEBUG("rollback commit master down ~p",[Reason]),
