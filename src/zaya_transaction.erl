@@ -11,7 +11,7 @@
     rocksdb => #{
       %compression_algorithm => todo,
       open_options=>#{
-        total_threads => 64,
+        total_threads => 1,
         create_if_missing => false,
         %create_missing_column_families => todo,
         %error_if_exists => false,
@@ -24,7 +24,7 @@
         % db_log_dir => todo,
         % wal_dir => todo,
         % delete_obsolete_files_period_micros => todo,
-        max_background_jobs => 32,
+        max_background_jobs => 1,
         % max_background_compactions => todo,
         % max_background_flushes => todo,
         % max_log_file_size => todo,
@@ -43,13 +43,13 @@
         % stats_dump_period_sec => todo,
         % advise_random_on_open => todo,
         % access_hint => todo,
-        compaction_readahead_size => 2 * 1024 * 1024,
+        %compaction_readahead_size => 2 * 1024 * 1024,
         % new_table_reader_for_compaction_inputs => todo,
         % use_adaptive_mutex => todo,
         % bytes_per_sync => todo,
         % skip_stats_update_on_db_open => todo,
         % wal_recovery_mode => todo,
-        allow_concurrent_memtable_write => true,
+        %allow_concurrent_memtable_write => true,
         % enable_write_thread_adaptive_yield => todo,
         db_write_buffer_size => 512 * 1024 * 1024,
         % in_memory => todo,
@@ -60,7 +60,7 @@
         % atomic_flush => todo,
         % use_direct_reads => todo,
         % use_direct_io_for_flush_and_compaction => todo,
-        % enable_pipelined_write => todo,
+        enable_pipelined_write => true,
         unordered_write => true
         %two_write_queues => true
         % statistics => todo
@@ -68,7 +68,7 @@
       read => #{
         % read_tier => todo,
         verify_checksums => false,
-        fill_cache => true
+        fill_cache => false
         % iterate_upper_bound => todo,
         % iterate_lower_bound => todo,
         % tailing => todo,
