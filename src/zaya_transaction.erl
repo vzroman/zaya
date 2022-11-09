@@ -4,84 +4,47 @@
 -include("zaya.hrl").
 -include("zaya_schema.hrl").
 
--define(logModule, zaya_rocksdb).
+-define(logModule, zaya_leveldb).
 
 -define(logParams,
   #{
-    rocksdb => #{
+    eleveldb => #{
       %compression_algorithm => todo,
       open_options=>#{
-        total_threads => 1,
         create_if_missing => false,
-        %create_missing_column_families => todo,
-        %error_if_exists => false,
+        error_if_exists => false,
+        write_buffer_size => 512 * 1024 * 1024,
+        %sst_block_size => todo,
+        %block_restart_interval = todo,
+        %block_size_steps => todo,
         paranoid_checks => false,
-        % compression => todo,
-        % max_open_files => todo,
-        % max_total_wal_size => todo,
-        % use_fsync => todo,
-        % db_paths => todo,
-        % db_log_dir => todo,
-        % wal_dir => todo,
-        % delete_obsolete_files_period_micros => todo,
-        max_background_jobs => 1,
-        % max_background_compactions => todo,
-        % max_background_flushes => todo,
-        % max_log_file_size => todo,
-        % log_file_time_to_roll => todo,
-        % keep_log_file_num => todo,
-        % max_manifest_file_size => todo,
-        % table_cache_numshardbits => todo,
-        % wal_ttl_seconds => todo,
-        % manual_wal_flush => todo,
-        % wal_size_limit_mb => todo,
-        % manifest_preallocation_size => todo,
-        % allow_mmap_reads => todo,
-        % allow_mmap_writes => todo,
-        % is_fd_close_on_exec => todo,
-        % skip_log_error_on_recovery => todo,
-        % stats_dump_period_sec => todo,
-        % advise_random_on_open => todo,
-        % access_hint => todo,
-        %compaction_readahead_size => 2 * 1024 * 1024,
-        % new_table_reader_for_compaction_inputs => todo,
-        % use_adaptive_mutex => todo,
-        % bytes_per_sync => todo,
-        % skip_stats_update_on_db_open => todo,
-        % wal_recovery_mode => todo,
-        %allow_concurrent_memtable_write => true,
-        % enable_write_thread_adaptive_yield => todo,
-        db_write_buffer_size => 512 * 1024 * 1024,
-        % in_memory => todo,
-        % rate_limiter => todo,
-        % sst_file_manager => todo,
-        % write_buffer_manager => todo,
-        % max_subcompactions => todo,
-        % atomic_flush => todo,
-        % use_direct_reads => todo,
-        % use_direct_io_for_flush_and_compaction => todo,
-        enable_pipelined_write => true,
-        unordered_write => true
-        %two_write_queues => true
-        % statistics => todo
+        verify_compactions => false,
+        compression => false,
+        use_bloomfilter => false
+        %total_memory => todo,
+        %total_leveldb_mem => todo,
+        %total_leveldb_mem_percent => todo,
+        %is_internal_db => todo,
+        %limited_developer_mem => todo,
+        %eleveldb_threads => TODO pos_integer()
+        %fadvise_willneed => TODO boolean()
+        %block_cache_threshold => TODO pos_integer()
+        %delete_threshold => pos_integer()
+        %tiered_slow_level => pos_integer()
+        %tiered_fast_prefix => TODO string()
+        %tiered_slow_prefix => TODO string()
+        %cache_object_warming => TODO
+        %expiry_enabled => TODO boolean()
+        %expiry_minutes => TODO pos_integer()
+        %whole_file_expiry => boolean()
       },
       read => #{
-        % read_tier => todo,
         verify_checksums => false,
         fill_cache => false
-        % iterate_upper_bound => todo,
-        % iterate_lower_bound => todo,
-        % tailing => todo,
-        % total_order_seek => todo,
-        % prefix_same_as_start => todo,
-        % snapshot => todo
+        %iterator_refresh =todo
       },
       write => #{
         sync => false
-        % disable_wal => true,
-        % ignore_missing_column_families => todo,
-        % no_slowdown => todo,
-        % low_pri => todo
       }
     }
   }
