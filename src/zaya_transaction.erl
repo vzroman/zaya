@@ -97,6 +97,7 @@
 %%	Internal API
 %%=================================================================
 -export([
+  single_key_commit/1,
   single_node_commit/1,
   commit_request/2
 ]).
@@ -472,16 +473,29 @@ commit( Data0 )->
 
   case prepare_data( Data0 ) of
     Data when map_size(Data) > 0->
-      case prepare_commit( Data ) of
-        #commit{ns = [Node]}->
-          % Single node commit
-          case rpc:call(Node,?MODULE, single_node_commit, [ Data ]) of
+
+      IsSingleKey =
+        if
+          map_size(Data) =:= 1->
+            [Keys] = maps:values( Data ),
+            length(Keys) =:= 1;
+          true ->
+            false
+        end,
+
+      Commit = #commit{ns = Ns} = prepare_commit( Data ),
+
+      if
+        IsSingleKey ->
+          single_key_commit( Data, Ns );
+        length(Ns) =:= 1 ->
+          case rpc:call(hd(Ns),?MODULE, single_node_commit, [ Data ]) of
             {badrpc, Reason}->
               throw( Reason );
             _->
               ok
           end;
-        Commit->
+        true ->
           multi_node_commit(Data, Commit)
       end;
     _->
@@ -599,6 +613,26 @@ prepare_commit( Data )->
     ns_dbs = maps:from_list(NsDBs),
     dbs_ns = maps:from_list(DBsNs)
   }.
+
+%%-----------------------------------------------------------
+%%  SINGLE KEY COMMIT
+%%-----------------------------------------------------------
+single_key_commit(DBs, [Node])->
+  case rpc:call(Node,?MODULE, ?FUNCTION_NAME, [ DBs ]) of
+    {badrpc, Reason}->
+      throw( Reason );
+    _->
+      ok
+  end;
+single_key_commit(DBs, Ns)->
+  case ecall:call_any( Ns, ?MODULE, ?FUNCTION_NAME, [ DBs ]) of
+    {ok,_}-> ok;
+    {error, Error}-> throw( Error )
+  end.
+
+single_key_commit(DBs)->
+  dump_dbs( DBs ),
+  on_commit( DBs ).
 
 %%-----------------------------------------------------------
 %%  SINGLE NODE COMMIT
