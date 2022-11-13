@@ -477,8 +477,8 @@ commit( Data0 )->
       IsSingleKey =
         if
           map_size(Data) =:= 1->
-            [Keys] = maps:values( Data ),
-            map_size(Keys) =:= 1;
+            [{{WriteKeys, DeleteKeys}, _}] = maps:values( Data ),
+            (length( WriteKeys ) + length(DeleteKeys)) =:= 1;
           true ->
             false
         end,
@@ -617,22 +617,22 @@ prepare_commit( Data )->
 %%-----------------------------------------------------------
 %%  SINGLE KEY COMMIT
 %%-----------------------------------------------------------
-single_key_commit(DBs, [Node])->
-  case rpc:call(Node,?MODULE, ?FUNCTION_NAME, [ DBs ]) of
+single_key_commit(Data, [Node])->
+  case rpc:call(Node,?MODULE, ?FUNCTION_NAME, [ Data ]) of
     {badrpc, Reason}->
       throw( Reason );
     _->
       ok
   end;
-single_key_commit(DBs, Ns)->
-  case ecall:call_any( Ns, ?MODULE, ?FUNCTION_NAME, [ DBs ]) of
+single_key_commit(Data, Ns)->
+  case ecall:call_any( Ns, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
     {ok,_}-> ok;
     {error, Error}-> throw( Error )
   end.
 
-single_key_commit(DBs)->
-  dump_dbs( DBs ),
-  on_commit( DBs ).
+single_key_commit( Data )->
+  dump_dbs( Data ),
+  on_commit( Data ).
 
 %%-----------------------------------------------------------
 %%  SINGLE NODE COMMIT
