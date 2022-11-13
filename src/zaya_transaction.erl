@@ -478,7 +478,7 @@ commit( Data0 )->
         if
           map_size(Data) =:= 1->
             [Keys] = maps:values( Data ),
-            length(Keys) =:= 1;
+            map_size(Keys) =:= 1;
           true ->
             false
         end,
