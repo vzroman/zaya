@@ -96,7 +96,7 @@ not_available( F )->
     F=:=write; F=:=update->
       ?not_available;
     F=:=next;F=:=prev;F=:=first;F=:=last->
-      ?last;
+      ?undefined;
     true->[]
   end.
 
