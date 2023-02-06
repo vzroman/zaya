@@ -179,7 +179,7 @@ do_read(DB, Keys, Data)->
   end.
 
 read_keys( DB, Keys )->
-  case ?dbRef( DB, node() ) of
+  case ?dbRefMod( DB ) of
     ?undefined ->
       zaya_db:read( DB, Keys );
     _->
@@ -641,7 +641,7 @@ single_node_commit( DBs )->
   LogID = commit1( DBs ),
   try
     commit2( LogID ),
-    spawn(fun()-> on_commit( DBs ) end)
+    on_commit( DBs )
   catch
     _:E->
       ?LOGDEBUG("phase 2 single node commit error ~p",[E]),
@@ -774,8 +774,7 @@ on_commit(DBs)->
 
 dump_dbs( DBs )->
   maps:fold(fun(DB,{{Write,Delete},_Rollback},_)->
-    Module = ?dbModule(DB),
-    Ref = ?dbRef(DB,node()),
+    {Ref, Module} = ?dbRefMod( DB ),
     if
       length(Write)> 0 -> ok = Module:write( Ref, Write );
       true-> ignore
@@ -797,8 +796,7 @@ commit_rollback( LogID, DBs )->
 
 rollback_dbs( DBs )->
   maps:fold(fun(DB,{_Commit,{Write,Delete}},_)->
-    Module = ?dbModule(DB),
-    Ref = ?dbRef(DB,node()),
+    {Ref, Module} = ?dbRefMod( DB ),
     if
       length(Write)> 0 ->
         try ok = Module:write( Ref, Write )
