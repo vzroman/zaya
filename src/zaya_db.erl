@@ -153,19 +153,32 @@ remote_result(Type,Result) ->
   end
 ).
 
+-define(writeLocal(DB, Args),
+  begin
+    {_@Ref, _@M} = ?dbRefMod( DB ),
+    case ?LOCAL_CALL( _@M, _@Ref, Args) of
+      ?not_available->
+        ?not_available;
+      _@Res->
+        on_update(DB, ?FUNCTION_NAME, Args),
+        _@Res
+    end
+  end
+).
+
 -define(write(DB, Args),
   case DB of
     _ when is_atom( DB ) ->
-      ?REMOTE_CALL( ?dbAvailableNodes(DB), call_any, {call,DB}, Args );
-    {call, _@DB}->
-      {_@Ref, _@M} = ?dbRefMod( _@DB ),
-      case ?LOCAL_CALL( _@M, _@Ref, Args) of
-        ?not_available->
-          ?not_available;
-        _@Res->
-          on_update(_@DB, ?FUNCTION_NAME, Args),
-          _@Res
+      _@DBNs = ?dbAvailableNodes(DB),
+      case lists:member(node(), _@DBNs ) of
+        true ->
+          ?REMOTE_CALL( _@DBNs--[node()], cast_all, {call,DB}, Args ),
+          ?writeLocal(DB, Args);
+        _ ->
+          ?REMOTE_CALL( _@DBNs, call_any, {call,DB}, Args )
       end;
+    {call, _@DB}->
+      ?writeLocal(_@DB, Args);
     _->
       ?NOT_AVAILABLE
   end
