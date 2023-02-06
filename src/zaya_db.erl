@@ -139,17 +139,14 @@ remote_result(Type,Result) ->
 -define(read(DB, Args),
   case DB of
     _ when is_atom( DB )->
-      _@Ref = ?dbRef( DB, node() ),
-      if
-        _@Ref =:= ?undefined->
-          ?REMOTE_CALL( ?dbAvailableNodes(DB), call_one, {call,DB}, Args );
-        true->
-          _@M = ?dbModule(DB),
-          ?LOCAL_CALL(_@M, _@Ref, Args)
+      case ?dbRefMod( DB ) of
+        {_@Ref, _@M}->
+          ?LOCAL_CALL(_@M, _@Ref, Args);
+        _->
+          ?REMOTE_CALL( ?dbAvailableNodes(DB), call_one, {call,DB}, Args )
       end;
     {call,_@DB}->
-      _@M = ?dbModule(_@DB),
-      _@Ref = ?dbRef(_@DB,node()),
+      {_@Ref, _@M} = ?dbRefMod( DB ),
       ?LOCAL_CALL( _@M, _@Ref, Args );
     _->
       ?NOT_AVAILABLE
@@ -161,8 +158,7 @@ remote_result(Type,Result) ->
     _ when is_atom( DB ) ->
       ?REMOTE_CALL( ?dbAvailableNodes(DB), call_any, {call,DB}, Args );
     {call, _@DB}->
-      _@M = ?dbModule(_@DB),
-      _@Ref = ?dbRef(_@DB,node()),
+      {_@Ref, _@M} = ?dbRefMod( _@DB ),
       case ?LOCAL_CALL( _@M, _@Ref, Args) of
         ?not_available->
           ?not_available;

@@ -265,6 +265,10 @@
 ).
 
 %------------------------by DBs--------------------------------
+-define(dbRefMod(DB),
+  persistent_term:get({db,DB}, ?undefined)
+).
+
 -define(dbModule(DB),
 
   ?schemaRead({db,DB,'@module@'})
@@ -398,6 +402,10 @@
   begin
     ?SCHEMA_WRITE({db,DB,'@ref@',N},Ref),
     ?SCHEMA_WRITE({db,DB,'@nodes@'}, (?schemaRead({db,DB,'@nodes@'})--[N])++[N] ),
+    if
+      N =:= node() -> persistent_term:put({db,DB}, {Ref, ?dbModule(DB)});
+      true -> ignore
+    end,
     ?SCHEMA_NOTIFY({'open_db',DB,N})
   end
 ).
@@ -406,6 +414,10 @@
   begin
     ?SCHEMA_WRITE({db,DB,'@nodes@'}, ?schemaRead({db,DB,'@nodes@'})--[N] ),
     ?SCHEMA_DELETE({db,DB,'@ref@',N}),
+    if
+      N =:= node() -> persistent_term:erase({db,DB});
+      true -> ignore
+    end,
     ?SCHEMA_NOTIFY({'close_db',DB,N})
   end
 ).
