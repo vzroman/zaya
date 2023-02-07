@@ -150,16 +150,20 @@ read(DB, Keys, Lock = none)->
     Data
   end),
 
-  Data =
-    case [K || K <- Keys, not maps:is_key(K, TData)] of
-      []-> TData;
-      DirtyKeys->
-        % Add dirty keys
+  DirtyKeys = [K || K <- Keys, not maps:is_key(K, TData)],
+  if
+    DirtyKeys =:= [] ->
+      data_keys( Keys, TData );
+    length( DirtyKeys ) =:= length( Keys )->
+      zaya_db:read( DB, Keys );
+    true->
+      % Add dirty keys
+      Data =
         lists:foldl(fun({K,V},Acc)->
           Acc#{K => {V,V}}
-        end, TData, read_keys(DB,DirtyKeys))
-    end,
-  data_keys(Keys, Data).
+        end, TData, zaya_db:read(DB, DirtyKeys)),
+      data_keys(Keys, Data)
+  end.
 
 do_read(DB, Keys, Data)->
   case [K || K <- Keys, not maps:is_key(K, Data)] of
@@ -167,7 +171,7 @@ do_read(DB, Keys, Data)->
       Data;
     ToRead->
       Values =
-        maps:from_list( read_keys(DB, ToRead ) ),
+        maps:from_list( zaya_db:read(DB, ToRead ) ),
       lists:foldl(fun(K,Acc)->
         case Values of
           #{K:=V}->
@@ -176,26 +180,6 @@ do_read(DB, Keys, Data)->
             Acc#{ K=> {?none,?none} }
         end
       end, Data, ToRead)
-  end.
-
-read_keys( DB, Keys )->
-  case ?dbRefMod( DB ) of
-    ?undefined ->
-      zaya_db:read( DB, Keys );
-    _->
-      % Check if the DB is in the recovery state
-      AvailableNodes = ?dbAvailableNodes(DB),
-      case lists:member(node(),AvailableNodes) of
-        true ->
-          % The local copy is ready
-          zaya_db:read( DB, Keys );
-        _->
-          % The local copy is in the recovery state read from valid copies
-          case ecall:call_one(AvailableNodes, zaya_db, read,[ DB, Keys ]) of
-            {ok,{_,Result}}-> Result;
-            _->[]
-          end
-      end
   end.
 
 data_keys([K|Rest], Data)->
@@ -212,7 +196,6 @@ data_keys([],_Data)->
 %%  WRITE
 %%-----------------------------------------------------------
 write(DB, KVs, Lock)->
-  ensure_editable(DB),
   in_context(DB, [K || {K,_}<-KVs], Lock, fun(Data)->
     do_write( KVs, Data )
   end),
@@ -232,7 +215,6 @@ do_write([], Data )->
 %%  DELETE
 %%-----------------------------------------------------------
 delete(DB, Keys, Lock)->
-  ensure_editable(DB),
   in_context(DB, Keys, Lock, fun(Data)->
     do_delete(Keys, Data)
   end),
@@ -313,11 +295,13 @@ changes(DB, Keys)->
 
 ensure_editable( DB )->
   case ?dbMasters(DB) of
-    []-> ok;
-    Nodes->
-      case Nodes -- (?dbAvailableNodes(DB) -- Nodes) of
+    []->
+      ?dbAvailableNodes(DB);
+    Masters->
+      Nodes = ?dbAvailableNodes(DB),
+      case Masters -- (Nodes -- Masters) of
         []-> throw({unavailable, DB});
-        _-> ok
+        _-> Nodes
       end
   end.
 
@@ -594,11 +578,11 @@ prepare_commit( Data )->
   % The nodes hosting the database
   DBsNs =
     [ {DB,
-        case ?dbAvailableNodes(DB) of
+        case ensure_editable(DB) of
           [] -> throw({unavailable, DB});
           Nodes -> Nodes
         end
-      } || DB <- maps:keys(Data) ],
+      } || DB <- DBs ],
 
   % All participating nodes
   Ns =
@@ -606,7 +590,7 @@ prepare_commit( Data )->
 
   % Databases that each node has to commit
   NsDBs =
-    [ {N, ordsets:intersection( DBs, ordsets:from_list(?nodeDBs(N)) )} || N <- Ns ],
+    [ {N, [DB || {DB, DBNs} <- DBsNs, lists:member(N, DBNs) ]} || N <- Ns ],
 
   #commit{
     ns=Ns,

@@ -265,10 +265,6 @@
 ).
 
 %------------------------by DBs--------------------------------
--define(dbRefMod(DB),
-  persistent_term:get({db,DB}, ?undefined)
-).
-
 -define(dbModule(DB),
 
   ?schemaRead({db,DB,'@module@'})
@@ -280,11 +276,28 @@
 
 ).
 
--define(dbAvailableNodes(DB),
-
-  ?schemaRead({db,DB,'@nodes@'})
-
+-define(dbRefMod(DB),
+  persistent_term:get({db,DB,'@mod_ref@'}, ?undefined)
 ).
+
+-define(DB_REF_MOD(DB),
+  persistent_term:erase({db,DB,'@mod_ref@'})
+).
+-define(DB_REF_MOD(DB,Ref),
+  persistent_term:put({db,DB,'@mod_ref@'}, {Ref, ?dbModule(DB)})
+).
+
+-define(dbAvailableNodes(DB),
+  persistent_term:get({db,DB,'@nodes@'}, [])
+).
+
+-define(DB_AVAILABLE_NODES(DB),
+  persistent_term:erase({db,DB,'@nodes@'})
+).
+-define(DB_AVAILABLE_NODES(DB, Ns),
+  persistent_term:put({db,DB,'@nodes@'}, Ns)
+).
+
 -define(dbSource(DB),
 
   case
@@ -380,12 +393,26 @@
 ).
 
 -define(dbMasters(DB),
-  case ?schemaRead({db,DB,'@masters@'}) of
-    ?undefined -> [];
-    _@Ns -> _@Ns
+  case persistent_term:get({db,DB,'@masters@'}, ?undefined) of
+    ?undefined->
+      case ?schemaRead({db,DB,'@masters@'}) of
+        ?undefined ->
+          persistent_term:put({db,DB,'@masters@'},[]),
+          [];
+        _@Ns ->
+          persistent_term:put({db,DB,'@masters@'},_@Ns),
+          _@Ns
+      end;
+    _@Ns->
+      _@Ns
   end
 ).
--define(dbMasters(DB,Ns), ?SCHEMA_WRITE({db,DB,'@masters@'},Ns)).
+-define(dbMasters(DB,Ns),
+  begin
+    ?SCHEMA_WRITE({db,DB,'@masters@'},Ns),
+    persistent_term:put({db,DB,'@masters@'},Ns)
+  end
+).
 
 %=======================================================================================
 %             SCHEMA TRANSFORMATION
@@ -393,7 +420,6 @@
 -define(ADD_DB(DB,M),
   begin
     ?SCHEMA_WRITE({db,DB,'@module@'},M),
-    ?SCHEMA_WRITE({db,DB,'@nodes@'}, [] ),
     ?SCHEMA_NOTIFY({add_db,DB})
   end
 ).
@@ -401,9 +427,9 @@
 -define(OPEN_DB(DB,N,Ref),
   begin
     ?SCHEMA_WRITE({db,DB,'@ref@',N},Ref),
-    ?SCHEMA_WRITE({db,DB,'@nodes@'}, (?schemaRead({db,DB,'@nodes@'})--[N])++[N] ),
+    ?DB_AVAILABLE_NODES(DB, (?dbAvailableNodes(DB) -- [N]) ++ [N]),
     if
-      N =:= node() -> persistent_term:put({db,DB}, {Ref, ?dbModule(DB)});
+      N =:= node() -> ?DB_REF_MOD(DB, Ref);
       true -> ignore
     end,
     ?SCHEMA_NOTIFY({'open_db',DB,N})
@@ -412,10 +438,10 @@
 
 -define(CLOSE_DB(DB,N),
   begin
-    ?SCHEMA_WRITE({db,DB,'@nodes@'}, ?schemaRead({db,DB,'@nodes@'})--[N] ),
+    ?DB_AVAILABLE_NODES(DB, ?dbAvailableNodes(DB) -- [N]),
     ?SCHEMA_DELETE({db,DB,'@ref@',N}),
     if
-      N =:= node() -> persistent_term:erase({db,DB});
+      N =:= node() -> ?DB_REF_MOD(DB);
       true -> ignore
     end,
     ?SCHEMA_NOTIFY({'close_db',DB,N})
@@ -459,16 +485,12 @@
   end
 ).
 
--define(SET_DB_NODES(DB,Ns),
-  ?SCHEMA_WRITE({db,DB,'@nodes@'}, Ns )
-).
-
 -define(REMOVE_DB(DB),
   begin
     [ ?REMOVE_DB_COPY(DB,_@N) || _@N <- ?dbAllNodes(DB)],
     ?SCHEMA_DELETE({db,DB,'@module@'}),
     ?SCHEMA_DELETE({db,DB,'@masters@'}),
-    ?SCHEMA_DELETE({db,DB,'@nodes@'}),
+    ?DB_AVAILABLE_NODES(DB),
     ?SCHEMA_NOTIFY({remove_db,DB})
   end
 ).

@@ -315,7 +315,7 @@ handle_call({set_db_masters, DB, Masters}, From, State) ->
 handle_call({set_db_nodes, DB, Nodes}, From, State) ->
 
   try
-    ?SET_DB_NODES( DB, Nodes ),
+    ?DB_AVAILABLE_NODES( DB, Nodes ),
     gen_server:reply(From,ok),
     ?LOGINFO("~p set available nodes ~p",[DB, Nodes])
   catch
