@@ -8,11 +8,24 @@
 -define(m_ets,zaya_ets).
 -define(m_ets_leveldb,zaya_ets_leveldb).
 -define(m_leveldb,zaya_leveldb).
--define(modules,[?m_ets,?m_ets_leveldb,?m_leveldb]).
+-define(m_rocksdb,zaya_rocksdb).
+-define(m_ets_rocksdb,zaya_ets_rocksdb).
+-define(m_pterm,zaya_pterm).
+-define(m_pterm_leveldb,zaya_pterm_leveldb).
+
+-define(modules,[
+  ?m_ets,
+  ?m_ets_leveldb,
+  ?m_leveldb,
+  ?m_rocksdb,
+  ?m_ets_rocksdb,
+  ?m_pterm,
+  ?m_pterm_leveldb
+]).
 
 %--------------------Schema storage type---------------------------------
 -define(schemaModule,
-                                        ?m_ets_leveldb
+                                        ?m_pterm_leveldb
 ).
 
 %--------------------------------API----------------------------------------
@@ -85,7 +98,7 @@
 -define(schemaParams,
   #{
     dir => ?schemaPath,
-    ets => #{},
+    pterm => #{},
     leveldb => #{
       eleveldb => #{
         %compression_algorithm => todo,
