@@ -14,7 +14,9 @@
     zaya_ets,
     zaya_ets_leveldb,
     zaya_rocksdb,
-    zaya_ets_rocksdb
+    zaya_ets_rocksdb,
+    zaya_pterm,
+    zaya_pterm_leveldb
    ]},
   {included_applications,[
 
