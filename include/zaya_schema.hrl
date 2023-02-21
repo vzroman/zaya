@@ -301,14 +301,14 @@
 ).
 
 -define(dbAvailableNodes(DB),
-  persistent_term:get({db,DB,'@nodes@'}, [])
+  ?schemaRead({db,DB,'@nodes@'})
 ).
 
 -define(DB_AVAILABLE_NODES(DB),
-  persistent_term:erase({db,DB,'@nodes@'})
+  ?SCHEMA_DELETE({db,DB,'@nodes@'})
 ).
 -define(DB_AVAILABLE_NODES(DB, Ns),
-  persistent_term:put({db,DB,'@nodes@'}, Ns)
+  ?SCHEMA_WRITE({db,DB,'@nodes@'}, Ns )
 ).
 
 -define(dbSource(DB),
@@ -433,6 +433,7 @@
 -define(ADD_DB(DB,M),
   begin
     ?SCHEMA_WRITE({db,DB,'@module@'},M),
+    ?SCHEMA_WRITE({db,DB,'@nodes@'}, [] ),
     ?SCHEMA_NOTIFY({add_db,DB})
   end
 ).
