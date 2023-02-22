@@ -146,7 +146,7 @@ remote_result(Type,Result) ->
           ?REMOTE_CALL( ?dbAvailableNodes(DB), call_one, {call,DB}, Args )
       end;
     {call,_@DB}->
-      {_@Ref, _@M} = ?dbRefMod( DB ),
+      {_@Ref, _@M} = ?dbRefMod( _@DB ),
       ?LOCAL_CALL( _@M, _@Ref, Args );
     _->
       ?NOT_AVAILABLE
