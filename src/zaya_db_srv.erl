@@ -167,19 +167,23 @@ handle_event(state_timeout, run, open, #data{db = DB, module = Module} = Data) -
 
   update_masters( DB ),
 
-  case update_nodes( DB ) of
-    recover ->
-      {next_state, recover, Data, [ {state_timeout, 0, run } ] };
-    ok->
+  update_nodes( ?dbMasters(DB), DB ),
+
+
+  case ?dbAllNodes( DB ) of
+    [Node] when Node =:= node()->
       try
         Ref = Module:open( default_params(DB, ?dbNodeParams(DB,node())) ),
-        ?LOGINFO("~p database open",[DB]),
+        ?LOGINFO("~p database has single copy, open",[DB]),
         {next_state, rollback_transactions, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
       catch
         _:E->
           ?LOGERROR("~p database open error ~p",[DB,E]),
           { keep_state_and_data, [ {state_timeout, 5000, run } ] }
-      end
+      end;
+    _->
+      ?LOGINFO("~p has copies on ~p nodes which can have more actual data, try to recover"),
+      {next_state, recover, Data, [ {state_timeout, 0, run } ] }
   end;
 
 handle_event(state_timeout, run, rollback_transactions, #data{ ref = Ref, db = DB, module = Module } = Data) ->
