@@ -181,8 +181,8 @@ handle_event(state_timeout, run, open, #data{db = DB, module = Module} = Data) -
           ?LOGERROR("~p database open error ~p",[DB,E]),
           { keep_state_and_data, [ {state_timeout, 5000, run } ] }
       end;
-    _->
-      ?LOGINFO("~p has copies on ~p nodes which can have more actual data, try to recover"),
+    Nodes->
+      ?LOGINFO("~p has copies on ~p nodes which can have more actual data, try to recover",[DB,Nodes--[node()]]),
       {next_state, recover, Data, [ {state_timeout, 0, run } ] }
   end;
 
