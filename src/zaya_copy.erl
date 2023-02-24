@@ -413,10 +413,10 @@ roll_live_updates( Live )->
 
 wait_live_updates(#live{ source = Source, live_ets = LiveEts, owner = Owner }=Live)->
   receive
-    {?subscriptions, Source, {write,[KVs]}, _Node, _Actor}->
+    {?subscriptions, Source, {write,KVs}, _Node, _Actor}->
       ets:insert( LiveEts, [{K,{write,V}} || {K,V} <- KVs] ),
       wait_live_updates( Live );
-    {?subscriptions, Source, {delete,[Keys]}, _Node, _Actor}->
+    {?subscriptions, Source, {delete,Keys}, _Node, _Actor}->
       ets:insert( LiveEts, [{K,delete} || K <- Keys] ),
       wait_live_updates( Live );
     {roll_updates, Owner}->
@@ -501,10 +501,10 @@ wait_ready(#live{
   log = Log
 } = Live)->
   receive
-    {?subscriptions, Source, {write,[KVs]}, _Node, _Actor}->
+    {?subscriptions, Source, {write,KVs}, _Node, _Actor}->
       Module:write(CopyRef, KVs),
       wait_ready(Live);
-    {?subscriptions, Source, {delete,[Keys]}, _Node, _Actor}->
+    {?subscriptions, Source, {delete,Keys}, _Node, _Actor}->
       Module:delete(CopyRef, Keys),
       wait_ready(Live)
   after

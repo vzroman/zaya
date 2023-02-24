@@ -29,8 +29,7 @@
 -export([
   find/2,
   foldl/4,
-  foldr/4,
-  update/2
+  foldr/4
 ]).
 
 %%=================================================================
@@ -160,7 +159,7 @@ remote_result(Type,Result) ->
       ?not_available->
         ?not_available;
       _@Res->
-        on_update(DB, ?FUNCTION_NAME, Args),
+        on_update(DB, ?FUNCTION_NAME, hd(Args)),
         _@Res
     end
   end
@@ -222,9 +221,6 @@ foldl( DB, Query, Fun, InAcc )->
 
 foldr( DB, Query, Fun, InAcc )->
   ?read( DB, [Query, Fun, InAcc] ).
-
-update( DB, Query )->
-  ?write( DB, [ Query ]).
 
 %%=================================================================
 %%	SUBSCRIPTIONS

@@ -97,8 +97,7 @@
 
   find/2,
   foldl/4,
-  foldr/4,
-  update/2
+  foldr/4
 ]).
 
 %%=================================================================
@@ -325,9 +324,6 @@ foldl(DB, Query, Fun, InAcc)->
 
 foldr( DB, Query, Fun, InAcc)->
   zaya_db:foldr(DB, Query, Fun, InAcc).
-
-update(DB, Query)->
-  zaya_db:update( DB, Query ).
 
 %%%%---------------------------------------------------------------
 %%%%	SUBSCRIPTIONS API
