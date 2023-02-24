@@ -150,7 +150,10 @@ handle_event(state_timeout, run, {create, Params, ReplyTo}, #data{db = DB, modul
   try
     Ref = Module:create( default_params(DB, Params) ),
     ecall:call_all_wait(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
-    ReplyTo ! {created, self()},
+    if
+      is_pid( ReplyTo ) -> catch ReplyTo ! {created, self()};
+      true -> ignore
+    end,
     ?LOGINFO("~p database created",[DB]),
     {next_state, register, Data#data{ref = Ref}, [ {state_timeout, 0, run } ] }
   catch
@@ -216,7 +219,10 @@ handle_event(state_timeout, run, {add_copy, Params, ReplyTo}, #data{db = DB, mod
   try
     Ref = zaya_copy:copy( DB, Module, default_params(DB,Params), #{ live => true}),
     ecall:call_all_wait(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
-    ReplyTo ! {added, self()},
+    if
+      is_pid( ReplyTo ) -> catch ReplyTo ! {added, self()};
+      true -> ignore
+    end,
     ?LOGINFO("~p database copy added",[DB]),
     {next_state, {register_copy,Params}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
   catch
@@ -292,7 +298,7 @@ handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref =
         end,
         Module:remove( default_params(DB,Params) ),
         zaya_transaction:drop_log( DB ),
-        {next_state, {add_copy, Params}, Data, [ {state_timeout, 0, run } ] }
+        {next_state, {add_copy, Params, ?undefined}, Data, [ {state_timeout, 0, run } ] }
       catch
         _:E:S->
           ?LOGERROR("~p database recovery error ~p, stack ~p",[DB,E,S]),
