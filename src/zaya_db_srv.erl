@@ -200,7 +200,8 @@ handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
   case elock:lock( ?locks, DB, _IsShared=false, 5000, ?dbAvailableNodes(DB)) of
     {ok, Unlock}->
       try
-        {OKs, Errs} = ecall:call_all_wait( ?readyNodes, zaya_schema_srv, open_db, [ DB, node(), Ref ] ),
+        ok = zaya_schema_srv:open_db(DB, node(), Ref),
+        {OKs, Errs} = ecall:call_all_wait( ?readyNodes -- [node()], zaya_schema_srv, open_db, [ DB, node(), Ref ] ),
         ?LOGINFO("~p database registered at ~p nodes, errors at ~p nodes",[ DB, [N || {N,_} <- OKs], [N || {N,_} <- Errs] ]),
 
         {next_state, ready, Data}
@@ -218,7 +219,6 @@ handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
 handle_event(state_timeout, run, {add_copy, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
   try
     Ref = zaya_copy:copy( DB, Module, default_params(DB,Params), #{ live => true}),
-    ecall:call_all_wait(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
     if
       is_pid( ReplyTo ) -> catch ReplyTo ! {added, self()};
       true -> ignore
