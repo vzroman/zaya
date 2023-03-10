@@ -166,27 +166,30 @@ handle_event(state_timeout, run, {create, Params, ReplyTo}, #data{db = DB, modul
 %%---------------------------------------------------------------------------
 %%   OPEN
 %%---------------------------------------------------------------------------
-handle_event(state_timeout, run, open, #data{db = DB, module = Module} = Data) ->
+handle_event(state_timeout, run, open, #data{db = DB} = Data) ->
 
   update_masters( DB ),
 
   update_nodes( ?dbMasters(DB), DB ),
 
-
   case ?dbAllNodes( DB ) of
     [Node] when Node =:= node()->
-      try
-        Ref = Module:open( default_params(DB, ?dbNodeParams(DB,node())) ),
-        ?LOGINFO("~p database has single copy, open",[DB]),
-        {next_state, rollback_transactions, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
-      catch
-        _:E->
-          ?LOGERROR("~p database open error ~p",[DB,E]),
-          { keep_state_and_data, [ {state_timeout, 5000, run } ] }
-      end;
+      ?LOGINFO("~p database has single copy, open",[DB]),
+      {next_state, try_open, Data, [ {state_timeout, 0, run } ] };
     Nodes->
       ?LOGINFO("~p has copies on ~p nodes which can have more actual data, try to recover",[DB,Nodes--[node()]]),
       {next_state, recover, Data, [ {state_timeout, 0, run } ] }
+  end;
+
+handle_event(state_timeout, run, try_open, #data{db = DB, module = Module} = Data) ->
+
+  try
+    Ref = Module:open( default_params(DB, ?dbNodeParams(DB,node())) ),
+    {next_state, rollback_transactions, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+  catch
+    _:E->
+      ?LOGERROR("~p database open error ~p",[DB,E]),
+      {next_state, open, Data, [ {state_timeout, 5000, run } ] }
   end;
 
 handle_event(state_timeout, run, rollback_transactions, #data{ ref = Ref, db = DB, module = Module } = Data) ->
@@ -251,7 +254,7 @@ handle_event(state_timeout, run, recover, #data{db = DB}=Data ) ->
       case os:getenv("FORCE_START") of
         "true"->
           ?LOGWARNING("~p database force open",[DB]),
-          {next_state, open, Data, [ {state_timeout, 0, run } ] };
+          {next_state, try_open, Data, [ {state_timeout, 0, run } ] };
         _->
           ?LOGERROR("~p database recover error: database is unavailable.\r\n"++
             "If you sure that the local copy is the latest you can try to load it with:\r\n"++
@@ -265,7 +268,7 @@ handle_event(state_timeout, run, recover, #data{db = DB}=Data ) ->
   end;
 handle_event(cast, force_load, recover, #data{db = DB} = Data ) ->
   ?LOGWARNING("~p database FORCE LOAD. ALL THE DATA CHANGES MADE IN OTHER NODES COPIES WILL BE LOST!",[DB]),
-  {next_state, open, Data, [ {state_timeout, 0, run } ] };
+  {next_state, try_open, Data, [ {state_timeout, 0, run } ] };
 
 %%---------------------------------------------------------------------------
 %%   DB IS READY
