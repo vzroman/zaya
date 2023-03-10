@@ -368,6 +368,7 @@ try_load()->
       ?LOGINFO("schema initialization"),
       schema_open(),
       log_open(),
+      close_dbs(),
       restart(?allNodes);
     _->
       schema_create(),
@@ -424,12 +425,14 @@ log_open()->
       timer:sleep( ?infinity )
   end.
 
+close_dbs()->
+  Node = node(),
+  [ ?CLOSE_DB(DB, Node) || DB <- ?nodeDBs(node()) ],
+  ok.
+
 restart([Node]) when Node =:= node()->
   ?LOGINFO("single node application restart"),
-  [ begin
-      ?CLOSE_DB(DB, Node),
-      zaya_db_srv:open( DB )
-    end || DB <- ?nodeDBs(node()) ],
+  [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
   ok;
 restart([])->
   ?LOGINFO("single application empty node restart"),

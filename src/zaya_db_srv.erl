@@ -249,7 +249,7 @@ handle_event(state_timeout, run, {register_copy,Params}, #data{db = DB} = Data) 
 %%   RECOVER
 %%---------------------------------------------------------------------------
 handle_event(state_timeout, run, recover, #data{db = DB}=Data ) ->
-  case ?dbAvailableNodes(DB) of
+  case ?dbAvailableNodes(DB)--[node()] of
     []->
       case os:getenv("FORCE_START") of
         "true"->
@@ -286,7 +286,7 @@ handle_event(cast, close, ready, #data{db = DB}=Data) ->
 %%---------------------------------------------------------------------------
 handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref = Ref}=Data ) ->
 
-  case ?dbAvailableNodes(DB) of
+  case ?dbAvailableNodes(DB)--[node()] of
     []->
       ?LOGERROR("~p database recovery is impossible: no other copies are available"),
       { keep_state_and_data, [ {state_timeout, 5000, run } ] };
