@@ -11,21 +11,35 @@
     rocksdb => #{
       open_options=>#{
         compression => none,
-        max_write_buffer_number => 128,
-        min_write_buffer_number_to_merge => 16,
-        recycle_log_file_num => 0,  % ???
+        write_buffer_size => 128 * 1024 * 1024,
+
+
+        max_write_buffer_number => 4,
+        min_write_buffer_number_to_merge => 2,
+        recycle_log_file_num => 0,
         compaction_style => level,
-        write_buffer_size => 8 * 1024 * 1024,
-        target_file_size_base => 64 * 1024 * 1024,
-        writable_file_max_buffer_size => 0,
-        level0_file_num_compaction_trigger => 8,
+        target_file_size_base => 256 * 1024 * 1024,
+%%        writable_file_max_buffer_size => 0,
+        level0_file_num_compaction_trigger => 4,
         level0_slowdown_writes_trigger => 20,
         level0_stop_writes_trigger => 36,
         max_bytes_for_level_base => 1024 * 1024 * 1024,
         max_bytes_for_level_multiplier => 8,
+
+        optimize_filters_for_hits => true,
+%%      cache_index_and_filter_blocks => true, % ? this may hit the performance significantly
+        block_size => 32 * 1024,
+%%      no_block_cache => true,
+%%      bloom_filter_policy => 4,
+        max_open_files => 512,
         compaction_readahead_size => 2 * 1024 * 1024,
-        max_total_wal_size => 1024 * 1024 * 1024,
-        max_background_jobs => 4
+
+        max_background_jobs => 16,
+        max_background_compactions => 8,
+        max_subcompactions => 8,
+
+        max_total_wal_size => 1024 * 1024 * 1024  % ???
+
       },
       read => #{
         % read_tier => todo,
