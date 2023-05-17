@@ -6,7 +6,7 @@
 -include("zaya_util.hrl").
 
 % constants
--define(DEFAULT_BATCH_SIZE, 31457280). % 30 MB
+-define(DEFAULT_BATCH_SIZE, 1000).
 -define(DEFAULT_REMOTE_BATCH_SIZE, 4194304). % 4 MB
 -define(DEFAULT_REMOTE_ATTEMPTS,3).
 -define(DEFAULT_FLUSH_TAIL_TIMEOUT,10000). % 10 sec
