@@ -36,12 +36,17 @@ fold(Module,SourceRef, OnBatch, InAcc)->
     source_ref = SourceRef,
     batch = [],
     acc = InAcc,
-    batch_size = ?BATCH_SIZE,
+    batch_size = 100000,
     size = 0,
     on_batch = OnBatch
   },
 
-  case try Module:foldl(SourceRef,#{}, fun iterator/2, Acc0)
+  case
+    try
+      case erlang:function_exported(Module,copy,3) of
+        false -> Module:foldl(SourceRef,#{}, fun iterator/2, Acc0);
+        _ -> Module:copy(SourceRef, fun iterator/2, Acc0)
+      end
   catch
    _:{stop,Stop}-> Stop;
    _:{final,Final}->{final,Final}
@@ -59,8 +64,7 @@ iterator(Record,#acc{
 } = Acc)
   when Size0 < BatchSize->
 
-  Size = size(term_to_binary( Record )),
-  Acc#acc{batch = [Record|Batch], size = Size0 + Size};
+  Acc#acc{batch = [Record|Batch], size = Size0 + 1};
 
 % Batch is ready
 iterator(Record,#acc{
@@ -70,15 +74,14 @@ iterator(Record,#acc{
   acc = InAcc0
 } = Acc) ->
 
-  Size = size(term_to_binary( Record )),
-  Acc#acc{batch = [Record], acc =OnBatch(Batch, Size0, InAcc0), size = Size}.
+  Acc#acc{batch = [Record], acc =OnBatch(Batch, Size0, InAcc0), size = 1}.
 
 %%=================================================================
 %%	API
 %%=================================================================
 %------------------types-------------------------------------------
 -record(copy,{ send_node, source, params, copy_ref, module, options, attempts, log,error }).
--record(r_acc,{sender,module,source,copy_ref,live,hash,log}).
+-record(r_acc,{sender,module,source,copy_ref,live,hash,pool,log}).
 -record(live,{ source, module, send_node, copy_ref, live_ets, owner, log }).
 
 copy(Source, Module, Params )->
@@ -138,6 +141,8 @@ try_copy(#copy{
   % The remote sender needs a confirmation of the previous batch before it sends the next one
   Sender ! {confirmed, self()},
 
+  Pool = init_pool( Module, CopyRef ),
+
   FinalHash=
     try receive_loop(#r_acc{
       sender = Sender,
@@ -146,6 +151,7 @@ try_copy(#copy{
       copy_ref = CopyRef,
       live = Live,
       hash = InitHash,
+      pool = Pool,
       log = Log
     }) catch
       _:Error:Stack->
@@ -173,10 +179,9 @@ try_copy(#copy{source = Source,error = {Error,Stack}})->
 %----------------------Receiver---------------------------------------
 receive_loop(#r_acc{
   sender = Sender,
-  module = Module,
-  copy_ref =  CopyRef,
   hash = Hash0,
   live = Live,
+  pool = Pool0,
   log = Log
 } = Acc )->
   receive
@@ -203,7 +208,8 @@ receive_loop(#r_acc{
       end,
 
       % Dump batch
-      [ begin
+      Pool =
+        lists:foldl(fun(BatchBin, PoolAcc)->
           [{BTailKey,_}|_] = Batch = binary_to_term( BatchBin ),
           ?LOGINFO("~s write batch size ~s, length ~p, last key ~p",[
             Log,
@@ -212,15 +218,14 @@ receive_loop(#r_acc{
             BTailKey
           ]),
 
-          Module:write(CopyRef, Batch),
-          % Return batch tail key
-          BTailKey
-        end || BatchBin <- BatchList ],
+          pool_write(PoolAcc, Batch)
+
+        end, Pool0, BatchList),
 
       % Roll over stockpiled live updates
       roll_live_updates( Live ),
 
-      receive_loop( Acc#r_acc{hash = Hash});
+      receive_loop( Acc#r_acc{hash = Hash, pool = Pool});
 
     {finish, Sender, SenderFinalHash }->
       % Finish
@@ -252,6 +257,40 @@ unzip_batch( [Zip|Rest], {Acc0,Hash0})->
   unzip_batch(Rest ,{[Batch|Acc0], Hash});
 unzip_batch([], Acc)->
   Acc.
+
+-record(pool,{ workers, next }).
+init_pool( Module, Ref )->
+  PoolSize = erlang:system_info(logical_processors),
+  ?LOGINFO("start timeseries logger pool size: ~p",[PoolSize]),
+  Self = self(),
+  Workers =
+    maps:from_list([ {I,spawn_link(fun()->pool_worker(Module, Ref, Self) end)} || I <- lists:seq(0, PoolSize-1) ]),
+  #pool{ workers = Workers, next = 0 }.
+
+pool_write(#pool{workers = Workers, next = Next} = Pool, Batch)->
+
+  #{ Next := Worker } = Workers,
+  Worker ! { write, self(), Batch },
+  receive {accept, Worker}-> ok end,
+
+  Next1 =
+    if
+      Next =:= (map_size( Workers ) - 1) -> 0;
+      true -> Next + 1
+    end,
+
+  Pool#pool{ next = Next1 }.
+
+pool_worker( Module, Ref, Master )->
+  receive
+    { write, Master, Batch } ->
+      Master ! {accept, self()},
+      Module:write( Ref, Batch ),
+      pool_worker( Module, Ref, Master );
+    _->
+      pool_worker( Module, Ref, Master )
+  end.
+
 
 %----------------------Sender---------------------------------------
 -record(s_acc,{receiver,source_ref,module,hash,log,batch_size,size,batch}).
@@ -331,7 +370,7 @@ remote_batch(Batch0, Size, #s_acc{
   TotalZipSize = TotalZipSize0 + ZipSize,
 
   ?LOGINFO("~s add zip: size ~s, zip size ~p, total zip size ~p",[
-    Log, ?PRETTY_SIZE(Size), ?PRETTY_SIZE(ZipSize), ?PRETTY_SIZE(TotalZipSize)
+    Log, ?PRETTY_COUNT(Size), ?PRETTY_SIZE(ZipSize), ?PRETTY_SIZE(TotalZipSize)
   ]),
 
   State#s_acc{
@@ -441,19 +480,23 @@ roll_updates(#live{ module = Module, copy_ref = CopyRef, live_ets = LiveEts, log
   % and so will overwrite came live update.
   % Timeout 0 because we must to receive the next remote batch as soon as possible
 
-  {TailKey,_} = Module:last( CopyRef ),
-  % Take out the actions that are in the copy range already
-  {Write,Delete} = take_head(ets:first(LiveEts), LiveEts, TailKey, {[],[]}),
-  ?LOGINFO("~s actions to write to the copy ~p, delete ~p, stockpiled ~p, tail key ~p",[
-    Log,
-    ?PRETTY_COUNT(length(Write)),
-    ?PRETTY_COUNT(length(Delete)),
-    ?PRETTY_COUNT(ets:info(LiveEts,size)),
-    TailKey
-  ]),
+  try
+    {TailKey,_} = Module:last( CopyRef ),
+    % Take out the actions that are in the copy range already
+    {Write,Delete} = take_head(ets:first(LiveEts), LiveEts, TailKey, {[],[]}),
+    ?LOGINFO("~s actions to write to the copy ~p, delete ~p, stockpiled ~p, tail key ~p",[
+      Log,
+      ?PRETTY_COUNT(length(Write)),
+      ?PRETTY_COUNT(length(Delete)),
+      ?PRETTY_COUNT(ets:info(LiveEts,size)),
+      TailKey
+    ]),
 
-  Module:delete(CopyRef, Delete),
-  Module:write(CopyRef, Write).
+    Module:delete(CopyRef, Delete),
+    Module:write(CopyRef, Write)
+  catch
+    _:_-> ignore
+  end.
 
 take_head(K, Live, TailKey, {Write,Delete} ) when K =/= '$end_of_table', K =< TailKey->
   case ets:take(Live, K) of
