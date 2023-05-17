@@ -17,8 +17,7 @@
 %%	Remote API
 %%=================================================================
 -export([
-  copy_request/1,
-  remote_batch/3
+  copy_request/1
 ]).
 
 -export([
@@ -76,7 +75,7 @@ iterator(Record,#acc{
 %%=================================================================
 %------------------types-------------------------------------------
 -record(copy,{ send_node, source, params, copy_ref, module, options, attempts, log,error }).
--record(r_acc,{sender,module,source,copy_ref,live,hash,log}).
+-record(r_acc,{sender,module,source,copy_ref,live,hash,pool,log}).
 -record(live,{ source, module, send_node, copy_ref, live_ets, owner, log }).
 
 copy(Source, Module, Params )->
@@ -133,8 +132,7 @@ try_copy(#copy{
   },
   Sender = spawn_link(SendNode, ?MODULE, copy_request,[SenderAgs]),
 
-  % The remote sender needs a confirmation of the previous batch before it sends the next one
-  Sender ! {confirmed, self()},
+  Pool = init_pool( Module, CopyRef ),
 
   FinalHash=
     try receive_loop(#r_acc{
@@ -144,6 +142,7 @@ try_copy(#copy{
       copy_ref = CopyRef,
       live = Live,
       hash = InitHash,
+      pool = Pool,
       log = Log
     }) catch
       _:Error:Stack->
@@ -171,10 +170,9 @@ try_copy(#copy{source = Source,error = {Error,Stack}})->
 %----------------------Receiver---------------------------------------
 receive_loop(#r_acc{
   sender = Sender,
-  module = Module,
-  copy_ref =  CopyRef,
   hash = Hash0,
   live = Live,
+  pool = Pool0,
   log = Log
 } = Acc )->
   receive
@@ -189,36 +187,35 @@ receive_loop(#r_acc{
 
       % Check hash
       case crypto:hash_final(Hash) of
-        SenderHash -> Sender ! {confirmed, self()};
+        SenderHash -> ok;
         LocalHash->
           ?LOGERROR("~s invalid sender hash ~s, local hash ~s",[
             Log,
             ?PRETTY_HASH(SenderHash),
             ?PRETTY_HASH(LocalHash)
           ]),
-          Sender ! {invalid_hash, self()},
           throw(invalid_hash)
       end,
 
       % Dump batch
-      [ begin
+      Pool =
+        lists:foldl(fun(BatchBin, PoolAcc)->
           [{BTailKey,_}|_] = Batch = binary_to_term( BatchBin ),
-          ?LOGINFO("~s write batch size ~s, length ~p, last key ~p",[
+          ?LOGDEBUG("~s write batch size ~s, length ~p, last key ~p",[
             Log,
             ?PRETTY_SIZE(size( BatchBin )),
             ?PRETTY_COUNT(length(Batch)),
             BTailKey
           ]),
 
-          Module:dump_batch(CopyRef, Batch),
-          % Return batch tail key
-          BTailKey
-        end || BatchBin <- BatchList ],
+          pool_write(PoolAcc, Batch)
+
+        end, Pool0, BatchList),
 
       % Roll over stockpiled live updates
       roll_live_updates( Live ),
 
-      receive_loop( Acc#r_acc{hash = Hash});
+      receive_loop( Acc#r_acc{hash = Hash, pool = Pool});
 
     {finish, Sender, SenderFinalHash }->
       % Finish
@@ -251,8 +248,41 @@ unzip_batch( [Zip|Rest], {Acc0,Hash0})->
 unzip_batch([], Acc)->
   Acc.
 
+-record(pool,{ workers, next }).
+init_pool( Module, Ref )->
+  PoolSize = erlang:system_info(logical_processors),
+  Self = self(),
+  Workers =
+    maps:from_list([ {I,spawn_link(fun()->pool_worker(Module, Ref, Self) end)} || I <- lists:seq(0, PoolSize-1) ]),
+  #pool{ workers = Workers, next = 0 }.
+
+pool_write(#pool{workers = Workers, next = Next} = Pool, Batch)->
+
+  #{ Next := Worker } = Workers,
+  Worker ! { write, self(), Batch },
+  receive {accept, Worker}-> ok end,
+
+  Next1 =
+    if
+      Next =:= (map_size( Workers ) - 1) -> 0;
+      true -> Next + 1
+    end,
+
+  Pool#pool{ next = Next1 }.
+
+pool_worker( Module, Ref, Master )->
+  receive
+    { write, Master, Batch } ->
+      Master ! {accept, self()},
+      Module:dump_batch( Ref, Batch ),
+      pool_worker( Module, Ref, Master );
+    _->
+      pool_worker( Module, Ref, Master )
+  end.
+
+
 %----------------------Sender---------------------------------------
--record(s_acc,{receiver,source_ref,module,hash,log,batch_size,size,batch}).
+-record(s_acc,{receiver,source_ref,module,reader,hash,log,batch_size,size,batch}).
 copy_request(#{
   receiver := Receiver,
   source := Source,
@@ -274,14 +304,33 @@ copy_request(#{
     end
   end),
 
+  {ok, Unlock} = elock:lock(?locks, Source, _IsShared = true, _Timeout = ?infinity ),
+
   Module = ?dbModule( Source ),
   SourceRef = ?dbRef(Source,node()),
+
+  Self = self(),
+  ReadFun =
+    fun(Batch, Size, Acc)->
+      Self ! {batch, self(), Batch, Size},
+      receive
+        {'DOWN', _Ref, process, Self, _Error}-> throw({stop, Acc})
+      after 0-> Acc end
+    end,
+  Reader =
+    spawn(fun()->
+      erlang:monitor(process, Self),
+      fold(Module, SourceRef, ReadFun, undefined)
+    end),
+  erlang:monitor(process, Reader),
+
   InitHash = crypto:hash_update(crypto:hash_init(sha256),<<>>),
 
   InitState = #s_acc{
     receiver = Receiver,
     source_ref = SourceRef,
     module = Module,
+    reader = Reader,
     hash = InitHash,
     log = Log,
     batch_size = ?REMOTE_BATCH_SIZE,
@@ -289,20 +338,7 @@ copy_request(#{
     batch = []
   },
 
-  {ok, Unlock} = elock:lock(?locks, Source, _IsShared = true, _Timeout = ?infinity ),
-
-  try
-      #s_acc{ batch = TailBatch, hash = TailHash } = TailState =
-        fold(Module, SourceRef, fun remote_batch/3, InitState ),
-
-      % Send the tail batch if exists
-      case TailBatch of [] -> ok; _->send_batch( TailState ) end,
-
-      FinalHash = crypto:hash_final( TailHash ),
-
-      ?LOGINFO("~s finished, final hash ~p",[Log, ?PRETTY_HASH(FinalHash) ]),
-      Receiver ! {finish, self(), FinalHash}
-
+  try remote_loop( InitState )
   catch
     _:Error:Stack->
       ?LOGERROR("~s error ~p, stack ~p",[Log,Error,Stack]),
@@ -312,44 +348,52 @@ copy_request(#{
     unlink(Receiver)
   end.
 
-% Zip and stockpile local batches until they reach ?REMOTE_BATCH_SIZE
-remote_batch(Batch0, Size, #s_acc{
+remote_loop( #s_acc{
+  receiver = Receiver,
+  reader = Reader,
   size = TotalZipSize0,
   batch_size = BatchSize,
   batch = ZipBatch,
   hash = Hash0,
   log = Log
-} = State) when TotalZipSize0 < BatchSize->
+} = State ) when TotalZipSize0 < BatchSize->
+  receive
+    {batch, Reader, Batch0, Size} ->
 
-  Batch = term_to_binary( Batch0 ),
-  Hash = crypto:hash_update(Hash0, Batch),
-  Zip = zlib:zip( Batch ),
+      Batch = term_to_binary( Batch0 ),
+      Hash = crypto:hash_update(Hash0, Batch),
+      Zip = zlib:zip( Batch ),
 
-  ZipSize = size(Zip),
-  TotalZipSize = TotalZipSize0 + ZipSize,
+      ZipSize = size(Zip),
+      TotalZipSize = TotalZipSize0 + ZipSize,
 
-  ?LOGDEBUG("~s add zip: size ~s, zip size ~p, total zip size ~p",[
-    Log, ?PRETTY_COUNT(Size), ?PRETTY_SIZE(ZipSize), ?PRETTY_SIZE(TotalZipSize)
-  ]),
+      ?LOGDEBUG("~s add zip: size ~s, zip size ~p, total zip size ~p",[
+        Log, ?PRETTY_COUNT(Size), ?PRETTY_SIZE(ZipSize), ?PRETTY_SIZE(TotalZipSize)
+      ]),
 
-  State#s_acc{
-    size = TotalZipSize,
-    batch = [Zip|ZipBatch],
-    hash = Hash
-  };
+      remote_loop( State#s_acc{
+        size = TotalZipSize,
+        batch = [Zip|ZipBatch],
+        hash = Hash
+      } );
+
+    {'DOWN', _Ref, process, Reader, normal}->
+      % Send the tail batch if exists
+      case ZipBatch of [] -> ok; _->send_batch( State ) end,
+
+      FinalHash = crypto:hash_final( Hash0 ),
+
+      ?LOGINFO("~s finished, final hash ~p",[Log, ?PRETTY_HASH(FinalHash) ]),
+      Receiver ! {finish, self(), FinalHash};
+    {'DOWN', _Ref, process, Reader, Error}->
+      throw({reader_error,Error})
+  end;
 
 % The batch is ready, send it
-remote_batch(Batch0, Size, #s_acc{
-  receiver = Receiver
-}=State)->
+remote_loop( State )->
   % First we have to receive a confirmation of the previous batch
-  receive
-    {confirmed, Receiver}->
-      send_batch( State ),
-      remote_batch(Batch0, Size,State#s_acc{ batch = [], size = 0 });
-    {invalid_hash,Receiver}->
-      throw(invalid_hash)
-  end.
+  send_batch( State ),
+  remote_loop(State#s_acc{ batch = [], size = 0 }).
 
 send_batch(#s_acc{
   size = ZipSize,
@@ -439,19 +483,23 @@ roll_updates(#live{ module = Module, copy_ref = CopyRef, live_ets = LiveEts, log
   % and so will overwrite came live update.
   % Timeout 0 because we must to receive the next remote batch as soon as possible
 
-  {TailKey,_} = Module:last( CopyRef ),
-  % Take out the actions that are in the copy range already
-  {Write,Delete} = take_head(ets:first(LiveEts), LiveEts, TailKey, {[],[]}),
-  ?LOGINFO("~s actions to write to the copy ~p, delete ~p, stockpiled ~p, tail key ~p",[
-    Log,
-    ?PRETTY_COUNT(length(Write)),
-    ?PRETTY_COUNT(length(Delete)),
-    ?PRETTY_COUNT(ets:info(LiveEts,size)),
-    TailKey
-  ]),
+  try
+    {TailKey,_} = Module:last( CopyRef ),
+    % Take out the actions that are in the copy range already
+    {Write,Delete} = take_head(ets:first(LiveEts), LiveEts, TailKey, {[],[]}),
+    ?LOGINFO("~s actions to write to the copy ~p, delete ~p, stockpiled ~p, tail key ~p",[
+      Log,
+      ?PRETTY_COUNT(length(Write)),
+      ?PRETTY_COUNT(length(Delete)),
+      ?PRETTY_COUNT(ets:info(LiveEts,size)),
+      TailKey
+    ]),
 
-  Module:delete(CopyRef, Delete),
-  Module:write(CopyRef, Write).
+    Module:delete(CopyRef, Delete),
+    Module:write(CopyRef, Write)
+  catch
+    _:_-> ignore
+  end.
 
 take_head(K, Live, TailKey, {Write,Delete} ) when K =/= '$end_of_table', K =< TailKey->
   case ets:take(Live, K) of
