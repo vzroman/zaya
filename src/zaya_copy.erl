@@ -36,17 +36,12 @@ fold(Module,SourceRef, OnBatch, InAcc)->
     source_ref = SourceRef,
     batch = [],
     acc = InAcc,
-    batch_size = 100000,
+    batch_size = ?BATCH_SIZE,
     size = 0,
     on_batch = OnBatch
   },
 
-  case
-    try
-      case erlang:function_exported(Module,copy,3) of
-        false -> Module:foldl(SourceRef,#{}, fun iterator/2, Acc0);
-        _ -> Module:copy(SourceRef, fun iterator/2, Acc0)
-      end
+  case try Module:copy(SourceRef, fun iterator/2, Acc0)
   catch
    _:{stop,Stop}-> Stop;
    _:{final,Final}->{final,Final}
@@ -261,7 +256,6 @@ unzip_batch([], Acc)->
 -record(pool,{ workers, next }).
 init_pool( Module, Ref )->
   PoolSize = erlang:system_info(logical_processors),
-  ?LOGINFO("start timeseries logger pool size: ~p",[PoolSize]),
   Self = self(),
   Workers =
     maps:from_list([ {I,spawn_link(fun()->pool_worker(Module, Ref, Self) end)} || I <- lists:seq(0, PoolSize-1) ]),
@@ -285,7 +279,7 @@ pool_worker( Module, Ref, Master )->
   receive
     { write, Master, Batch } ->
       Master ! {accept, self()},
-      Module:write( Ref, Batch ),
+      Module:dump_batch( Ref, Batch ),
       pool_worker( Module, Ref, Master );
     _->
       pool_worker( Module, Ref, Master )
@@ -369,7 +363,7 @@ remote_batch(Batch0, Size, #s_acc{
   ZipSize = size(Zip),
   TotalZipSize = TotalZipSize0 + ZipSize,
 
-  ?LOGINFO("~s add zip: size ~s, zip size ~p, total zip size ~p",[
+  ?LOGDEBUG("~s add zip: size ~s, zip size ~p, total zip size ~p",[
     Log, ?PRETTY_COUNT(Size), ?PRETTY_SIZE(ZipSize), ?PRETTY_SIZE(TotalZipSize)
   ]),
 
@@ -566,10 +560,9 @@ local_copy( Source, Target, Module, Options)->
   Live = prepare_live_copy( Source, Module, node(), TargetRef, Log, Options ),
 
   OnBatch =
-    fun(Batch, Size, _)->
-      ?LOGINFO("~s write batch, size ~s, length ~s",[
+    fun(Batch, _Size, _)->
+      ?LOGINFO("~s write batch, length ~s",[
         Log,
-        ?PRETTY_SIZE(Size),
         ?PRETTY_COUNT(length(Batch))
       ]),
       % TODO, Roll over live updates
