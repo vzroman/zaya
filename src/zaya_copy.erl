@@ -76,7 +76,7 @@ iterator(Record,#acc{
 %%=================================================================
 %------------------types-------------------------------------------
 -record(copy,{ send_node, source, params, copy_ref, module, options, attempts, log,error }).
--record(r_acc,{sender,module,source,copy_ref,live,hash,pool,log}).
+-record(r_acc,{sender,module,source,copy_ref,live,hash,log}).
 -record(live,{ source, module, send_node, copy_ref, live_ets, owner, log }).
 
 copy(Source, Module, Params )->
@@ -133,8 +133,6 @@ try_copy(#copy{
   },
   Sender = spawn_link(SendNode, ?MODULE, copy_request,[SenderAgs]),
 
-  Pool = init_pool( Module, CopyRef ),
-
   FinalHash=
     try receive_loop(#r_acc{
       sender = Sender,
@@ -143,7 +141,6 @@ try_copy(#copy{
       copy_ref = CopyRef,
       live = Live,
       hash = InitHash,
-      pool = Pool,
       log = Log
     }) catch
       _:Error:Stack->
@@ -171,9 +168,10 @@ try_copy(#copy{source = Source,error = {Error,Stack}})->
 %----------------------Receiver---------------------------------------
 receive_loop(#r_acc{
   sender = Sender,
+  module = Module,
+  copy_ref =  CopyRef,
   hash = Hash0,
   live = Live,
-  pool = Pool0,
   log = Log
 } = Acc )->
   receive
@@ -199,24 +197,24 @@ receive_loop(#r_acc{
       end,
 
       % Dump batch
-      Pool =
-        lists:foldl(fun(BatchBin, PoolAcc)->
+      [ begin
           [{BTailKey,_}|_] = Batch = binary_to_term( BatchBin ),
-          ?LOGDEBUG("~s write batch size ~s, length ~p, last key ~p",[
+          ?LOGINFO("~s write batch size ~s, length ~p, last key ~p",[
             Log,
             ?PRETTY_SIZE(size( BatchBin )),
             ?PRETTY_COUNT(length(Batch)),
             BTailKey
           ]),
 
-          pool_write(PoolAcc, Batch)
-
-        end, Pool0, BatchList),
+          Module:dump_batch(CopyRef, Batch),
+          % Return batch tail key
+          BTailKey
+        end || BatchBin <- BatchList ],
 
       % Roll over stockpiled live updates
       roll_live_updates( Live ),
 
-      receive_loop( Acc#r_acc{hash = Hash, pool = Pool});
+      receive_loop( Acc#r_acc{hash = Hash});
 
     {finish, Sender, SenderFinalHash }->
       % Finish
@@ -224,7 +222,6 @@ receive_loop(#r_acc{
       case crypto:hash_final(Hash0) of
         SenderFinalHash ->
           % Everything is fine!
-          stop_pool( Pool0 ),
           SenderFinalHash;
         LocalFinalHash->
           ?LOGERROR("~s invalid sender final hash ~s, local final hash ~s",[
@@ -250,47 +247,6 @@ unzip_batch( [Zip|Rest], {Acc0,Hash0})->
 unzip_batch([], Acc)->
   Acc.
 
--record(pool,{ workers, next }).
-init_pool( Module, Ref )->
-  PoolSize = erlang:system_info(logical_processors),
-  Self = self(),
-  Workers =
-    maps:from_list([ {I,spawn_link(fun()->pool_worker(Module, Ref, Self) end)} || I <- lists:seq(0, PoolSize-1) ]),
-  #pool{ workers = Workers, next = 0 }.
-
-pool_write(#pool{workers = Workers, next = Next} = Pool, Batch)->
-
-  #{ Next := Worker } = Workers,
-  Worker ! { write, self(), Batch },
-  receive {accept, Worker}-> ok end,
-
-  Next1 =
-    if
-      Next =:= (map_size( Workers ) - 1) -> 0;
-      true -> Next + 1
-    end,
-
-  Pool#pool{ next = Next1 }.
-
-pool_worker( Module, Ref, Master )->
-  receive
-    { write, Master, Batch } ->
-      Master ! {accept, self()},
-      Module:dump_batch( Ref, Batch ),
-      pool_worker( Module, Ref, Master );
-    {finish, Master}->
-      unlink(Master),
-      Master ! {finished, self()};
-    _->
-      pool_worker( Module, Ref, Master )
-  end.
-
-stop_pool( #pool{workers = Workers} )->
-  [begin
-     W ! {finish, self()},
-     receive {finished, W} -> ok end
-   end || {_, W} <- maps:to_list(Workers)],
-  ok.
 %----------------------Sender---------------------------------------
 -record(s_acc,{receiver,source_ref,module,hash,log,batch_size,size,batch}).
 copy_request(#{
