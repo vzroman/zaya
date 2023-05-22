@@ -199,7 +199,7 @@ receive_loop(#r_acc{
       % Dump batch
       [ begin
           [{BTailKey,_}|_] = Batch = binary_to_term( BatchBin ),
-          ?LOGINFO("~s write batch size ~s, length ~p, last key ~p",[
+          ?LOGDEBUG("~s write batch size ~s, length ~p, last key ~p",[
             Log,
             ?PRETTY_SIZE(size( BatchBin )),
             ?PRETTY_COUNT(length(Batch)),
