@@ -224,6 +224,7 @@ receive_loop(#r_acc{
       case crypto:hash_final(Hash0) of
         SenderFinalHash ->
           % Everything is fine!
+          stop_pool( Pool0 ),
           SenderFinalHash;
         LocalFinalHash->
           ?LOGERROR("~s invalid sender final hash ~s, local final hash ~s",[
@@ -277,11 +278,19 @@ pool_worker( Module, Ref, Master )->
       Master ! {accept, self()},
       Module:dump_batch( Ref, Batch ),
       pool_worker( Module, Ref, Master );
+    {finish, Master}->
+      unlink(Master),
+      Master ! {finished, self()};
     _->
       pool_worker( Module, Ref, Master )
   end.
 
-
+stop_pool( #pool{workers = Workers} )->
+  [begin
+     W ! {finish, self()},
+     receive {finished, W} -> ok end
+   end || {_, W} <- maps:to_list(Workers)],
+  ok.
 %----------------------Sender---------------------------------------
 -record(s_acc,{receiver,source_ref,module,hash,log,batch_size,size,batch}).
 copy_request(#{
