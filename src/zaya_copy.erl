@@ -406,9 +406,13 @@ prepare_live_copy( _Source, _Module, _SendNode, _CopyRef, Log, #{live:=false} )-
   ?undefined;
 prepare_live_copy( Source, Module, SendNode, CopyRef, Log, _Options )->
   Owner = self(),
-  spawn_link(fun()->
+  Live = spawn_link(fun()->
     ?LOGINFO("~s live copy, subscribe....",[Log]),
+
     esubscribe:subscribe(?subscriptions, Source, self(), [SendNode]),
+    esubscribe:subscribe(?subscriptions, ?schema, self(), [SendNode]),
+
+    Owner ! {ready, self()},
 
     wait_live_updates(#live{
       source = Source,
@@ -420,7 +424,9 @@ prepare_live_copy( Source, Module, SendNode, CopyRef, Log, _Options )->
       % Prepare the buffer for live updates
       live_ets = ets:new(live,[private,ordered_set])
     })
-  end).
+  end),
+
+  receive {ready, Live} -> Live end.
 
 finish_live_copy( ?undefined )->
   ok;
@@ -455,9 +461,7 @@ wait_live_updates(#live{ source = Source, live_ets = LiveEts, owner = Owner }=Li
       wait_ready( Live ),
       unlink(Owner);
     {drop,Owner}->
-      unlink(Owner);
-    _->
-      wait_live_updates(Live)
+      unlink(Owner)
   end.
 
 roll_updates(#live{ module = Module, copy_ref = CopyRef, live_ets = LiveEts, log = Log })->
@@ -537,9 +541,11 @@ wait_ready(#live{
       wait_ready(Live);
     {?subscriptions, Source, {delete,Keys}, _Node, _Actor}->
       Module:delete(CopyRef, Keys),
-      wait_ready(Live)
-  after
-    0->?LOGINFO("~s finsish copy",[Log])
+      wait_ready(Live);
+    {?subscriptions, ?schema, {'open_db',Source, Node}, _Node, _Actor} when Node =:= node()->
+      ?LOGINFO("~s finsish copy",[Log]);
+    _->
+      wait_ready( Live )
   end.
 
 %---------------------------------------------------------------------
