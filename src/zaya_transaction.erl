@@ -623,9 +623,19 @@ single_key_commit(Data, [Node])->
       ok
   end;
 single_key_commit(Data, Ns)->
-  case ecall:call_any( Ns, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
-    {ok,_}-> ok;
-    {error, Error}-> throw( Error )
+  case lists:member(node(), Ns) of
+    true ->
+      case rpc:call(node(), ?MODULE, ?FUNCTION_NAME, [ Data ]) of
+        {badrpc, Reason}->
+          throw( Reason );
+        _->
+          ecall:cast_all( Ns -- [node()], ?MODULE, ?FUNCTION_NAME, [ Data ])
+      end;
+    false ->
+      case ecall:call_any( Ns, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
+        {ok,_}-> ok;
+        {error, Error}-> throw( Error )
+      end
   end.
 
 single_key_commit( Data )->
