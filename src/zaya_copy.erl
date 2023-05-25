@@ -76,7 +76,7 @@ iterator(Record,#acc{
 %%=================================================================
 %------------------types-------------------------------------------
 -record(copy,{ send_node, source, params, copy_ref, module, options, attempts, log,error }).
--record(r_acc,{sender,module,source,copy_ref,live,hash,pool,log}).
+-record(r_acc,{sender,module,source,copy_ref,live,hash,log}).
 -record(live,{ source, module, send_node, copy_ref, live_ets, owner, log }).
 
 copy(Source, Module, Params )->
@@ -133,8 +133,6 @@ try_copy(#copy{
   },
   Sender = spawn_link(SendNode, ?MODULE, copy_request,[SenderAgs]),
 
-  Pool = init_pool( Module, CopyRef ),
-
   FinalHash=
     try receive_loop(#r_acc{
       sender = Sender,
@@ -143,7 +141,6 @@ try_copy(#copy{
       copy_ref = CopyRef,
       live = Live,
       hash = InitHash,
-      pool = Pool,
       log = Log
     }) catch
       _:Error:Stack->
@@ -171,9 +168,10 @@ try_copy(#copy{source = Source,error = {Error,Stack}})->
 %----------------------Receiver---------------------------------------
 receive_loop(#r_acc{
   sender = Sender,
+  module = Module,
+  copy_ref =  CopyRef,
   hash = Hash0,
   live = Live,
-  pool = Pool0,
   log = Log
 } = Acc )->
   receive
@@ -199,8 +197,7 @@ receive_loop(#r_acc{
       end,
 
       % Dump batch
-      Pool =
-        lists:foldl(fun(BatchBin, PoolAcc)->
+      [ begin
           [{BTailKey,_}|_] = Batch = binary_to_term( BatchBin ),
           ?LOGDEBUG("~s write batch size ~s, length ~p, last key ~p",[
             Log,
@@ -209,14 +206,15 @@ receive_loop(#r_acc{
             BTailKey
           ]),
 
-          pool_write(PoolAcc, Batch)
-
-        end, Pool0, BatchList),
+          Module:dump_batch(CopyRef, Batch),
+          % Return batch tail key
+          BTailKey
+        end || BatchBin <- BatchList ],
 
       % Roll over stockpiled live updates
       roll_live_updates( Live ),
 
-      receive_loop( Acc#r_acc{hash = Hash, pool = Pool});
+      receive_loop( Acc#r_acc{hash = Hash});
 
     {finish, Sender, SenderFinalHash }->
       % Finish
@@ -248,39 +246,6 @@ unzip_batch( [Zip|Rest], {Acc0,Hash0})->
   unzip_batch(Rest ,{[Batch|Acc0], Hash});
 unzip_batch([], Acc)->
   Acc.
-
--record(pool,{ workers, next }).
-init_pool( Module, Ref )->
-  PoolSize = erlang:system_info(logical_processors),
-  Self = self(),
-  Workers =
-    maps:from_list([ {I,spawn_link(fun()->pool_worker(Module, Ref, Self) end)} || I <- lists:seq(0, PoolSize-1) ]),
-  #pool{ workers = Workers, next = 0 }.
-
-pool_write(#pool{workers = Workers, next = Next} = Pool, Batch)->
-
-  #{ Next := Worker } = Workers,
-  Worker ! { write, self(), Batch },
-  receive {accept, Worker}-> ok end,
-
-  Next1 =
-    if
-      Next =:= (map_size( Workers ) - 1) -> 0;
-      true -> Next + 1
-    end,
-
-  Pool#pool{ next = Next1 }.
-
-pool_worker( Module, Ref, Master )->
-  receive
-    { write, Master, Batch } ->
-      Master ! {accept, self()},
-      Module:dump_batch( Ref, Batch ),
-      pool_worker( Module, Ref, Master );
-    _->
-      pool_worker( Module, Ref, Master )
-  end.
-
 
 %----------------------Sender---------------------------------------
 -record(s_acc,{receiver,source_ref,module,hash,log,batch_size,size,batch}).
@@ -406,9 +371,13 @@ prepare_live_copy( _Source, _Module, _SendNode, _CopyRef, Log, #{live:=false} )-
   ?undefined;
 prepare_live_copy( Source, Module, SendNode, CopyRef, Log, _Options )->
   Owner = self(),
-  spawn_link(fun()->
+  Live = spawn_link(fun()->
     ?LOGINFO("~s live copy, subscribe....",[Log]),
+
     esubscribe:subscribe(?subscriptions, Source, self(), [SendNode]),
+    esubscribe:subscribe(?subscriptions, ?schema, self(), [SendNode]),
+
+    Owner ! {ready, self()},
 
     wait_live_updates(#live{
       source = Source,
@@ -420,7 +389,9 @@ prepare_live_copy( Source, Module, SendNode, CopyRef, Log, _Options )->
       % Prepare the buffer for live updates
       live_ets = ets:new(live,[private,ordered_set])
     })
-  end).
+  end),
+
+  receive {ready, Live} -> Live end.
 
 finish_live_copy( ?undefined )->
   ok;
@@ -455,9 +426,7 @@ wait_live_updates(#live{ source = Source, live_ets = LiveEts, owner = Owner }=Li
       wait_ready( Live ),
       unlink(Owner);
     {drop,Owner}->
-      unlink(Owner);
-    _->
-      wait_live_updates(Live)
+      unlink(Owner)
   end.
 
 roll_updates(#live{ module = Module, copy_ref = CopyRef, live_ets = LiveEts, log = Log })->
@@ -537,9 +506,11 @@ wait_ready(#live{
       wait_ready(Live);
     {?subscriptions, Source, {delete,Keys}, _Node, _Actor}->
       Module:delete(CopyRef, Keys),
-      wait_ready(Live)
-  after
-    0->?LOGINFO("~s finsish copy",[Log])
+      wait_ready(Live);
+    {?subscriptions, ?schema, {'open_db',Source, Node}, _Node, _Actor} when Node =:= node()->
+      ?LOGINFO("~s finsish copy",[Log]);
+    _->
+      wait_ready( Live )
   end.
 
 %---------------------------------------------------------------------
