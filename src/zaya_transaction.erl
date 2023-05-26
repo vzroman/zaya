@@ -723,7 +723,9 @@ wait_confirm(DBs, DBsNs, NsDBs, Workers, Ns )->
               end
             end, DBsNs),
 
-          wait_confirm(DBs, DBsNs1, maps:remove(N,NsDBs),  RestWorkers, Ns );
+          DBs1 =  [ DB || DB <- DBs, [] =/= (maps:get(DB, DBsNs1) -- Ns)],
+
+          wait_confirm(DBs1, DBsNs1, maps:remove(N,NsDBs),  RestWorkers, Ns );
         _->
           % Who was it?
           wait_confirm(DBs, DBsNs, NsDBs, Workers, Ns )
