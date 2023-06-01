@@ -616,26 +616,16 @@ prepare_commit( Data )->
 %%  SINGLE KEY COMMIT
 %%-----------------------------------------------------------
 single_key_commit(Data, [Node])->
-  case rpc:call(Node,?MODULE, ?FUNCTION_NAME, [ Data ]) of
-    {badrpc, Reason}->
-      throw( Reason );
+  case ecall:call(Node,?MODULE, ?FUNCTION_NAME, [ Data ]) of
+    {error, Error}->
+      throw( Error );
     _->
       ok
   end;
 single_key_commit(Data, Ns)->
-  case lists:member(node(), Ns) of
-    true ->
-      case rpc:call(node(), ?MODULE, ?FUNCTION_NAME, [ Data ]) of
-        {badrpc, Reason}->
-          throw( Reason );
-        _->
-          ecall:cast_all( Ns -- [node()], ?MODULE, ?FUNCTION_NAME, [ Data ])
-      end;
-    false ->
-      case ecall:call_any( Ns, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
-        {ok,_}-> ok;
-        {error, Error}-> throw( Error )
-      end
+  case ecall:call_any( Ns, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
+    {ok,_}-> ok;
+    {error, Error}-> throw( Error )
   end.
 
 single_key_commit( Data )->
