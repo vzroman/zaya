@@ -172,13 +172,19 @@ handle_event(state_timeout, run, open, #data{db = DB} = Data) ->
 
   update_nodes( ?dbMasters(DB), DB ),
 
-  case ?dbAllNodes( DB ) of
-    [Node] when Node =:= node()->
-      ?LOGINFO("~p database has single copy, open",[DB]),
+  case ?dbReadOnly( DB ) of
+    true ->
+      ?LOGINFO("~p database open in read only mode",[DB]),
       {next_state, try_open, Data, [ {state_timeout, 0, run } ] };
-    Nodes->
-      ?LOGINFO("~p has copies on ~p nodes which can have more actual data, try to recover",[DB,Nodes--[node()]]),
-      {next_state, recover, Data, [ {state_timeout, 0, run } ] }
+    _->
+      case ?dbAllNodes( DB ) of
+        [Node] when Node =:= node()->
+          ?LOGINFO("~p database has single copy, open",[DB]),
+          {next_state, try_open, Data, [ {state_timeout, 0, run } ] };
+        Nodes->
+          ?LOGINFO("~p has copies on ~p nodes which can have more actual data, try to recover",[DB,Nodes--[node()]]),
+          {next_state, recover, Data, [ {state_timeout, 0, run } ] }
+      end
   end;
 
 handle_event(state_timeout, run, try_open, #data{db = DB, module = Module} = Data) ->
