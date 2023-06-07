@@ -52,7 +52,8 @@
   db_remove_copy/2,
   db_set_copy_params/3,
 
-  db_masters/1, db_masters/2
+  db_masters/1, db_masters/2,
+  db_read_only/1, db_read_only/2
 ]).
 
 %%=================================================================
@@ -224,6 +225,12 @@ db_masters(DB)->
 
 db_masters(DB, Masters)->
   zaya_db:masters( DB, Masters ).
+
+db_read_only(DB)->
+  zaya_db:read_only( DB ).
+
+db_read_only(DB, IsReadOnly)->
+  zaya_db:read_only( DB, IsReadOnly ).
 
 %%%%---------------------------------------------------------------
 %%%%	DBs Info API

@@ -406,24 +406,16 @@
 ).
 
 -define(dbMasters(DB),
-  case persistent_term:get({db,DB,'@masters@'}, ?undefined) of
-    ?undefined->
-      case ?schemaRead({db,DB,'@masters@'}) of
-        ?undefined ->
-          persistent_term:put({db,DB,'@masters@'},[]),
-          [];
-        _@Ns ->
-          persistent_term:put({db,DB,'@masters@'},_@Ns),
-          _@Ns
-      end;
-    _@Ns->
-      _@Ns
+  case ?schemaRead({db,DB,'@masters@'}) of
+    ?undefined -> [];
+    _@Ns -> _@Ns
   end
 ).
--define(dbMasters(DB,Ns),
-  begin
-    ?SCHEMA_WRITE({db,DB,'@masters@'},Ns),
-    persistent_term:put({db,DB,'@masters@'},Ns)
+
+-define(dbReadOnly(DB),
+  case ?schemaRead({db,DB,'@readonly@'}) of
+    ?undefined -> false;
+    _@IsReadOnly -> _@IsReadOnly
   end
 ).
 
@@ -496,6 +488,16 @@
       true-> ?SCHEMA_DELETE({db,DB,'@masters@'})
     end,
     ?SCHEMA_NOTIFY({db_masters,DB,Ns})
+  end
+).
+
+-define(SET_DB_READONLY(DB,IsReadOnly),
+  begin
+    if
+      IsReadOnly -> ?SCHEMA_WRITE({db,DB,'@readonly@'},true);
+      true-> ?SCHEMA_DELETE({db,DB,'@readonly@'})
+    end,
+    ?SCHEMA_NOTIFY({db_readonly,DB,IsReadOnly})
   end
 ).
 

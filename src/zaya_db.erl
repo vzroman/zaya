@@ -84,6 +84,8 @@
 
   masters/1, masters/2,
 
+  read_only/1, read_only/2,
+
   on_update/3
 ]).
 
@@ -168,13 +170,18 @@ remote_result(Type,Result) ->
 -define(write(DB, Args),
   case DB of
     _ when is_atom( DB ) ->
-      _@DBNs = ?dbAvailableNodes(DB),
-      case lists:member(node(), _@DBNs ) of
-        true ->
-          ?REMOTE_CALL( _@DBNs--[node()], cast_all, {call,DB}, Args ),
-          ?writeLocal(DB, Args);
-        _ ->
-          ?REMOTE_CALL( _@DBNs, call_any, {call,DB}, Args )
+      case ?dbReadOnly(DB) of
+        false ->
+          _@DBNs = ?dbAvailableNodes(DB),
+          case lists:member(node(), _@DBNs ) of
+            true ->
+              ?REMOTE_CALL( _@DBNs--[node()], cast_all, {call,DB}, Args ),
+              ?writeLocal(DB, Args);
+            _ ->
+              ?REMOTE_CALL( _@DBNs, call_any, {call,DB}, Args )
+          end;
+        _->
+          ?NOT_AVAILABLE
       end;
     {call, _@DB}->
       ?writeLocal(_@DB, Args);
@@ -535,6 +542,26 @@ masters( DB, Masters )->
   end,
 
   ecall:call_all_wait(?readyNodes, zaya_schema_srv, set_db_masters, [DB,Masters] ).
+
+read_only( DB )->
+  ?dbReadOnly( DB ).
+
+read_only( DB, IsReadOnly )->
+  case ?dbModule(DB) of
+    ?undefined->
+      throw(db_not_exists);
+    _->
+      ok
+  end,
+
+  if
+    is_boolean( IsReadOnly ) ->
+      ok;
+    true->
+      throw({badarg,IsReadOnly})
+  end,
+
+  ecall:call_all_wait(?readyNodes, zaya_schema_srv, set_db_readonly, [DB,IsReadOnly] ).
 
 on_update( DB, Action, Args )->
   esubscribe:notify(?subscriptions, DB, {Action,Args} ),

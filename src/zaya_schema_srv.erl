@@ -33,6 +33,7 @@
   set_copy_params/3,
 
   set_db_masters/2,
+  set_db_readonly/2,
   set_db_nodes/2
 ]).
 
@@ -105,6 +106,9 @@ set_copy_params(DB, Node,Params)->
 
 set_db_masters( DB, Masters )->
   gen_server:call(?MODULE, {set_db_masters, DB, Masters}, ?infinity).
+
+set_db_readonly( DB, IsReadOnly )->
+  gen_server:call(?MODULE, {set_db_readonly, DB, IsReadOnly}, ?infinity).
 
 set_db_nodes( DB, Nodes )->
   gen_server:call(?MODULE, {set_db_nodes, DB, Nodes}, ?infinity).
@@ -308,6 +312,20 @@ handle_call({set_db_masters, DB, Masters}, From, State) ->
     _:E:S->
       gen_server:reply(From, {error,E}),
       ?LOGERROR("~p set master nodes ~p schema error ~p stack ~p",[DB,Masters,E,S])
+  end,
+
+  {noreply,State};
+
+handle_call({set_db_readonly, DB, IsReadOnly}, From, State) ->
+
+  try
+    ?SET_DB_READONLY( DB, IsReadOnly ),
+    gen_server:reply(From,ok),
+    ?LOGINFO("~p set read only mode ~p",[DB, IsReadOnly])
+  catch
+    _:E:S->
+      gen_server:reply(From, {error,E}),
+      ?LOGERROR("~p set read only mode ~p schema error ~p stack ~p",[DB,IsReadOnly,E,S])
   end,
 
   {noreply,State};
