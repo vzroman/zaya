@@ -227,7 +227,7 @@ handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
 %%---------------------------------------------------------------------------
 handle_event(state_timeout, run, {add_copy, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
   try
-    Ref = zaya_copy:copy( DB, Module, default_params(DB,Params), #{ live => true}),
+    Ref = zaya_copy:copy( DB, Module, default_params(DB,Params), #{ live => not ?dbReadOnly(DB)}),
     if
       is_pid( ReplyTo ) -> catch ReplyTo ! {added, self()};
       true -> ignore
