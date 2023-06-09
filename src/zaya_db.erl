@@ -65,7 +65,7 @@
   not_available_copies/1,
   all_dbs_available_copies/0,
   all_dbs_not_available_copies/0,
-  get_size/1
+  get_size/1, get_size/2
 ]).
 
 %%=================================================================
@@ -320,6 +320,10 @@ get_size( DB )->
   lists:foldl(fun({N,Size},Acc)->
     Acc#{ N => Size }
   end,Undefined, OKs).
+
+get_size( DB, Node )->
+  ecall:call(Node, zaya_db_srv, get_size, [DB]).
+
 
 %%=================================================================
 %%	SERVICE

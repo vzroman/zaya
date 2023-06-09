@@ -80,7 +80,7 @@
   db_not_available_copies/1,
   all_dbs_available_copies/0,
   all_dbs_not_available_copies/0,
-  db_size/1
+  db_size/1, db_size/2
 ]).
 
 %%=================================================================
@@ -298,6 +298,9 @@ all_dbs_not_available_copies()->
 
 db_size( DB )->
   zaya_db:get_size( DB ).
+
+db_size( DB, Node )->
+  zaya_db:get_size( DB, Node ).
 
 %%%%---------------------------------------------------------------
 %%%%	DATA API
