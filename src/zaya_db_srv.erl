@@ -378,10 +378,10 @@ default_params(DB, Params )->
       #{dir := AbsPath}->
         AbsPath;
       _->
-        filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
+        filename:absname(?schemaDir)
     end,
 
-  Params#{ dir => Dir }.
+  Params#{ dir => Dir ++"/"++atom_to_list(DB) }.
 
 
 %%------------------------------------------------------------------------------------
