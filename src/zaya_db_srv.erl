@@ -371,9 +371,18 @@ code_change(_OldVsn, State, _Extra) ->
 %%  Internals
 %%------------------------------------------------------------------------------------
 default_params(DB, Params )->
-  maps:merge(#{
-    dir => filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
-  },Params).
+  Dir =
+    case Params of
+      #{ dir := [$.|RelativePath] } ->
+        filename:absname(?schemaDir) ++"/"++ RelativePath;
+      #{dir := AbsPath}->
+        AbsPath;
+      _->
+        filename:absname(?schemaDir) ++"/"++atom_to_list(DB)
+    end,
+
+  Params#{ dir => Dir }.
+
 
 %%------------------------------------------------------------------------------------
 %%  SPLIT BRAIN:
