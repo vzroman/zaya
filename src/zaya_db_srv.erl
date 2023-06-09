@@ -373,6 +373,8 @@ code_change(_OldVsn, State, _Extra) ->
 default_params(DB, Params )->
   Dir =
     case Params of
+      #{ dir := [$.] } ->
+        filename:absname(?schemaDir);
       #{ dir := [$.|RelativePath] } ->
         filename:absname(?schemaDir) ++"/"++ RelativePath;
       #{dir := AbsPath}->
