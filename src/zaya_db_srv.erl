@@ -19,7 +19,8 @@
   remove/1,
   split_brain/1,
 
-  get_size/1
+  get_size/1,
+  default_params/2
 ]).
 %%=================================================================
 %%	OTP API
