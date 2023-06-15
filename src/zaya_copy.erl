@@ -76,7 +76,7 @@ iterator(Record,#acc{
 %%=================================================================
 %------------------types-------------------------------------------
 -record(copy,{ send_node, source, params, copy_ref, module, options, attempts, log,error }).
--record(r_acc,{sender,module,source,copy_ref,live,hash,log}).
+-record(r_acc,{sender,module,source,copy_ref,live,log}).
 -record(live,{ source, module, send_node, copy_ref, live_ets, owner, log }).
 
 copy(Source, Module, Params )->
@@ -122,8 +122,6 @@ try_copy(#copy{
 
   Live = prepare_live_copy( Source, Module, SendNode, CopyRef, Log, Options ),
 
-  InitHash = crypto:hash_update(crypto:hash_init(sha256),<<>>),
-
   ?LOGINFO("~s init sender",[Log]),
   SenderAgs = #{
     receiver => self(),
@@ -133,29 +131,27 @@ try_copy(#copy{
   },
   Sender = spawn_link(SendNode, ?MODULE, copy_request,[SenderAgs]),
 
-  FinalHash=
-    try receive_loop(#r_acc{
-      sender = Sender,
-      source = Source,
-      module = Module,
-      copy_ref = CopyRef,
-      live = Live,
-      hash = InitHash,
-      log = Log
-    }) catch
-      _:Error:Stack->
-        ?LOGERROR("~s attempt failed ~p, left attempts ~p",[Log,Error,Attempts-1]),
+  try receive_loop(#r_acc{
+    sender = Sender,
+    source = Source,
+    module = Module,
+    copy_ref = CopyRef,
+    live = Live,
+    log = Log
+  }) catch
+    _:Error:Stack->
+      ?LOGERROR("~s attempt failed ~p, left attempts ~p",[Log,Error,Attempts-1]),
 
-        exit(Sender,rollback),
-        drop_live_copy( Live ),
-        Module:close( CopyRef ),
-        Module:remove( Params ),
-        try_copy(State#copy{send_node = ?dbSource(Source), attempts = Attempts - 1, error ={Error,Stack} })
-    end,
+      exit(Sender,rollback),
+      drop_live_copy( Live ),
+      Module:close( CopyRef ),
+      Module:remove( Params ),
+      try_copy(State#copy{send_node = ?dbSource(Source), attempts = Attempts - 1, error ={Error,Stack} })
+  end,
 
   finish_live_copy( Live ),
 
-  ?LOGINFO("~s finish hash ~s", [Log, ?PRETTY_HASH( FinalHash )]),
+  ?LOGINFO("~s finish", [Log]),
 
   CopyRef;
 
@@ -170,67 +166,37 @@ receive_loop(#r_acc{
   sender = Sender,
   module = Module,
   copy_ref =  CopyRef,
-  hash = Hash0,
   live = Live,
   log = Log
 } = Acc )->
   receive
-    {write_batch, Sender, ZipBatch, ZipSize, SenderHash }->
+    {write_batch, Sender, Batch }->
 
-      ?LOGINFO("~s batch received size ~s, hash ~s",[
-        Log,
-        ?PRETTY_SIZE(ZipSize),
-        ?PRETTY_HASH(SenderHash)
+      Sender ! {confirmed, self()},
+
+      ?LOGINFO("~s batch received",[
+        Log
       ]),
-      {BatchList,Hash} = unzip_batch( lists:reverse(ZipBatch), {[],Hash0}),
-
-      % Check hash
-      case crypto:hash_final(Hash) of
-        SenderHash -> Sender ! {confirmed, self()};
-        LocalHash->
-          ?LOGERROR("~s invalid sender hash ~s, local hash ~s",[
-            Log,
-            ?PRETTY_HASH(SenderHash),
-            ?PRETTY_HASH(LocalHash)
-          ]),
-          throw(invalid_hash)
-      end,
 
       % Dump batch
       [ begin
-          [{BTailKey,_}|_] = Batch = binary_to_term( BatchBin ),
-          ?LOGDEBUG("~s write batch size ~s, length ~p, last key ~p",[
+          ?LOGDEBUG("~s write length ~p",[
             Log,
-            ?PRETTY_SIZE(size( BatchBin )),
-            ?PRETTY_COUNT(length(Batch)),
-            BTailKey
+            ?PRETTY_COUNT(length(B))
           ]),
 
-          Module:dump_batch(CopyRef, Batch),
-          % Return batch tail key
-          BTailKey
-        end || BatchBin <- BatchList ],
+          Module:dump_batch(CopyRef, B)
+
+        end || B <- Batch ],
 
       % Roll over stockpiled live updates
       roll_live_updates( Live ),
 
-      receive_loop( Acc#r_acc{hash = Hash});
+      receive_loop( Acc );
 
-    {finish, Sender, SenderFinalHash }->
+    {finish, Sender }->
       % Finish
-      ?LOGINFO("~s sender finished, final hash ~s",[Log, ?PRETTY_HASH(SenderFinalHash)]),
-      case crypto:hash_final(Hash0) of
-        SenderFinalHash ->
-          % Everything is fine!
-          SenderFinalHash;
-        LocalFinalHash->
-          ?LOGERROR("~s invalid sender final hash ~s, local final hash ~s",[
-            Log,
-            ?PRETTY_HASH(SenderFinalHash),
-            ?PRETTY_HASH(LocalFinalHash)
-          ]),
-          throw(invalid_hash)
-      end;
+      ?LOGINFO("~s sender finished",[Log]);
     {error,Sender,SenderError}->
       ?LOGERROR("~s sender error ~p",[Log,SenderError]),
       throw({sender_error,SenderError});
@@ -240,15 +206,8 @@ receive_loop(#r_acc{
       throw({exit,Reason})
   end.
 
-unzip_batch( [Zip|Rest], {Acc0,Hash0})->
-  Batch = zlib:unzip( Zip ),
-  Hash = crypto:hash_update(Hash0, Batch),
-  unzip_batch(Rest ,{[Batch|Acc0], Hash});
-unzip_batch([], Acc)->
-  Acc.
-
 %----------------------Sender---------------------------------------
--record(s_acc,{receiver,source_ref,module,hash,log,batch_size,size,batch}).
+-record(s_acc,{receiver,source_ref,module,log,batch}).
 copy_request(#{
   receiver := Receiver,
   source := Source,
@@ -272,32 +231,26 @@ copy_request(#{
 
   Module = ?dbModule( Source ),
   SourceRef = ?dbRef(Source,node()),
-  InitHash = crypto:hash_update(crypto:hash_init(sha256),<<>>),
 
   InitState = #s_acc{
     receiver = Receiver,
     source_ref = SourceRef,
     module = Module,
-    hash = InitHash,
     log = Log,
-    batch_size = ?REMOTE_BATCH_SIZE,
-    size = 0,
     batch = []
   },
 
   {ok, Unlock} = elock:lock(?locks, Source, _IsShared = true, _Timeout = ?infinity ),
 
   try
-      #s_acc{ batch = TailBatch, hash = TailHash } = TailState =
+      #s_acc{ batch = TailBatch } = TailState =
         fold(Module, SourceRef, fun remote_batch/3, InitState ),
 
       % Send the tail batch if exists
       case TailBatch of [] -> ok; _->send_batch( TailState ) end,
 
-      FinalHash = crypto:hash_final( TailHash ),
-
-      ?LOGINFO("~s finished, final hash ~p",[Log, ?PRETTY_HASH(FinalHash) ]),
-      Receiver ! {finish, self(), FinalHash}
+      ?LOGINFO("~s finished",[Log ]),
+      Receiver ! {finish, self() }
 
   catch
     _:Error:Stack->
@@ -309,58 +262,44 @@ copy_request(#{
   end.
 
 % Zip and stockpile local batches until they reach ?REMOTE_BATCH_SIZE
-remote_batch(Batch0, Size, #s_acc{
-  size = TotalZipSize0,
-  batch_size = BatchSize,
-  batch = ZipBatch,
-  hash = Hash0,
+remote_batch(Batch, Size, #s_acc{
+  batch = BatchAcc,
   log = Log
-} = State) when TotalZipSize0 < BatchSize->
+} = State) when length( BatchAcc ) < 1000->
 
-  Batch = term_to_binary( Batch0 ),
-  Hash = crypto:hash_update(Hash0, Batch),
-  Zip = zlib:zip( Batch ),
 
-  ZipSize = size(Zip),
-  TotalZipSize = TotalZipSize0 + ZipSize,
-
-  ?LOGDEBUG("~s add zip: size ~s, zip size ~p, total zip size ~p",[
-    Log, ?PRETTY_COUNT(Size), ?PRETTY_SIZE(ZipSize), ?PRETTY_SIZE(TotalZipSize)
+  ?LOGDEBUG("~s add batch: size ~s",[
+    Log, ?PRETTY_COUNT(Size)
   ]),
 
   State#s_acc{
-    size = TotalZipSize,
-    batch = [Zip|ZipBatch],
-    hash = Hash
+    batch = [lists:reverse( Batch )|BatchAcc]
   };
 
 % The batch is ready, send it
 remote_batch(Batch0, Size, #s_acc{
-  receiver = Receiver
+  receiver = Receiver,
+  log = Log
 }=State)->
+
   send_batch( State ),
   % First we have to receive a confirmation of the previous batch
   receive
     {confirmed, Receiver}->
-      remote_batch(Batch0, Size,State#s_acc{ batch = [], size = 0 })
+      ?LOGINFO("~s confirmed",[ Log ]),
+      remote_batch(Batch0, Size,State#s_acc{ batch = [] })
   end.
 
 send_batch(#s_acc{
-  size = ZipSize,
-  batch = ZipBatch,
-  hash = Hash,
+  batch = Batch,
   receiver = Receiver,
   log = Log
 })->
 
-  BatchHash = crypto:hash_final(Hash),
-  ?LOGINFO("~s send batch: zip size ~s, length ~p, hash ~s",[
-    Log,
-    ?PRETTY_SIZE(ZipSize),
-    length(ZipBatch),
-    ?PRETTY_HASH(BatchHash)
+  ?LOGINFO("~s send batch",[
+    Log
   ]),
-  Receiver ! {write_batch, self(), ZipBatch, ZipSize, BatchHash }.
+  Receiver ! {write_batch, self(), lists:reverse( Batch ) }.
 
 
 %%===========================================================================
@@ -534,7 +473,7 @@ local_copy( Source, Target, Module, Options)->
       Module:write_batch(Batch, TargetRef)
     end,
 
-  ?LOGINFO("~s finish, hash ~s",[Log]),
+  ?LOGINFO("~s finish",[Log]),
   fold(Module, SourceRef , OnBatch, ?undefined),
 
   _LiveTail = finish_live_copy( Live ).
