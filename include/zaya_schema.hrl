@@ -519,7 +519,7 @@
             true -> 1
           end,
         ?SCHEMA_WRITE({db,DB,'@readonly_version@'},_@ROVer),
-        ?SCHEMA_WRITE({db,DB,'@readonly_version@',node()},_@ROVer),
+        [ ?SCHEMA_WRITE({db,DB,'@readonly_version@', N},_@ROVer) || N <- ?dbAvailableNodes(DB) ],
         ?SCHEMA_WRITE({db,DB,'@readonly@'},true);
       true->
           ?SCHEMA_DELETE({db,DB,'@readonly@'})
