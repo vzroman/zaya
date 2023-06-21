@@ -419,6 +419,14 @@
   end
 ).
 
+-define(dbReadOnlyVersion(DB),
+  ?schemaRead({db,DB,'@readonly_version@'})
+).
+
+-define(dbReadOnlyVersion(DB,N),
+  ?schemaRead({db,DB,'@readonly_version@',N})
+).
+
 %=======================================================================================
 %             SCHEMA TRANSFORMATION
 %=======================================================================================
@@ -435,8 +443,16 @@
     ?SCHEMA_WRITE({db,DB,'@ref@',N},Ref),
     ?DB_AVAILABLE_NODES(DB, (?dbAvailableNodes(DB) -- [N]) ++ [N]),
     if
-      N =:= node() -> ?DB_REF_MOD(DB, Ref);
-      true -> ignore
+      N =:= node() ->
+        case ?dbReadOnlyVersion(DB) of
+          _@ROVer when is_integer(_@ROVer) ->
+            ?SCHEMA_WRITE({db,DB,'@readonly_version@',node()},_@ROVer);
+          _ ->
+            ignore
+        end,
+        ?DB_REF_MOD(DB, Ref);
+      true ->
+        ignore
     end,
     ?SCHEMA_NOTIFY({'open_db',DB,N})
   end
@@ -464,6 +480,7 @@
 -define(REMOVE_DB_COPY(DB,N),
   begin
     ?SCHEMA_DELETE({db,DB,'@node@',N,'@params@'}),
+    ?SCHEMA_DELETE({db,DB,'@readonly_version@',node()}),
     case ?dbMasters(DB) of
       _@Ms when length(_@Ms) >0 ->
         ?SCHEMA_WRITE({db,DB,'@masters@'},_@Ms -- [N]);
@@ -494,8 +511,18 @@
 -define(SET_DB_READONLY(DB,IsReadOnly),
   begin
     if
-      IsReadOnly -> ?SCHEMA_WRITE({db,DB,'@readonly@'},true);
-      true-> ?SCHEMA_DELETE({db,DB,'@readonly@'})
+      IsReadOnly ->
+        __@ROVer = ?dbReadOnlyVersion(DB),
+        _@ROVer =
+          if
+            is_integer(__@ROVer)-> __@ROVer + 1;
+            true -> 1
+          end,
+        ?SCHEMA_WRITE({db,DB,'@readonly_version@'},_@ROVer),
+        ?SCHEMA_WRITE({db,DB,'@readonly_version@',node()},_@ROVer),
+        ?SCHEMA_WRITE({db,DB,'@readonly@'},true);
+      true->
+          ?SCHEMA_DELETE({db,DB,'@readonly@'})
     end,
     ?SCHEMA_NOTIFY({db_readonly,DB,IsReadOnly})
   end
@@ -507,6 +534,8 @@
     ?SCHEMA_DELETE({db,DB,'@module@'}),
     ?SCHEMA_DELETE({db,DB,'@masters@'}),
     ?DB_AVAILABLE_NODES(DB),
+    ?SCHEMA_DELETE({db,DB,'@readonly_version@'}),
+    ?SCHEMA_DELETE({db,DB,'@readonly@'}),
     ?SCHEMA_NOTIFY({remove_db,DB})
   end
 ).
