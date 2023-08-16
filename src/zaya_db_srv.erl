@@ -236,12 +236,8 @@ handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
 handle_event(state_timeout, run, {add_copy, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
   try
     Ref = zaya_copy:copy( DB, Module, default_params(DB,Params), #{ live => not ?dbReadOnly(DB)}),
-    if
-      is_pid( ReplyTo ) -> catch ReplyTo ! {added, self()};
-      true -> ignore
-    end,
     ?LOGINFO("~p database copy added",[DB]),
-    {next_state, {register_copy,Params}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+    {next_state, {register_copy,Params,ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
   catch
     _:E->
       ?LOGERROR("~p database add copy error ~p",[DB,E]),
@@ -249,10 +245,14 @@ handle_event(state_timeout, run, {add_copy, Params, ReplyTo}, #data{db = DB, mod
       {stop, shutdown}
   end;
 
-handle_event(state_timeout, run, {register_copy,Params}, #data{db = DB} = Data) ->
+handle_event(state_timeout, run, {register_copy,Params,ReplyTo}, #data{db = DB} = Data) ->
   case ecall:call_all(?readyNodes, zaya_schema_srv, add_db_copy, [DB, node(), Params] ) of
     {ok,_}->
       ?LOGINFO("~p database copy registered",[DB]),
+      if
+        is_pid( ReplyTo ) -> catch ReplyTo ! {added, self()};
+        true -> ignore
+      end,
       {next_state, register, Data, [ {state_timeout, 0, run } ] };
     {error,Error}->
       ?LOGERROR("~p database register copy error ~p",[ DB, Error ]),
