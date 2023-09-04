@@ -319,9 +319,14 @@ handle_call({set_db_masters, DB, Masters}, From, State) ->
 handle_call({set_db_readonly, DB, IsReadOnly}, From, State) ->
 
   try
-    ?SET_DB_READONLY( DB, IsReadOnly ),
-    gen_server:reply(From,ok),
-    ?LOGINFO("~p set read only mode ~p",[DB, IsReadOnly])
+    case ?dbReadOnly( DB ) of
+      IsReadOnly ->
+        ignore;
+      _->
+        ?SET_DB_READONLY( DB, IsReadOnly ),
+        gen_server:reply(From,ok),
+        ?LOGINFO("~p set read only mode ~p",[DB, IsReadOnly])
+    end
   catch
     _:E:S->
       gen_server:reply(From, {error,E}),
