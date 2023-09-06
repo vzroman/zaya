@@ -417,7 +417,7 @@ lock( DB, IsShared, Timeout )->
   Nodes =
     if
       IsShared -> [node()];
-      true -> ?dbAllNodes( DB ) -- ?notReadyNodes
+      true -> ?dbAvailableNodes( Nodes )
     end,
   case elock:lock( ?locks, DB, IsShared, Timeout, Nodes) of
     {ok, Unlock} ->
