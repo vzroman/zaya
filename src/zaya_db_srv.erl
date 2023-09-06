@@ -86,12 +86,18 @@ add_copy( DB, Params )->
   end.
 
 remove_copy( DB )->
-  Module = ?dbModule( DB ),
-  Params = ?dbNodeParams(DB,node()),
-  epipe:do([
-    fun(_) -> ecall:call_all(?readyNodes, zaya_schema_srv, remove_db_copy, [DB, node()] ) end,
-    fun(_)-> Module:remove( default_params(DB,Params) ) end
-  ],?undefined).
+  case whereis(DB) of
+    PID when is_pid( PID ) ->
+      timer:sleep( 100 ),
+      remove_copy( DB );
+    _->
+      Module = ?dbModule( DB ),
+      Params = ?dbNodeParams(DB,node()),
+      epipe:do([
+        fun(_) -> ecall:call_all(?readyNodes, zaya_schema_srv, remove_db_copy, [DB, node()] ) end,
+        fun(_)-> Module:remove( default_params(DB,Params) ) end
+      ],?undefined)
+  end.
 
 close( DB )->
   case whereis( DB ) of
@@ -102,15 +108,21 @@ close( DB )->
   end.
 
 remove( DB )->
-  Module = ?dbModule( DB ),
-  Params = ?dbNodeParams(DB,node()),
-  epipe:do([
-    fun(_) -> zaya_schema_srv:remove_db( DB ) end,
-    fun
-      (_) when Params =:= ?undefined->ok;
-      (_)-> Module:remove( default_params(DB,Params) )
-    end
-  ], ?undefined).
+  case whereis(DB) of
+    PID when is_pid( PID ) ->
+      timer:sleep( 100 ),
+      remove( DB );
+    _->
+      Module = ?dbModule( DB ),
+      Params = ?dbNodeParams(DB,node()),
+      epipe:do([
+        fun(_) -> zaya_schema_srv:remove_db( DB ) end,
+        fun
+          (_) when Params =:= ?undefined->ok;
+          (_)-> Module:remove( default_params(DB,Params) )
+        end
+      ], ?undefined)
+  end.
 
 
 split_brain(DB)->
@@ -214,7 +226,7 @@ handle_event(state_timeout, run, rollback_transactions, #data{ ref = Ref, db = D
 
 handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
 
-  case elock:lock( ?locks, DB, _IsShared=false, 5000, ?dbAvailableNodes(DB)) of
+  case lock(DB, _IsShared=false, _Timeout = 30000) of
     {ok, Unlock}->
       try
         ok = zaya_schema_srv:open_db(DB, node(), Ref),
@@ -331,7 +343,7 @@ handle_event(cast, force_load, recovery, #data{db = DB} = Data ) ->
 %%---------------------------------------------------------------------------
 handle_event(state_timeout, NextState, unregister, #data{db = DB} = Data) ->
 
-  case elock:lock( ?locks, DB, _IsShared=false, 30000, ?dbAvailableNodes(DB)) of
+  case lock( DB, _IsShared=false, _Timeout = infinity ) of
     {ok, Unlock}->
       try
         ecall:call_all_wait(?readyNodes, zaya_schema_srv, close_db, [DB, node()]),
@@ -393,6 +405,20 @@ default_params(DB, Params )->
 
   Params#{ dir => Dir ++"/"++atom_to_list(DB) }.
 
+lock( DB, IsShared, Timeout )->
+  Nodes =
+    if
+      IsShared -> [node()];
+      true -> ?dbAllNodes( DB ) -- ?notReadyNodes
+    end,
+  case elock:lock( ?locks, DB, IsShared, Timeout, Nodes) of
+    {ok, Unlock} ->
+      {ok, Unlock};
+    {error, deadlock}->
+      lock( DB, IsShared, Timeout );
+    Error ->
+      Error
+  end.
 
 %%------------------------------------------------------------------------------------
 %%  SPLIT BRAIN:
