@@ -265,7 +265,7 @@ copy_request(#{
 remote_batch(Batch, Size, #s_acc{
   batch = BatchAcc,
   log = Log
-} = State) when length( BatchAcc ) < 1000->
+} = State) when length( BatchAcc ) < 10->
 
 
   ?LOGDEBUG("~s add batch: size ~s",[
