@@ -360,7 +360,7 @@ create(DB, Module, Params)->
 
   case [OK || OK = {_N,{ok,created}} <- OKs ] of
     []->
-      ecall:cast_all( ?readyNodes, ?MODULE, do_remove, [DB] ),
+      ecall:cast_all( ?readyNodes, ?MODULE, remove, [DB] ),
       throw(Errors);
     CreateOKs->
       ?LOGINFO("~p database created at ~p nodes",[DB,[N || {N,_} <- CreateOKs]]),
