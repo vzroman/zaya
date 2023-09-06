@@ -554,7 +554,8 @@ recover_by_schema(Schema)->
   [ case ?dbModule(DB) of
       ?undefined ->
         ?LOGINFO("~p database was removed, remove local copy",[ DB ]),
-        try Module:remove( Params )
+        zaya_transaction:drop_log( DB ),
+        try Module:remove( zaya_db_srv:default_params(DB,Params) )
         catch
           _:E->
             ?LOGERROR("~p remove stale database error ~p",[ DB, E ])
