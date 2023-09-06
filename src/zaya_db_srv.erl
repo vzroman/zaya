@@ -17,6 +17,7 @@
   force_load/1,
   close/1,
   remove/1,
+  set_readonly/2,
   split_brain/1,
 
   get_size/1,
@@ -122,6 +123,13 @@ remove( DB )->
           (_)-> Module:remove( default_params(DB,Params) )
         end
       ], ?undefined)
+  end.
+
+set_readonly( DB, IsReadOnly )->
+  {ok, Unlock} = elock:lock( ?locks, DB, _IsShared = false, _Timeout = infinity, [node()]),
+  try zaya_schema_srv:set_db_readonly( DB, IsReadOnly )
+  after
+    Unlock
   end.
 
 

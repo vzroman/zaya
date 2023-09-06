@@ -572,7 +572,7 @@ read_only( DB, IsReadOnly )->
       throw({badarg,IsReadOnly})
   end,
 
-  ecall:call_all_wait(?readyNodes, zaya_schema_srv, set_db_readonly, [DB,IsReadOnly] ).
+  ecall:call_all_wait(?readyNodes, zaya_db_srv, set_readonly, [DB,IsReadOnly] ).
 
 on_update( DB, Action, Args )->
   esubscribe:notify(?subscriptions, DB, {Action,Args} ),
