@@ -553,6 +553,7 @@ recover_by_schema(Schema)->
   % Remove stale DBs
   [ case ?dbModule(DB) of
       ?undefined ->
+        ?LOGINFO("~p database was removed, remove local copy",[ DB ]),
         try Module:remove( Params )
         catch
           _:E->
