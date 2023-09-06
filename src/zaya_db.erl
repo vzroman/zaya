@@ -343,6 +343,13 @@ create(DB, Module, Params)->
       throw( invalid_params )
   end,
 
+  case lists:member( DB, ?allDBs ) of
+    true ->
+      throw( already_exists );
+    _->
+      ok
+  end,
+
   CreateNodes =
     case maps:keys( Params ) of
       []->
