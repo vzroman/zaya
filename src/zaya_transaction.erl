@@ -357,21 +357,24 @@ run_transaction(Fun, Attempts)->
     #transaction{data = Data} = get(?transaction),
     commit( Data ),
 
+    erase_transaction(),
     % Committed
     {ok,Result}
   catch
     _:{lock,_} when Attempts > 1->
       % In the case of lock errors all held locks are released and the transaction starts from scratch
       ?LOGDEBUG("lock error ~p"),
+      erase_transaction(),
       run_transaction(Fun, Attempts-1 );
     _:Error->
+      erase_transaction(),
       % Other errors lead to transaction abort
       {abort,Error}
-  after
-    % Always release locks
-    #transaction{locks = Locks} = erase( ?transaction ),
-    release_locks( Locks, #{} )
   end.
+
+erase_transaction()->
+  #transaction{locks = Locks} = erase( ?transaction ),
+  release_locks( Locks, #{} ).
 
 in_context(DB, Keys, Lock, Fun)->
   % read / write / delete actions transaction context
