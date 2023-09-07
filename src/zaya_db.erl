@@ -157,7 +157,11 @@ remote_result(Type,Result) ->
             _@DBNs when is_list( _@DBNs )->
               case lists:member(node(), _@DBNs ) of
                 true ->
-                  ?REMOTE_CALL( _@DBNs--[node()], cast_all, {call,DB}, Args ),
+                  case _@DBNs--[node()] of
+                    []-> ignore;
+                    _@OtherNs->
+                      ?REMOTE_CALL(_@OtherNs, cast_all, {call,DB}, Args )
+                  end,
                   ?writeLocal(DB, Args);
                 _ ->
                   ?REMOTE_CALL( _@DBNs, call_any, {call,DB}, Args )
