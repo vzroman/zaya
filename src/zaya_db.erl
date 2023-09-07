@@ -92,24 +92,11 @@
 %%=================================================================
 %%	ENGINE
 %%=================================================================
-not_available( F )->
-  if
-    F=:=write; F=:=update->
-      ?not_available;
-    F=:=next;F=:=prev;F=:=first;F=:=last->
-      ?undefined;
-    true->[]
-  end.
-
--define(NOT_AVAILABLE,
-  not_available( ?FUNCTION_NAME )
-).
-
 -define(LOCAL_CALL(Mod,Ref,Args),
   try apply( fun Mod:?FUNCTION_NAME/?FUNCTION_ARITY, [Ref|Args] )
   catch
     _:_->
-    ?NOT_AVAILABLE
+    ?not_available
   end
 ).
 
@@ -124,7 +111,7 @@ remote_result(Type,Result) ->
     _@Res when Type=:=call_all_wait->
       _@Res;
     _->
-      ?NOT_AVAILABLE
+      ?not_available
   end.
 
 -define(REMOTE_CALL(Ns,Type,DB,Args),
@@ -132,7 +119,7 @@ remote_result(Type,Result) ->
     _@Ns when is_list(_@Ns), length(_@Ns)>0 ->
       remote_result(Type, ecall:Type( Ns, ?MODULE, ?FUNCTION_NAME,[ DB|Args]) );
     _->
-      ?NOT_AVAILABLE
+      ?not_available
   end
 ).
 
@@ -150,7 +137,7 @@ remote_result(Type,Result) ->
       {_@Ref, _@M} = ?dbRefMod( _@DB ),
       ?LOCAL_CALL( _@M, _@Ref, Args );
     _->
-      ?NOT_AVAILABLE
+      ?not_available
   end
 ).
 
@@ -181,12 +168,12 @@ remote_result(Type,Result) ->
               ?REMOTE_CALL( _@DBNs, call_any, {call,DB}, Args )
           end;
         _->
-          ?NOT_AVAILABLE
+          ?not_available
       end;
     {call, _@DB}->
       ?writeLocal(_@DB, Args);
     _->
-      ?NOT_AVAILABLE
+      ?not_available
   end
 ).
 
