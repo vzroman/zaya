@@ -92,12 +92,10 @@
 %%=================================================================
 %%	ENGINE
 %%=================================================================
+-define(NOT_AVAILABLE(DB), throw({not_available, DB})).
+
 -define(LOCAL_CALL(Mod,Ref,Args),
-  try apply( fun Mod:?FUNCTION_NAME/?FUNCTION_ARITY, [Ref|Args] )
-  catch
-    _:_->
-    ?not_available
-  end
+  apply( fun Mod:?FUNCTION_NAME/?FUNCTION_ARITY, [Ref|Args] )
 ).
 
 remote_result(Type,Result) ->
@@ -110,8 +108,8 @@ remote_result(Type,Result) ->
       _@Res;
     _@Res when Type=:=call_all_wait->
       _@Res;
-    _->
-      ?not_available
+    {error,_@Err}->
+      throw(_@Err)
   end.
 
 -define(REMOTE_CALL(Ns,Type,DB,Args),
@@ -119,7 +117,7 @@ remote_result(Type,Result) ->
     _@Ns when is_list(_@Ns), length(_@Ns)>0 ->
       remote_result(Type, ecall:Type( Ns, ?MODULE, ?FUNCTION_NAME,[ DB|Args]) );
     _->
-      ?not_available
+      ?NOT_AVAILABLE(DB)
   end
 ).
 
@@ -137,20 +135,16 @@ remote_result(Type,Result) ->
       {_@Ref, _@M} = ?dbRefMod( _@DB ),
       ?LOCAL_CALL( _@M, _@Ref, Args );
     _->
-      ?not_available
+      throw( badarg )
   end
 ).
 
 -define(writeLocal(DB, Args),
   begin
     {_@Ref, _@M} = ?dbRefMod( DB ),
-    case ?LOCAL_CALL( _@M, _@Ref, Args) of
-      ?not_available->
-        ?not_available;
-      _@Res->
-        on_update(DB, ?FUNCTION_NAME, hd(Args)),
-        _@Res
-    end
+    _@Res = ?LOCAL_CALL( _@M, _@Ref, Args),
+    on_update(DB, ?FUNCTION_NAME, hd(Args)),
+    _@Res
   end
 ).
 
@@ -159,21 +153,25 @@ remote_result(Type,Result) ->
     _ when is_atom( DB ) ->
       case ?dbReadOnly(DB) of
         false ->
-          _@DBNs = ?dbAvailableNodes(DB),
-          case lists:member(node(), _@DBNs ) of
-            true ->
-              ?REMOTE_CALL( _@DBNs--[node()], cast_all, {call,DB}, Args ),
-              ?writeLocal(DB, Args);
-            _ ->
-              ?REMOTE_CALL( _@DBNs, call_any, {call,DB}, Args )
+          case ?dbAvailableNodes(DB) of
+            _@DBNs when is_list( _@DBNs )->
+              case lists:member(node(), _@DBNs ) of
+                true ->
+                  ?REMOTE_CALL( _@DBNs--[node()], cast_all, {call,DB}, Args ),
+                  ?writeLocal(DB, Args);
+                _ ->
+                  ?REMOTE_CALL( _@DBNs, call_any, {call,DB}, Args )
+              end;
+            _->
+              ?NOT_AVAILABLE(DB)
           end;
         _->
-          ?not_available
+          throw({read_only, DB})
       end;
     {call, _@DB}->
       ?writeLocal(_@DB, Args);
     _->
-      ?not_available
+      throw( badarg )
   end
 ).
 
