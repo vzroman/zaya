@@ -441,7 +441,6 @@
 -define(OPEN_DB(DB,N,Ref),
   begin
     ?SCHEMA_WRITE({db,DB,'@ref@',N},Ref),
-    ?DB_AVAILABLE_NODES(DB, (?dbAvailableNodes(DB) -- [N]) ++ [N]),
     if
       N =:= node() ->
         ?DB_REF_MOD(DB, Ref);
@@ -454,6 +453,7 @@
       _ ->
         ignore
     end,
+    ?DB_AVAILABLE_NODES(DB, (?dbAvailableNodes(DB) -- [N]) ++ [N]),
     ?SCHEMA_NOTIFY({'open_db',DB,N})
   end
 ).
