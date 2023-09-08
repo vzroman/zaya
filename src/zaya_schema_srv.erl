@@ -236,7 +236,10 @@ handle_call({open_db, DB, Node, Ref}, From, State) ->
 handle_call({close_db, DB, Node}, From, State) ->
 
   try
-    ?CLOSE_DB(DB, Node),
+    case ?dbModule(DB) of
+      ?undefined -> ignore;
+      _-> ?CLOSE_DB(DB, Node)
+    end,
     gen_server:reply(From,ok),
     ?LOGINFO("~p db closed at ~p",[DB,Node])
   catch

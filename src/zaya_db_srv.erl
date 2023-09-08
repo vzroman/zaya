@@ -381,7 +381,13 @@ handle_event(EventType, EventContent, _AnyState, #data{db = DB}) ->
 terminate(Reason, _AnyState, #data{ db = DB, module = Module, ref = Ref })->
 
   ?LOGWARNING("~p terminating database server reason ~p",[DB,Reason]),
-  ecall:call_all_wait(?readyNodes, zaya_schema_srv, close_db, [DB, node()]),
+  case ?dbModule(DB) of
+    ?undefined ->
+      % DB was deleted
+      ignore;
+    _->
+      ecall:call_all_wait(?readyNodes, zaya_schema_srv, close_db, [DB, node()])
+  end,
 
   if
     Ref =/= ?undefined->
