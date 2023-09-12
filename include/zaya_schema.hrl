@@ -300,8 +300,15 @@
   persistent_term:put({db,DB,'@mod_ref@'}, {Ref, ?dbModule(DB)})
 ).
 
+-define(list(L),
+  case is_list(L) of
+    true -> L;
+    _ -> []
+  end
+).
+
 -define(dbAvailableNodes(DB),
-  ?schemaRead({db,DB,'@nodes@'})
+  ?list( ?schemaRead({db,DB,'@nodes@'}) )
 ).
 
 -define(DB_AVAILABLE_NODES(DB),
