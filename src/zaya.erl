@@ -72,7 +72,7 @@
   db_not_ready_nodes/1,
   dbs_ready_nodes/0,
   dbs_not_ready_nodes/0,
-  is_db_available/1,
+  is_db_available/1, is_db_available/2,
   is_db_not_available/1,
   available_dbs/0,
   not_available_dbs/0,
@@ -274,6 +274,9 @@ dbs_not_ready_nodes()->
 
 is_db_available(DB)->
   zaya_db:is_available( DB ).
+
+is_db_available(DB, Node)->
+  zaya_db:is_available( DB, Node ).
 
 is_db_not_available( DB )->
   zaya_db:is_not_available( DB ).

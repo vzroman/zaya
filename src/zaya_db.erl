@@ -57,7 +57,7 @@
   not_ready_nodes/1,
   all_dbs_ready_nodes/0,
   all_dbs_not_ready_nodes/0,
-  is_available/1,
+  is_available/1,is_available/2,
   is_not_available/1,
   available_dbs/0,
   not_available_dbs/0,
@@ -281,6 +281,10 @@ all_dbs_not_ready_nodes()->
 
 is_available(DB)->
   ?isDBAvailable(DB).
+
+is_available(DB, Node)->
+  ReadyNodes = ?dbAvailableNodes( DB ),
+  is_list( ReadyNodes ) andalso lists:member( Node, ReadyNodes ).
 
 is_not_available(DB)->
   ?isDBNotAvailable(DB).
