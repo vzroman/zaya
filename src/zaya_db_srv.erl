@@ -261,7 +261,10 @@ handle_event(state_timeout, run, {add_copy, Params, ReplyTo}, #data{db = DB, mod
   catch
     _:E->
       ?LOGERROR("~p database add copy error ~p",[DB,E]),
-      ReplyTo ! {error,self(),E},
+      if
+        is_pid( ReplyTo ) -> catch ReplyTo ! {error,self(),E};
+        true -> ignore
+      end,
       {stop, shutdown}
   end;
 
@@ -330,12 +333,12 @@ handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref =
       Params = ?dbNodeParams(DB,node()),
       try
         if
-          Ref =/=?undefined -> Module:close( Ref );
+          Ref =/=?undefined -> catch Module:close( Ref );
           true->ignore
         end,
         Module:remove( default_params(DB,Params) ),
         zaya_transaction:drop_log( DB ),
-        {next_state, {add_copy, Params, ?undefined}, Data, [ {state_timeout, 0, run } ] }
+        {next_state, {add_copy, Params, ?undefined}, Data#data{ref = ?undefined}, [ {state_timeout, 0, run } ] }
       catch
         _:E:S->
           ?LOGERROR("~p database recovery error ~p, stack ~p",[DB,E,S]),
