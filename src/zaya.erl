@@ -120,6 +120,7 @@
   delete/3,
   on_abort/2,
   changes/2,
+  is_transaction/0,
 
   transaction/1
 ]).
@@ -372,6 +373,9 @@ on_abort(DB, KVs)->
 
 changes(DB, Keys)->
   zaya_transaction:changes(DB, Keys).
+
+is_transaction()->
+  zaya_transaction:is_transaction().
 
 transaction( Fun )->
   zaya_transaction:transaction( Fun ).

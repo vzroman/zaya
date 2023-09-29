@@ -95,6 +95,7 @@
   delete/3,
   on_abort/2,
   changes/2,
+  is_transaction/0,
 
   transaction/1
 ]).
@@ -322,6 +323,12 @@ ensure_editable( DB )->
 %%-----------------------------------------------------------
 %%  TRANSACTION
 %%-----------------------------------------------------------
+is_transaction()->
+  case get(?transaction) of
+    #transaction{} -> true;
+    _-> false
+  end.
+
 transaction(Fun) when is_function(Fun,0)->
   case get(?transaction) of
     #transaction{locks = PLocks}=Parent->
