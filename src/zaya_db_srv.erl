@@ -219,18 +219,12 @@ handle_event(state_timeout, run, try_open, #data{db = DB, module = Module} = Dat
 
   try
     Ref = Module:open( default_params(DB, ?dbNodeParams(DB,node())) ),
-    {next_state, rollback_transactions, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+    {next_state, register, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
   catch
     _:E->
       ?LOGERROR("~p database open error ~p",[DB,E]),
       {next_state, open, Data, [ {state_timeout, 5000, run } ] }
   end;
-
-handle_event(state_timeout, run, rollback_transactions, #data{ ref = Ref, db = DB, module = Module } = Data) ->
-
-  zaya_transaction:rollback_log(Module, Ref, DB),
-
-  {next_state, register, Data, [ {state_timeout, 0, run } ] };
 
 handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
 

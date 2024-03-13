@@ -4,87 +4,15 @@
 -include("zaya.hrl").
 -include("zaya_schema.hrl").
 
--define(logModule, zaya_rocksdb).
-
--define(logParams,
-  #{
-    rocksdb => #{
-      open_options=>#{
-        compression => none,
-        write_buffer_size => 128 * 1024 * 1024,
-
-
-        max_write_buffer_number => 4,
-        min_write_buffer_number_to_merge => 2,
-        recycle_log_file_num => 0,
-        compaction_style => level,
-        target_file_size_base => 256 * 1024 * 1024,
-%%        writable_file_max_buffer_size => 0,
-        level0_file_num_compaction_trigger => 4,
-        level0_slowdown_writes_trigger => 20,
-        level0_stop_writes_trigger => 36,
-        max_bytes_for_level_base => 1024 * 1024 * 1024,
-        max_bytes_for_level_multiplier => 8,
-
-        optimize_filters_for_hits => true,
-%%      cache_index_and_filter_blocks => true, % ? this may hit the performance significantly
-        block_size => 32 * 1024,
-%%      no_block_cache => true,
-%%      bloom_filter_policy => 4,
-        max_open_files => 512,
-        compaction_readahead_size => 2 * 1024 * 1024,
-
-        max_background_jobs => 16,
-        max_background_compactions => 8,
-        max_subcompactions => 8,
-
-        max_total_wal_size => 1024 * 1024 * 1024  % ???
-
-      },
-      read => #{
-        % read_tier => todo,
-        verify_checksums => false,
-        fill_cache => false
-        % iterate_upper_bound => todo,
-        % iterate_lower_bound => todo,
-        % tailing => todo,
-        % total_order_seek => todo,
-        % prefix_same_as_start => todo,
-        % snapshot => todo
-      },
-      write => #{
-        sync => false
-        % disable_wal => true,
-        % ignore_missing_column_families => todo,
-        % no_slowdown => todo,
-        % low_pri => todo
-      }
-    }
-  }
-).
-
--define(log,{?MODULE,'$log$'}).
--define(logRef,persistent_term:get(?log)).
-
 -define(transaction,{?MODULE,'$transaction$'}).
--record(transaction,{data,locks}).
+-record(transaction,{data, changes ,locks}).
 
--define(index,{?MODULE,index}).
--define(t_id, atomics:add_get(persistent_term:get(?index), 1, 1)).
--define(initIndex,persistent_term:get({?MODULE,init_index})).
+-record(db_transaction,{ db, module, ref, tref }).
 
 -define(LOCK_TIMEOUT, 60000).
 -define(ATTEMPTS,5).
 
 -define(none,{?MODULE,?undefined}).
-
-%%=================================================================
-%%	Environment API
-%%=================================================================
--export([
-  create_log/1,
-  open_log/1
-]).
 
 %%=================================================================
 %%	API
@@ -93,95 +21,52 @@
   read/3,
   write/3,
   delete/3,
-  on_abort/2,
-  changes/2,
   is_transaction/0,
-
   transaction/1
-]).
-
-%%=================================================================
-%%  Database server API
-%%=================================================================
--export([
-  rollback_log/3,
-  drop_log/1
 ]).
 
 %%=================================================================
 %%	Internal API
 %%=================================================================
 -export([
-  single_key_commit/1,
+  single_db_commit/1,
   single_node_commit/1,
   commit_request/2
 ]).
-
-%%TODO. Remove me
--export([
-  debug/0
-]).
-
-%%=================================================================
-%%	Environment
-%%=================================================================
-create_log( Path )->
-  Ref = ?logModule:create( ?logParams#{ dir=> Path } ),
-  on_init( Ref ).
-
-open_log( Path )->
-  Ref = ?logModule:open( ?logParams#{ dir=> Path } ),
-  on_init( Ref ).
-
-on_init( Ref )->
-  persistent_term:put(?log, Ref),
-  persistent_term:put(?index, atomics:new(1,[{signed, false}])),
-  try
-    {InitLogId,_} = ?logModule:last(?logRef),
-    atomics:put(persistent_term:get(?index),1,InitLogId),
-    persistent_term:put({?MODULE,init_index}, InitLogId)
-  catch
-    _:_->
-      % no entries
-      persistent_term:put({?MODULE,init_index}, 0)
-  end,
-  ok.
 
 %%-----------------------------------------------------------
 %%  READ
 %%-----------------------------------------------------------
 read(DB, Keys, Lock) when Lock=:=read; Lock=:=write->
-  DBData = in_context(DB, Keys, Lock, fun(Data)->
-    do_read(DB, Keys, Data)
+  {DBChanges, DBData}  = in_context(DB, Keys, Lock, fun(Changes, Data)->
+    { Changes, do_read(DB, Keys, Changes, Data)}
   end),
-  data_keys(Keys, DBData);
+  data_keys(Keys, DBChanges, DBData);
 
 read(DB, Keys, Lock = none)->
   %--------Dirty read (no lock)---------------------------
   % If the key is already in the transaction data we return it's transaction value.
   % Otherwise we don't add any new keys in the transaction data but read them in dirty mode
-  TData = in_context(DB, Keys, Lock, fun(Data)->
+  {TChanges, TData} = in_context(DB, Keys, Lock, fun(Changes, Data)->
     % We don't add anything in transaction data if the keys are not locked
-    Data
+    {Changes, Data}
   end),
 
-  DirtyKeys = [K || K <- Keys, not maps:is_key(K, TData)],
+  DirtyKeys = [K || K <- Keys, (not maps:is_key(K, TData) andalso (not maps:is_key(K, TChanges)) )],
   if
     DirtyKeys =:= [] ->
-      data_keys( Keys, TData );
+      data_keys( Keys, TChanges, TData );
     length( DirtyKeys ) =:= length( Keys )->
       zaya_db:read( DB, Keys );
     true->
       % Add dirty keys
       Data =
-        lists:foldl(fun({K,V},Acc)->
-          Acc#{K => {V,V}}
-        end, TData, zaya_db:read(DB, DirtyKeys)),
-      data_keys(Keys, Data)
+        lists:foldl(fun({K,V},Acc)-> Acc#{K => V} end, TData, zaya_db:read(DB, DirtyKeys)),
+      data_keys(Keys, TChanges, Data)
   end.
 
-do_read(DB, Keys, Data)->
-  case [K || K <- Keys, not maps:is_key(K, Data)] of
+do_read(DB, Keys, Changes, Data)->
+  case [K || K <- Keys, (not maps:is_key(K, Data) andalso (not maps:is_key(K, Changes)))] of
     [] ->
       Data;
     ToRead->
@@ -190,123 +75,57 @@ do_read(DB, Keys, Data)->
       lists:foldl(fun(K,Acc)->
         case Values of
           #{K:=V}->
-            Acc#{ K => {V,V} };
+            Acc#{ K => V };
           _->
-            Acc#{ K=> {?none,?none} }
+            Acc#{ K=> ?none }
         end
       end, Data, ToRead)
   end.
 
-data_keys([K|Rest], Data)->
-  case Data of
-    #{ K:= {_,V} } when V=/=?none->
-      [{K,V} | data_keys(Rest,Data)];
+data_keys([K|Rest], Changes, Data)->
+  case Changes of
+    #{ K := V } when V=/=?none ->
+      [{K,V} | data_keys(Rest, Changes ,Data)];
+    #{ K:=_ }->
+      data_keys(Rest, Changes ,Data);
     _->
-      data_keys(Rest, Data)
+      case Data of
+        #{ K:= V } when V=/=?none->
+          [{K,V} | data_keys(Rest, Changes ,Data)];
+        _->
+          data_keys(Rest, Changes, Data)
+      end
   end;
-data_keys([],_Data)->
+data_keys([],_Changes,_Data)->
   [].
 
 %%-----------------------------------------------------------
 %%  WRITE
 %%-----------------------------------------------------------
 write(DB, KVs, Lock)->
-  in_context(DB, [K || {K,_}<-KVs], Lock, fun(Data)->
-    do_write( KVs, Data )
+  in_context(DB, [K || {K,_}<-KVs], Lock, fun(Changes, Data)->
+    {do_write( KVs, Changes ), Data}
   end),
   ok.
 
-do_write([{K,V}|Rest], Data )->
-  case Data of
-    #{K := {V0,_}}->
-      do_write(Rest, Data#{K => {V0,V} });
-    _->
-      do_write(Rest, Data#{K=>{{?none}, V}})
-  end;
-do_write([], Data )->
-  Data.
+do_write([{K,V}|Rest], Changes )->
+  do_write(Rest, Changes#{K=>V});
+do_write([], Changes )->
+  Changes.
 
 %%-----------------------------------------------------------
 %%  DELETE
 %%-----------------------------------------------------------
 delete(DB, Keys, Lock)->
-  in_context(DB, Keys, Lock, fun(Data)->
-    do_delete(Keys, Data)
+  in_context(DB, Keys, Lock, fun(Changes, Data)->
+    {do_delete(Keys, Changes), Data}
   end),
   ok.
 
 do_delete([K|Rest], Data)->
-  case Data of
-    #{K := {V0,_}}->
-      do_delete( Rest, Data#{ K=> {V0,?none} });
-    _->
-      do_delete( Rest, Data#{ K => {{?none}, ?none}})
-  end;
+  do_delete( Rest, Data#{ K => ?none });
 do_delete([], Data)->
   Data.
-
-%%-----------------------------------------------------------
-%%  ROLLBACK VALUES
-%%-----------------------------------------------------------
-on_abort(DB, KVs)->
-  in_context(DB, [K || {K,_}<-KVs], _Lock = none, fun(Data)->
-    do_on_abort( KVs, Data )
-  end),
-  ok.
-
-do_on_abort([{K,V}|Rest], Data )->
-  case Data of
-    #{K := {{?none},V1}}->
-      V0 =
-        if
-          V=:=delete-> ?none;
-          true-> V
-        end,
-      do_on_abort(Rest, Data#{K => {V0,V1} });
-    _->
-      do_on_abort(Rest, Data)
-  end;
-do_on_abort([], Data )->
-  Data.
-
-changes(DB, Keys)->
-  case get(?transaction) of
-    #transaction{data = Data}->
-      case Data of
-        #{DB := DBChanges}->
-          lists:foldl(fun(K, Acc)->
-            case DBChanges of
-              #{K:= {V,V} }->
-                Acc;
-              #{K:={{?none},_V1}}->
-                V1 =
-                  if
-                    _V1 =:= ?none-> delete;
-                    true->_V1
-                  end,
-                Acc#{ K=> {V1} };
-              #{K:={_V0,_V1}}->
-                V0 =
-                  if
-                    _V0 =:= ?none-> delete;
-                    true->_V0
-                  end,
-                V1 =
-                  if
-                    _V1 =:= ?none-> delete;
-                    true->_V1
-                  end,
-                Acc#{K => {V0,V1}};
-              _->
-                Acc
-            end
-          end,#{},Keys);
-        _->
-          #{}
-      end;
-    _ ->
-      throw(no_transaction)
-  end.
 
 ensure_editable( DB )->
   case ?dbMasters(DB) of
@@ -355,14 +174,14 @@ transaction(_Fun)->
 
 run_transaction(Fun, Attempts)->
   % Create the transaction storage
-  put(?transaction,#transaction{ data = #{}, locks = #{} }),
+  put(?transaction,#transaction{ data = #{}, changes = #{}, locks = #{} }),
   try
     Result = Fun(),
 
     % The transaction is ok, try to commit the changes.
     % The locks are held until committed or aborted
-    #transaction{data = Data} = get(?transaction),
-    commit( Data ),
+    #transaction{changes = Changes, data = Data} = get(?transaction),
+    commit( Changes, Data ),
 
     erase_transaction(),
     % Committed
@@ -386,22 +205,23 @@ erase_transaction()->
 in_context(DB, Keys, Lock, Fun)->
   % read / write / delete actions transaction context
   case get(?transaction) of
-    #transaction{data = Data,locks = Locks}=T->
+    #transaction{data = Data, changes = Changes, locks = Locks}=T->
 
       % Obtain locks on all keys before the action starts
       DBLocks = lock(DB, Keys, Lock, maps:get(DB,Locks,#{}) ),
 
       % Perform the action
-      DBData = Fun( maps:get(DB,Data,#{}) ),
+      {DBChanges, DBData} = Fun( maps:get(DB,Changes,#{}), maps:get(DB,Data,#{}) ),
 
       % Update the transaction data
       put( ?transaction, T#transaction{
         data = Data#{ DB => DBData },
+        changes = Changes#{ DB => DBChanges },
         locks = Locks#{ DB => DBLocks }
       }),
 
       % Return new database context
-      DBData;
+      {DBChanges, DBData};
     _ ->
       throw(no_transaction)
   end.
@@ -477,122 +297,60 @@ release_locks(Locks, Parent )->
 %%  COMMIT
 %%-----------------------------------------------------------
 -record(commit,{ ns, ns_dbs, dbs_ns }).
-commit( Data0 )->
+commit( Changes, Data )->
 
-  case prepare_data( Data0 ) of
-    Data when map_size(Data) > 0->
+  case prepare_data( Changes, Data ) of
+    CommitData when map_size(CommitData) > 0->
 
-      IsSingleKey =
-        if
-          map_size(Data) =:= 1->
-            [{{WriteKeys, DeleteKeys}, _}] = maps:values( Data ),
-            (length( WriteKeys ) + length(DeleteKeys)) =:= 1;
-          true ->
-            false
-        end,
-
-      Commit = #commit{ns = Ns} = prepare_commit( Data ),
+      Commit = #commit{ns = Ns} = prepare_commit( CommitData ),
 
       if
-        IsSingleKey ->
-          single_key_commit( Data, Ns );
+        map_size(Data) =:= 1->
+          single_db_commit( CommitData, Ns );
         length(Ns) =:= 1 ->
-          case rpc:call(hd(Ns),?MODULE, single_node_commit, [ Data ]) of
+          case rpc:call(hd(Ns),?MODULE, single_node_commit, [ CommitData ]) of
             {badrpc, Reason}->
               throw( Reason );
             _->
               ok
           end;
         true ->
-          multi_node_commit(Data, Commit)
+          multi_node_commit(CommitData, Commit)
       end;
     _->
       % Nothing to commit
       ok
   end.
 
-prepare_data( Data )->
+prepare_data(Changes, Data)->
 
-  % Data has structure:
+  % Changes and Data has structure:
   % #{
   %   DB1 => #{
-  %     Key1 => {PreviousValue, NewValue},
+  %     Key1 => Value,
   %     ...
   %   }
   %   .....
   % }
-  % If the PreviousValue is {?none} then it is not known yet
-  % If the PreviousValue is ?none the Key doesn't exists in the DB yet
-  % If the New is ?none then the Key has to be deleted.
 
-  % The result has the form:
-  % #{
-  %   DB1 => { Commit, Rollback },
-  %   ...
-  % }
-  % The Commit and the Rollback has the same form: {ToWrite, ToDelete }
-  % ToWrite is [{Key1,Value1},{Key2,Value2}|...]
-  % ToDelete is [K1,K2|...]
+  maps:fold(fun(DB, DBChanges, Acc)->
 
-  maps:fold(fun(DB, Changes, Acc)->
+    DBData = maps:get( DB, Data, #{} ),
+    DBOps =
+      maps:fold(fun(K, V, {Write, Delete} = OpsAcc) ->
+        case DBData of
+          #{ K := V0 } when V =:= V0 -> OpsAcc;
+          _ when V =/= ?none -> {[{K,V}|Write], Delete };
+          _-> {Write, [K|Delete] }
+        end
+      end, {[],[]}, DBChanges ),
 
-    case maps:filter(fun(_K,{V0,V1})-> V0=/=V1 end, Changes) of
-      ToCommit when map_size( ToCommit ) > 0->
-
-        % Read the keys that are not read yet to be able to rollback them
-        ToReadKeys =
-          [K || {K,{{?none},_}} <- maps:to_list( ToCommit )],
-        Values =
-          if
-            length(ToReadKeys) >0->
-              maps:from_list( zaya_db:read(DB, ToReadKeys) );
-            true->
-              #{}
-          end,
-
-        % Prepare the DB's Commit and Rollback
-        CommitRollback =
-          maps:fold(fun(K,{V0,V1},{{CW,CD},{RW,RD}})->
-            % Commits
-            Commits=
-              if
-                V1 =:= ?none->
-                  {CW, [K|CD]}; % The Key has to be deleted
-                true->
-                  {[{K,V1}|CW], CD} % The Key has to be written with a V1 value
-              end,
-
-            % Rollbacks
-            ActualV0 =
-              if
-                V0=:={?none}-> % The Key doesn't exist in the transaction data, check it in the read results
-                  case Values of
-                    #{K:=V}->V; % The key has the value
-                    _-> ?none   % The Key does not exist
-                  end;
-                true-> % The Key is in the transaction data already, accept it's value
-                  V0
-              end,
-
-            Rollbacks =
-              if
-                ActualV0 =:= ?none->
-                  {RW,[K|RD]}; % The Key doesn't exist, it has to be deleted in the case of rollback
-                true->
-                  {[{K,ActualV0}|RW],RD} % The Key has the value, it has to be written back in the case of rollback
-              end,
-
-            {Commits, Rollbacks}
-
-          end,{{[],[]}, {[],[]}},ToCommit),
-
-        Acc#{DB => CommitRollback};
-      _->
-        % DB has no changes to commit
-        Acc
+    case DBOps of
+      {[],[]} -> Acc;
+      _-> Acc#{ DB => DBOps }
     end
 
-  end, #{}, Data).
+  end, #{}, Changes).
 
 prepare_commit( Data )->
 
@@ -623,39 +381,33 @@ prepare_commit( Data )->
   }.
 
 %%-----------------------------------------------------------
-%%  SINGLE KEY COMMIT
+%%  SINGLE DB COMMIT
 %%-----------------------------------------------------------
-single_key_commit(Data, [Node])->
-  case ecall:call(Node,?MODULE, ?FUNCTION_NAME, [ Data ]) of
-    {error, Error}->
-      throw( Error );
-    _->
-      ok
-  end;
-single_key_commit(Data, Ns)->
+single_db_commit(Data, Ns)->
   case ecall:call_any( Ns, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
     {ok,_}-> ok;
     {error, Error}-> throw( Error )
   end.
 
-single_key_commit( Data )->
-  dump_dbs( Data ),
+single_db_commit( Data )->
+  [{DB, {Write, Delete}}] = maps:to_list( Data ),
+
+  #db_transaction{
+    ref = Ref,
+    module = Module,
+    tref = TRef
+  } = db_transaction( DB, Write, Delete ),
+
+  Module:commit( Ref, TRef ),
+
   on_commit( Data ).
 
 %%-----------------------------------------------------------
 %%  SINGLE NODE COMMIT
 %%-----------------------------------------------------------
 single_node_commit( DBs )->
-  LogID = commit1( DBs ),
-  try
-    commit2( LogID ),
-    on_commit( DBs )
-  catch
-    _:E->
-      ?LOGDEBUG("phase 2 single node commit error ~p",[E]),
-      commit_rollback(LogID, DBs),
-      throw(E)
-  end.
+  Commits = commit1( DBs ),
+  commit2( Commits ).
 
 %%-----------------------------------------------------------
 %%  MULTI NODE COMMIT
@@ -737,41 +489,86 @@ commit_request( Master, DBs )->
   erlang:monitor(process, Master),
 
 %-----------phase 1------------------------------------------
-  LogID = commit1( DBs ),
+  SingleDBCommit = map_size( DBs ) =:= 1,
+  Commits =
+    if
+      SingleDBCommit ->
+        [{DB, {Write, Delete}}] = maps:to_list( DBs ),
+        [ db_transaction( DB, Write, Delete ) ];
+      true ->
+         commit1( DBs )
+    end,
+
   Master ! { confirm, self() },
 
   receive
     {'DOWN', _Ref, process, Master, normal} ->
 %-----------phase 2------------------------------------------
-      commit2( LogID ),
+      if
+        SingleDBCommit->
+          #db_transaction{ ref = Ref, module = Module, tref = TRef } = hd( Commits ),
+          Module:commit( Ref, TRef );
+        true ->
+          commit2( Commits )
+      end,
       on_commit(DBs);
 %-----------rollback------------------------------------------
     {'DOWN', _Ref, process, Master, Reason} ->
       ?LOGDEBUG("rollback commit master down ~p",[Reason]),
-      commit_rollback( LogID, DBs )
+      rollback( Commits )
   end.
+
+db_transaction( DB, Write, Delete )->
+  {Ref, Module} = ?dbRefMod( DB ),
+  TRef = Module:transaction( Ref ),
+  Module:t_write( Ref, TRef, Write),
+  Module:t_delete( Ref, TRef, Delete),
+  #db_transaction{
+    db = DB,
+    module = Module,
+    ref = Ref,
+    tref = TRef
+  }.
 
 commit1( DBs )->
-  LogID = ?t_id,
-  ok = ?logModule:write( ?logRef, [{LogID,DBs}] ),
-  try
-    dump_dbs( DBs ),
-    LogID
-  catch
-    _:Error->
-      commit_rollback( LogID, DBs ),
-      throw(Error)
-  end.
+  maps:fold( fun(DB, {Write, Delete}, Acc)->
+    try
+      Commit = db_transaction( DB, Write, Delete ),
+      #db_transaction{
+        module = Module,
+        ref = Ref,
+        tref = TRef
+      } = Commit,
 
-commit2( LogID )->
-  try ok = ?logModule:delete( ?logRef,[ LogID ])
-  catch
-    _:E->
-      ?LOGERROR("commit log ~p delete error ~p",[ LogID, E ])
-  end.
+      Module:commit1( Ref, TRef ),
+
+      [Commit|Acc]
+    catch
+      _:E->
+        ?LOGERROR("~p commit phase 1 error: ~p",[ DB, E ]),
+        rollback( Acc ),
+        throw( E )
+    end
+  end, [], DBs ).
+
+commit2( Commits )->
+  [ try Module:commit2( Ref, TRef )
+    catch
+      _:E  ->
+        ?LOGERROR("~p commit phase 2 error: ~p",[ DB, E ])
+    end ||{DB, Module, Ref, TRef} <- Commits],
+  ok.
+
+rollback( Commits )->
+  [ try Module:rollback( Ref, TRef )
+    catch
+      _:E  ->
+        ?LOGERROR("~p rollback commit phase 1 error: ~p",[ DB, E ])
+    end ||{DB, Module, Ref, TRef} <- Commits],
+  ok.
 
 on_commit(DBs)->
-  maps:fold(fun(DB,{{Write,Delete},_Rollback},_)->
+  maps:fold(fun(DB, {Write, Delete},_)->
     if
       length(Write) > 0-> catch zaya_db:on_update( DB, write, Write );
       true->ignore
@@ -782,114 +579,6 @@ on_commit(DBs)->
     end
   end,?undefined,DBs).
 
-dump_dbs( DBs )->
-  maps:fold(fun(DB,{{Write,Delete},_Rollback},_)->
-    {Ref, Module} = ?dbRefMod( DB ),
-    if
-      length(Write)> 0 -> ok = Module:write( Ref, Write );
-      true-> ignore
-    end,
-    if
-      length(Delete) > 0-> ok = Module:delete( Ref, Delete );
-      true-> ignore
-    end
-  end, ?undefined, DBs).
 
-
-
-commit_rollback( LogID, DBs )->
-  rollback_dbs( DBs ),
-  try ok = ?logModule:delete( ?logRef,[ LogID ])
-  catch
-    _:E->?LOGWARNING("rollback log ~p delete error ~p, data: ~p",[ LogID, E, DBs ])
-  end.
-
-rollback_dbs( DBs )->
-  maps:fold(fun(DB,{_Commit,{Write,Delete}},_)->
-    {Ref, Module} = ?dbRefMod( DB ),
-    if
-      length(Write)> 0 ->
-        try ok = Module:write( Ref, Write )
-        catch
-          _:WE->
-            ?LOGERROR("unable to rollback write commit: database ~p, error ~p, data ~p",[DB, WE, Write ])
-        end;
-      true-> ignore
-    end,
-    if
-      length(Delete) > 0->
-        try ok =  Module:delete( Ref, Delete )
-        catch
-          _:DE->
-            ?LOGERROR("unable to rollback delete commit: database ~p, error ~p, data ~p",[DB, DE, Delete ])
-        end;
-      true-> ignore
-    end
-  end, ?undefined, DBs).
-
-%%-----------------------------------------------------------
-%%  Database server
-%%-----------------------------------------------------------
-rollback_log(Module, Ref, DB)->
-  fold_log(DB, ?initIndex, fun({Commit,{Write,Delete}})->
-    if
-      length(Write) >0->
-        try ok = Module:write(Ref,Write)
-        catch
-          _:WE->
-            ?LOGERROR("~p database rollback write error: ~p\r\ncommit: ~p\r\nrollback write: ~p",[DB,WE,Commit,Write])
-        end;
-      true->ignore
-    end,
-    if
-      length(Delete) >0->
-        try ok = Module:delete(Ref,Delete)
-        catch
-          _:DE->
-            ?LOGERROR("~p database rollback delete error: ~p\r\ncommit: ~p\r\nrollback delete: ~p",[DB,DE,Commit,Delete])
-        end;
-      true->ignore
-    end
-  end).
-
-drop_log( DB )->
-  fold_log(DB, ?t_id, fun(_)-> ignore end).
-
-
-fold_log( DB, Stop, Fun )->
-  LogRef = ?logRef,
-  ?logModule:foldl(LogRef,#{stop => Stop},fun({LogID,DBs},_)->
-    {ok,Unlock} = elock:lock(?locks,{?MODULE,log,LogID},_IsShared=false,?infinity),
-    try
-      case maps:take(DB,DBs) of
-        {Data, Rest} ->
-          Fun( Data ),
-          if
-            map_size(Rest) > 0 ->
-              ok = ?logModule:write(LogRef,[{LogID,Rest}]);
-            true->
-              ok = ?logModule:delete(LogRef,[LogID])
-          end;
-        _->
-          ignore
-      end
-    catch
-      _:E->
-        ?LOGERROR("~p database drop transaction log ~p error ~p",[DB,LogID,E])
-    after
-      Unlock()
-    end
-  end,?undefined).
-
-debug()->
-  zaya_transaction:transaction(fun()->
-
-    zaya_transaction:write(test,[{x1,y1}],none),
-
-    zaya_transaction:read(test,[x1],read),
-
-    zaya_transaction:write(test,[{x1,y11},{x2,y2}],write)
-
-  end).
 
 

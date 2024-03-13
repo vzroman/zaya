@@ -393,12 +393,10 @@ try_load()->
     true->
       ?LOGINFO("schema initialization"),
       schema_open(),
-      log_open(),
       close_dbs(),
       restart(?allNodes);
     _->
       schema_create(),
-      log_create(),
       case os:getenv("ATTACH_TO") of
         false->
           ?LOGINFO("single node first start");
@@ -420,33 +418,11 @@ schema_create()->
       timer:sleep( ?infinity )
   end.
 
-log_create()->
-  try zaya_transaction:create_log( ?transactionLogPath )
-  catch
-    _:E:S->
-      ?LOGERROR("CRITICAL ERROR! UNABLE TO CREATE TRANSACTION LOG ERROR ~p STACK ~p",[E,S]),
-      ?LOGINFO("check transactiuon log path: \r\n"
-      ++" ~p\r\n"
-        ++" is available, check acces for writing and try to start again.\r\n"
-        ++" if the transaction log moved return it back, close the application and try to start again",
-        [ ?transactionLogPath ]),
-      timer:sleep( ?infinity )
-  end.
-
 schema_open()->
   try ?SCHEMA_OPEN
   catch
     _:E:S->
       ?LOGERROR("CRITICAL ERROR! UNABLE TO OPEN SCHEMA \r\n~p\r\n ERROR ~p STACK ~p",[?schemaPath,E,S]),
-      ?LOGINFO("close the application, fix the problem and try start again"),
-      timer:sleep( ?infinity )
-  end.
-
-log_open()->
-  try zaya_transaction:open_log( ?transactionLogPath )
-  catch
-    _:E:S->
-      ?LOGERROR("CRITICAL ERROR! UNABLE TO OPEN TRANSACTION \r\n~p\r\n ERROR ~p STACK ~p",[?transactionLogPath,E,S]),
       ?LOGINFO("close the application, fix the problem and try start again"),
       timer:sleep( ?infinity )
   end.

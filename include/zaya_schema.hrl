@@ -74,10 +74,6 @@
 
 ).
 
--define(transactionLogPath,
-                                ?schemaDir ++ "/LOG"
-).
-
 -define(getSchema,
                        ?schemaFind( [{
                          {'$1','$2'},
