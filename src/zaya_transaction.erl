@@ -7,7 +7,7 @@
 -define(transaction,{?MODULE,'$transaction$'}).
 -record(transaction,{data, changes ,locks}).
 
--record(db_transaction,{ db, module, ref, tref }).
+-record(db_commit,{ db, module, ref, t_ref }).
 
 -define(LOCK_TIMEOUT, 60000).
 -define(ATTEMPTS,5).
@@ -37,75 +37,140 @@
 %%-----------------------------------------------------------
 %%  READ
 %%-----------------------------------------------------------
-read(DB, Keys, Lock) when Lock=:=read; Lock=:=write->
-  {DBChanges, DBData}  = in_context(DB, Keys, Lock, fun(Changes, Data)->
-    { Changes, do_read(DB, Keys, Changes, Data)}
-  end),
-  data_keys(Keys, DBChanges, DBData);
-
-read(DB, Keys, Lock = none)->
+read(DB, Keys, _Lock = none)->
   %--------Dirty read (no lock)---------------------------
   % If the key is already in the transaction data we return it's transaction value.
   % Otherwise we don't add any new keys in the transaction data but read them in dirty mode
-  {TChanges, TData} = in_context(DB, Keys, Lock, fun(Changes, Data)->
-    % We don't add anything in transaction data if the keys are not locked
-    {Changes, Data}
-  end),
+  #transaction{changes = TChanges, data = TData} = get(?transaction),
 
-  DirtyKeys = [K || K <- Keys, (not maps:is_key(K, TData) andalso (not maps:is_key(K, TChanges)) )],
+  Changes = maps:get( DB, TChanges, ?undefined),
+  Data = maps:get( DB, TData, ?undefined ),
+
+  { Ready, ToRead } = t_read(Keys, Changes, Data ),
+
   if
-    DirtyKeys =:= [] ->
-      data_keys( Keys, TChanges, TData );
-    length( DirtyKeys ) =:= length( Keys )->
-      zaya_db:read( DB, Keys );
-    true->
-      % Add dirty keys
-      Data =
-        lists:foldl(fun({K,V},Acc)-> Acc#{K => V} end, TData, zaya_db:read(DB, DirtyKeys)),
-      data_keys(Keys, TChanges, Data)
+    length(Ready) =:= 0->
+      zaya_db:read(DB, Keys);
+    length(ToRead) =:=0->
+      Ready;
+    true ->
+      Ready ++ zaya_db:read(DB, ToRead)
+  end;
+
+read(DB, Keys, Lock)->
+
+  Transaction = get(?transaction),
+
+  #transaction{
+    changes = TChanges,
+    data = TData,
+    locks = TLocks
+  } = Transaction,
+
+  % Obtain locks on all keys before the action starts
+  Locks = lock(DB, Keys, Lock, maps:get(DB, TLocks,#{}) ),
+
+  Changes = maps:get( DB, TChanges, ?undefined),
+  Data = maps:get( DB, TData, ?undefined ),
+
+  {Ready, ToRead} = t_read(Keys, Changes, Data ),
+
+  if
+    length( ToRead ) =:= 0 ->
+      put( ?transaction, Transaction#transaction{
+        locks = Locks#{ DB => Locks }
+      }),
+      Ready;
+    true ->
+
+      ReadResult = zaya_db:read(DB, ToRead),
+      ReadResultMap = maps:from_list( ReadResult ),
+
+      NewData =
+        if
+          is_map( Data ) -> maps:merge( Data, ReadResultMap );
+          true -> ReadResultMap
+        end,
+
+      put( ?transaction, Transaction#transaction{
+        data = TData#{ DB => NewData },
+        locks = TLocks#{ DB => Locks }
+      }),
+
+      if
+        length( Ready ) =:= 0 -> ReadResult;
+        true -> Ready ++ ReadResult
+      end
   end.
 
-do_read(DB, Keys, Changes, Data)->
-  case [K || K <- Keys, (not maps:is_key(K, Data) andalso (not maps:is_key(K, Changes)))] of
-    [] ->
-      Data;
-    ToRead->
-      Values =
-        maps:from_list( zaya_db:read(DB, ToRead ) ),
-      lists:foldl(fun(K,Acc)->
-        case Values of
-          #{K:=V}->
-            Acc#{ K => V };
-          _->
-            Acc#{ K=> ?none }
-        end
-      end, Data, ToRead)
+t_read(Keys, Changes, Data)->
+  if
+    Changes =:= ?undefined, Data =:= ?undefined ->
+      {[], Keys};
+    Data =:= ?undefined->
+      t_data(Keys, Changes, _TData= [], _ToRead = [] );
+    Changes =:= ?undefined->
+      t_data(Keys, Data, _TData= [], _ToRead = [] );
+    true ->
+      t_data(Keys, Changes, Data, _TData= [], _ToRead = [] )
   end.
 
-data_keys([K|Rest], Changes, Data)->
+t_data([K|Rest], Data, TData, ToRead )->
+  case Data of
+    #{ K:= V } when V=/=?none->
+      t_data( Rest, Data, [{K,V} | TData], ToRead );
+    _->
+      t_data(Rest, Data, TData, [K|ToRead])
+  end;
+t_data([], _Data, TData, ToRead )->
+  { TData, ToRead }.
+
+t_data([K|Rest], Changes, Data, TData, ToRead )->
   case Changes of
     #{ K := V } when V=/=?none ->
-      [{K,V} | data_keys(Rest, Changes ,Data)];
+      t_data( Rest, Changes, Data, [{K,V} | TData], ToRead );
     #{ K:=_ }->
-      data_keys(Rest, Changes ,Data);
+      t_data(Rest, Changes ,Data, TData, ToRead);
     _->
       case Data of
         #{ K:= V } when V=/=?none->
-          [{K,V} | data_keys(Rest, Changes ,Data)];
+          t_data( Rest, Changes, Data, [{K,V} | TData], ToRead );
         _->
-          data_keys(Rest, Changes, Data)
+          t_data(Rest, Changes, Data, TData, [K|ToRead])
       end
   end;
-data_keys([],_Changes,_Data)->
-  [].
+t_data([], _Changes, _Data, TData, ToRead )->
+  { TData, ToRead }.
 
 %%-----------------------------------------------------------
 %%  WRITE
 %%-----------------------------------------------------------
+write(DB, KVs, _Lock = none)->
+
+  Transaction = #transaction{changes = TChanges} = get(?transaction),
+
+  Changes = do_write(KVs, maps:get( DB, TChanges, #{}) ),
+
+  put( ?transaction, Transaction#transaction{
+    changes = TChanges#{ DB => Changes }
+  }),
+
+  ok;
+
 write(DB, KVs, Lock)->
-  in_context(DB, [K || {K,_}<-KVs], Lock, fun(Changes, Data)->
-    {do_write( KVs, Changes ), Data}
-  end),
+
+  Transaction = #transaction{changes = TChanges, locks = TLocks} = get(?transaction),
+
+  % Obtain locks on all keys before the action starts
+  Locks = lock(DB, [K || {K,_} <- KVs], Lock, maps:get(DB, TLocks, #{}) ),
+
+  Changes = do_write(KVs, maps:get( DB, TChanges, #{}) ),
+
+  put( ?transaction, Transaction#transaction{
+    changes = TChanges#{ DB => Changes },
+    locks = TLocks#{ DB => Locks }
+  }),
+
   ok.
 
 do_write([{K,V}|Rest], Changes )->
@@ -116,10 +181,31 @@ do_write([], Changes )->
 %%-----------------------------------------------------------
 %%  DELETE
 %%-----------------------------------------------------------
+delete(DB, Keys, _Lock = none)->
+
+  Transaction = #transaction{changes = TChanges} = get(?transaction),
+
+  Changes = do_delete(Keys, maps:get( DB, TChanges, #{}) ),
+
+  put( ?transaction, Transaction#transaction{
+    changes = TChanges#{ DB => Changes }
+  }),
+
+  ok;
+
 delete(DB, Keys, Lock)->
-  in_context(DB, Keys, Lock, fun(Changes, Data)->
-    {do_delete(Keys, Changes), Data}
-  end),
+  Transaction = #transaction{changes = TChanges, locks = TLocks} = get(?transaction),
+
+  % Obtain locks on all keys before the action starts
+  Locks = lock(DB, Keys, Lock, maps:get(DB, TLocks, #{}) ),
+
+  Changes = do_delete(Keys, maps:get( DB, TChanges, #{}) ),
+
+  put( ?transaction, Transaction#transaction{
+    changes = TChanges#{ DB => Changes },
+    locks = TLocks#{ DB => Locks }
+  }),
+
   ok.
 
 do_delete([K|Rest], Data)->
@@ -201,30 +287,6 @@ run_transaction(Fun, Attempts)->
 erase_transaction()->
   #transaction{locks = Locks} = erase( ?transaction ),
   release_locks( Locks, #{} ).
-
-in_context(DB, Keys, Lock, Fun)->
-  % read / write / delete actions transaction context
-  case get(?transaction) of
-    #transaction{data = Data, changes = Changes, locks = Locks}=T->
-
-      % Obtain locks on all keys before the action starts
-      DBLocks = lock(DB, Keys, Lock, maps:get(DB,Locks,#{}) ),
-
-      % Perform the action
-      {DBChanges, DBData} = Fun( maps:get(DB,Changes,#{}), maps:get(DB,Data,#{}) ),
-
-      % Update the transaction data
-      put( ?transaction, T#transaction{
-        data = Data#{ DB => DBData },
-        changes = Changes#{ DB => DBChanges },
-        locks = Locks#{ DB => DBLocks }
-      }),
-
-      % Return new database context
-      {DBChanges, DBData};
-    _ ->
-      throw(no_transaction)
-  end.
 
 %%-----------------------------------------------------------
 %%  LOCKS
@@ -308,12 +370,7 @@ commit( Changes, Data )->
         map_size(Data) =:= 1->
           single_db_commit( CommitData, Ns );
         length(Ns) =:= 1 ->
-          case rpc:call(hd(Ns),?MODULE, single_node_commit, [ CommitData ]) of
-            {badrpc, Reason}->
-              throw( Reason );
-            _->
-              ok
-          end;
+          single_node_commit( CommitData, Ns );
         true ->
           multi_node_commit(CommitData, Commit)
       end;
@@ -391,20 +448,20 @@ single_db_commit(Data, Ns)->
 
 single_db_commit( Data )->
   [{DB, {Write, Delete}}] = maps:to_list( Data ),
+  {Ref, Module} = ?dbRefMod( DB ),
 
-  #db_transaction{
-    ref = Ref,
-    module = Module,
-    tref = TRef
-  } = db_transaction( DB, Write, Delete ),
-
-  Module:commit( Ref, TRef ),
+  Module:commit( Ref, Write, Delete ),
 
   on_commit( Data ).
 
 %%-----------------------------------------------------------
 %%  SINGLE NODE COMMIT
 %%-----------------------------------------------------------
+single_node_commit( DBs, [N])->
+  case ecall:call(N,?MODULE, ?FUNCTION_NAME, [ DBs ]) of
+    {ok,_}-> ok;
+    {error, Error}-> throw( Error )
+  end.
 single_node_commit( DBs )->
   Commits = commit1( DBs ),
   commit2( Commits ).
@@ -490,14 +547,8 @@ commit_request( Master, DBs )->
 
 %-----------phase 1------------------------------------------
   SingleDBCommit = map_size( DBs ) =:= 1,
-  Commits =
-    if
-      SingleDBCommit ->
-        [{DB, {Write, Delete}}] = maps:to_list( DBs ),
-        [ db_transaction( DB, Write, Delete ) ];
-      true ->
-         commit1( DBs )
-    end,
+
+  Commits = commit1( DBs ),
 
   Master ! { confirm, self() },
 
@@ -506,8 +557,8 @@ commit_request( Master, DBs )->
 %-----------phase 2------------------------------------------
       if
         SingleDBCommit->
-          #db_transaction{ ref = Ref, module = Module, tref = TRef } = hd( Commits ),
-          Module:commit( Ref, TRef );
+          #db_commit{ ref = Ref, module = Module, t_ref = T } = hd( Commits ),
+          Module:commit( Ref, T );
         true ->
           commit2( Commits )
       end,
@@ -518,45 +569,30 @@ commit_request( Master, DBs )->
       rollback( Commits )
   end.
 
-db_transaction( DB, Write, Delete )->
+db_commit( DB, Write, Delete )->
   {Ref, Module} = ?dbRefMod( DB ),
-  TRef = Module:transaction( Ref ),
-  Module:t_write( Ref, TRef, Write),
-  Module:t_delete( Ref, TRef, Delete),
-  #db_transaction{
+  #db_commit{
     db = DB,
     module = Module,
     ref = Ref,
-    tref = TRef
+    t_ref = Module:commit1( Ref, Write, Delete )
   }.
 
 commit1( DBs )->
   maps:fold( fun(DB, {Write, Delete}, Acc)->
-    try
-      Commit = db_transaction( DB, Write, Delete ),
-      #db_transaction{
-        module = Module,
-        ref = Ref,
-        tref = TRef
-      } = Commit,
-
-      Module:commit1( Ref, TRef ),
-
-      [Commit|Acc]
+    Commit =
+    try db_commit( DB, Write, Delete )
     catch
       _:E->
         ?LOGERROR("~p commit phase 1 error: ~p",[ DB, E ]),
         rollback( Acc ),
         throw( E )
-    end
+    end,
+    [Commit|Acc]
   end, [], DBs ).
 
 commit2( Commits )->
-  [ try Module:commit2( Ref, TRef )
-    catch
-      _:E  ->
-        ?LOGERROR("~p commit phase 2 error: ~p",[ DB, E ])
-    end ||{DB, Module, Ref, TRef} <- Commits],
+  [ Module:commit2( Ref, TRef) ||#db_commit{ ref = Ref, module = Module, t_ref = TRef } <- Commits],
   ok.
 
 rollback( Commits )->
@@ -564,7 +600,7 @@ rollback( Commits )->
     catch
       _:E  ->
         ?LOGERROR("~p rollback commit phase 1 error: ~p",[ DB, E ])
-    end ||{DB, Module, Ref, TRef} <- Commits],
+    end ||#db_commit{ db = DB, ref = Ref, module = Module, t_ref = TRef } <- Commits],
   ok.
 
 on_commit(DBs)->
