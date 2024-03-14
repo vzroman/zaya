@@ -70,7 +70,7 @@
 ).
 
 -define(schemaExists,
-                              filelib:is_file(?schemaPath ++ "/CURRENT")
+                              filelib:is_dir(?schemaPath)
 
 ).
 
