@@ -367,7 +367,7 @@ commit( Changes, Data )->
       Commit = #commit{ns = Ns} = prepare_commit( CommitData ),
 
       if
-        map_size(Data) =:= 1->
+        map_size(CommitData) =:= 1->
           single_db_commit( CommitData, Ns );
         length(Ns) =:= 1 ->
           single_node_commit( CommitData, Ns );
