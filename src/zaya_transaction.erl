@@ -41,10 +41,13 @@ read(DB, Keys, _Lock = none)->
   %--------Dirty read (no lock)---------------------------
   % If the key is already in the transaction data we return it's transaction value.
   % Otherwise we don't add any new keys in the transaction data but read them in dirty mode
-  #transaction{changes = TChanges, data = TData} = get(?transaction),
+  #transaction{
+    changes = Changes0,
+    data = Data0
+  } = get(?transaction),
 
-  Changes = maps:get( DB, TChanges, ?undefined),
-  Data = maps:get( DB, TData, ?undefined ),
+  Changes = maps:get( DB, Changes0, ?undefined),
+  Data = maps:get( DB, Data0, ?undefined ),
 
   { Ready, ToRead } = t_read(Keys, Changes, Data ),
 
@@ -59,19 +62,17 @@ read(DB, Keys, _Lock = none)->
 
 read(DB, Keys, Lock)->
 
-  Transaction = get(?transaction),
-
-  #transaction{
-    changes = TChanges,
-    data = TData,
-    locks = TLocks
-  } = Transaction,
+  Transaction = #transaction{
+    changes = Changes0,
+    data = Data0,
+    locks = Locks0
+  } = get(?transaction),
 
   % Obtain locks on all keys before the action starts
-  Locks = lock(DB, Keys, Lock, maps:get(DB, TLocks,#{}) ),
+  Locks = lock(DB, Keys, Lock, maps:get(DB, Locks0, #{}) ),
 
-  Changes = maps:get( DB, TChanges, ?undefined),
-  Data = maps:get( DB, TData, ?undefined ),
+  Changes = maps:get( DB, Changes0, ?undefined),
+  Data = maps:get( DB, Data0, ?undefined ),
 
   {Ready, ToRead} = t_read(Keys, Changes, Data ),
 
@@ -93,8 +94,8 @@ read(DB, Keys, Lock)->
         end,
 
       put( ?transaction, Transaction#transaction{
-        data = TData#{ DB => NewData },
-        locks = TLocks#{ DB => Locks }
+        data = Data0#{ DB => NewData },
+        locks = Locks0#{ DB => Locks }
       }),
 
       if
@@ -147,28 +148,33 @@ t_data([], _Changes, _Data, TData, ToRead )->
 %%-----------------------------------------------------------
 write(DB, KVs, _Lock = none)->
 
-  Transaction = #transaction{changes = TChanges} = get(?transaction),
+  Transaction = #transaction{
+    changes = Changes0
+  } = get(?transaction),
 
-  Changes = do_write(KVs, maps:get( DB, TChanges, #{}) ),
+  Changes = do_write(KVs, maps:get( DB, Changes0, #{}) ),
 
   put( ?transaction, Transaction#transaction{
-    changes = TChanges#{ DB => Changes }
+    changes = Changes0#{ DB => Changes }
   }),
 
   ok;
 
 write(DB, KVs, Lock)->
 
-  Transaction = #transaction{changes = TChanges, locks = TLocks} = get(?transaction),
+  Transaction = #transaction{
+    changes = Changes0,
+    locks = Locks0
+  } = get(?transaction),
 
   % Obtain locks on all keys before the action starts
-  Locks = lock(DB, [K || {K,_} <- KVs], Lock, maps:get(DB, TLocks, #{}) ),
+  Locks = lock(DB, [K || {K,_} <- KVs], Lock, maps:get(DB, Locks0, #{}) ),
 
-  Changes = do_write(KVs, maps:get( DB, TChanges, #{}) ),
+  Changes = do_write(KVs, maps:get( DB, Changes0, #{}) ),
 
   put( ?transaction, Transaction#transaction{
-    changes = TChanges#{ DB => Changes },
-    locks = TLocks#{ DB => Locks }
+    changes = Changes0#{ DB => Changes },
+    locks = Locks0#{ DB => Locks }
   }),
 
   ok.
@@ -183,27 +189,33 @@ do_write([], Changes )->
 %%-----------------------------------------------------------
 delete(DB, Keys, _Lock = none)->
 
-  Transaction = #transaction{changes = TChanges} = get(?transaction),
+  Transaction = #transaction{
+    changes = Changes0
+  } = get(?transaction),
 
-  Changes = do_delete(Keys, maps:get( DB, TChanges, #{}) ),
+  Changes = do_delete(Keys, maps:get( DB, Changes0, #{}) ),
 
   put( ?transaction, Transaction#transaction{
-    changes = TChanges#{ DB => Changes }
+    changes = Changes0#{ DB => Changes }
   }),
 
   ok;
 
 delete(DB, Keys, Lock)->
-  Transaction = #transaction{changes = TChanges, locks = TLocks} = get(?transaction),
+
+  Transaction = #transaction{
+    changes = Changes0,
+    locks = Locks0
+  } = get(?transaction),
 
   % Obtain locks on all keys before the action starts
-  Locks = lock(DB, Keys, Lock, maps:get(DB, TLocks, #{}) ),
+  Locks = lock(DB, Keys, Lock, maps:get(DB, Locks0, #{}) ),
 
-  Changes = do_delete(Keys, maps:get( DB, TChanges, #{}) ),
+  Changes = do_delete(Keys, maps:get( DB, Changes0, #{}) ),
 
   put( ?transaction, Transaction#transaction{
-    changes = TChanges#{ DB => Changes },
-    locks = TLocks#{ DB => Locks }
+    changes = Changes0#{ DB => Changes },
+    locks = Locks0#{ DB => Locks }
   }),
 
   ok.
