@@ -79,7 +79,7 @@ read(DB, Keys, Lock)->
   if
     length( ToRead ) =:= 0 ->
       put( ?transaction, Transaction#transaction{
-        locks = Locks#{ DB => Locks }
+        locks = Locks0#{ DB => Locks }
       }),
       Ready;
     true ->
