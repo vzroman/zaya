@@ -70,12 +70,8 @@
 ).
 
 -define(schemaExists,
-                              filelib:is_file(?schemaPath ++ "/CURRENT")
+                              filelib:is_dir(?schemaPath)
 
-).
-
--define(transactionLogPath,
-                                ?schemaDir ++ "/LOG"
 ).
 
 -define(getSchema,
