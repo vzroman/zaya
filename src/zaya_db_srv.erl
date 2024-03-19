@@ -331,7 +331,6 @@ handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref =
           true->ignore
         end,
         Module:remove( default_params(DB,Params) ),
-        zaya_transaction:drop_log( DB ),
         {next_state, {add_copy, Params, ?undefined}, Data#data{ref = ?undefined}, [ {state_timeout, 0, run } ] }
       catch
         _:E:S->
