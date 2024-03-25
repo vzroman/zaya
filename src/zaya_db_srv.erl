@@ -96,7 +96,7 @@ remove_copy( DB )->
       Params = ?dbNodeParams(DB,node()),
       epipe:do([
         fun(_) -> ecall:call_all(?readyNodes, zaya_schema_srv, remove_db_copy, [DB, node()] ) end,
-        fun(_)-> Module:remove( default_params(DB,Params) ) end
+        fun(_)-> Module:remove( default_params(DB,Params) ), {ok,ok} end
       ],?undefined)
   end.
 
