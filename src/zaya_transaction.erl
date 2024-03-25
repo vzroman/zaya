@@ -558,8 +558,6 @@ commit_request( Master, DBs )->
   erlang:monitor(process, Master),
 
 %-----------phase 1------------------------------------------
-  SingleDBCommit = map_size( DBs ) =:= 1,
-
   Commits = commit1( DBs ),
 
   Master ! { confirm, self() },
@@ -567,13 +565,7 @@ commit_request( Master, DBs )->
   receive
     {'DOWN', _Ref, process, Master, normal} ->
 %-----------phase 2------------------------------------------
-      if
-        SingleDBCommit->
-          #db_commit{ ref = Ref, module = Module, t_ref = T } = hd( Commits ),
-          Module:commit( Ref, T );
-        true ->
-          commit2( Commits )
-      end,
+      commit2( Commits ),
       on_commit(DBs);
 %-----------rollback------------------------------------------
     {'DOWN', _Ref, process, Master, Reason} ->
