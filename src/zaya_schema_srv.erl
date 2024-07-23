@@ -533,7 +533,6 @@ recover_by_schema(Schema)->
   [ case ?dbModule(DB) of
       ?undefined ->
         ?LOGINFO("~p database was removed, remove local copy",[ DB ]),
-        zaya_transaction:drop_log( DB ),
         try Module:remove( zaya_db_srv:default_params(DB,Params) )
         catch
           _:E->
@@ -551,7 +550,6 @@ merge_schema([DB|Rest],OldSchema)->
   case {?dbNodeParams(DB,node()), maps:get(DB, OldSchema, ?undefined) } of
     {?undefined, #{module := Module, params:=Params } } when Params=/=?undefined->
       ?LOGINFO("~p local copy was removed, try remove",[DB]),
-      zaya_transaction:drop_log( DB ),
       try Module:remove( zaya_db_srv:default_params(DB, Params) )
       catch
         _:E->?LOGERROR("~p remove local copy error ~p",[DB,E])
