@@ -5,7 +5,6 @@
   {applications,
    [kernel,
     stdlib,
-    lager,
     ecall,
     epipe,
     esubscribe,
