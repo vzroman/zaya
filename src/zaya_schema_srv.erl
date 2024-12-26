@@ -158,7 +158,7 @@ handle_call({attach_request, Node, ?MODULE}, _From, State) ->
 
   ?LOGINFO("attach request from node ~p",[Node]),
 
-  {reply,{?schema,?getSchema},State};
+  {reply,{?schema, ?schemaId ,?getSchema},State};
 
 handle_call({node_up, Node, Info}, From, State) ->
 
@@ -450,31 +450,38 @@ try_attach_to([Node|Rest])->
     pong->
       ?LOGINFO("~p node is available, trying to get the schema",[Node]),
       case get_schema_from( Node ) of
-        {?schema,Schema}->
-          ?LOGINFO("try to recover by schema from ~p node",[Node]),
-          SchemaBackup = ?getSchema,
-          try recover_by_schema(Schema)
-          catch
-            _:E:S->
-              ?LOGERROR("error to recover from node ~p:\r\n"
-              ++"error ~p, stack ~p",[Node,E,S]),
+        {?schema, RemoteSchemaID, Schema}->
+          LocalSchemaID = ?schemaId,
+          if
+            LocalSchemaID =/= ?undefined, LocalSchemaID =/= RemoteSchemaID->
+              ?LOGWARNING("~p node has differenet schema ID, local ~p, remote ~p",[Node, LocalSchemaID, RemoteSchemaID]),
+              try_attach_to( Rest );
+            true->
+              ?LOGINFO("try to recover by schema from ~p node",[Node]),
+              SchemaBackup = ?getSchema,
+              try recover_by_schema(Schema)
+              catch
+                _:E:S->
+                  ?LOGERROR("error to recover from node ~p:\r\n"
+                  ++"error ~p, stack ~p",[Node,E,S]),
 
-              % We need to interrupt already started DBs
-              [ zaya_db_srv:close( DB ) || DB <- ?nodeDBs(node()) ],
+                  % We need to interrupt already started DBs
+                  [ zaya_db_srv:close( DB ) || DB <- ?nodeDBs(node()) ],
 
-              ?SCHEMA_CLEAR,
-              ?SCHEMA_LOAD(SchemaBackup),
+                  ?SCHEMA_CLEAR,
+                  ?SCHEMA_LOAD(SchemaBackup),
 
-              CorruptedSchemaPath =
-                ?schemaPath++"/"++atom_to_list(Node)++".corrupted_schema",
+                  CorruptedSchemaPath =
+                    ?schemaPath++"/"++atom_to_list(Node)++".corrupted_schema",
 
-              file:write_file(CorruptedSchemaPath,term_to_binary(Schema)),
+                  file:write_file(CorruptedSchemaPath,term_to_binary(Schema)),
 
-              ?LOGINFO("please send file:\r\n ~p\r\n and logs to your support",[CorruptedSchemaPath]),
-              try_attach_to(Rest)
+                  ?LOGINFO("please send file:\r\n ~p\r\n and logs to your support",[CorruptedSchemaPath]),
+                  try_attach_to(Rest)
+              end
           end;
-        {error,Error}->
-          ?LOGERROR("~p node schema request error ~p",[Node,Error]),
+        {error, Error}->
+          ?LOGERROR("~p node schema request error ~p",[Node, Error]),
           try_attach_to(Rest)
       end;
     pang->

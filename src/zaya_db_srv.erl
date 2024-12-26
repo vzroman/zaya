@@ -258,7 +258,7 @@ handle_event(state_timeout, run, {add_copy, InParams, ReplyTo}, #data{db = DB, m
         Ref = zaya_copy:copy( DB, Module, Params, #{ live => not ?dbReadOnly(DB)}),
         ?LOGINFO("~p database copy added",[DB]),
         purge_backup( Backup ),
-        {next_state, {register_copy,Params,ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+        {next_state, {register_copy, InParams, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
       catch
         _:E->
           ?LOGERROR("~p database add copy error ~p",[DB,E]),
