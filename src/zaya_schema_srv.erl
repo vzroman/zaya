@@ -399,6 +399,7 @@ try_load()->
       schema_create(),
       case os:getenv("ATTACH_TO") of
         false->
+          ?SCHEMA_ID({node(), erlang:system_time( microsecond ), erlang:unique_integer()}),
           ?LOGINFO("single node first start");
         Node->
           try_attach_to([list_to_atom( Node )])

@@ -12,8 +12,8 @@
 %%	API
 %%=================================================================
 -export([
-  handshake/2,
-  heartbeat/2
+  handshake/3,
+  heartbeat/3
 ]).
 
 %%=================================================================
@@ -29,17 +29,17 @@
   code_change/3
 ]).
 
-handshake(Node, PID)->
+handshake(Node, PID, SchemaID)->
   case whereis(?MODULE) of
     LocalPID when is_pid(LocalPID)->
-      gen_server:cast(?MODULE, {handshake, Node, PID}),
+      gen_server:cast(?MODULE, {handshake, Node, PID, SchemaID}),
       LocalPID;
     _->
       throw( not_ready )
   end.
 
-heartbeat(Node, PID)->
-  gen_server:cast(?MODULE, {heartbeat, Node, PID}).
+heartbeat(Node, PID, SchemaID)->
+  gen_server:cast(?MODULE, {heartbeat, Node, PID, SchemaID}).
 
 %%=================================================================
 %%	OTP
@@ -47,15 +47,17 @@ heartbeat(Node, PID)->
 start_link()->
   gen_server:start_link({local,?MODULE},?MODULE, [], []).
 
--record(state,{ nodes }).
+-record(state,{ nodes, schema_id, disconnected }).
 init([])->
 
   process_flag(trap_exit,true),
 
   ?LOGINFO("start node server ~p",[self()]),
 
+  SchemaID = ?schemaId,
+
   zaya_schema_srv:node_up(node(), init),
-  {Replies,_} = ecall:call_all_wait( ?allNodes--[node()], ?MODULE, handshake, [node(),self()] ),
+  {Replies,_} = ecall:call_all_wait( ?allNodes--[node()], ?MODULE, handshake, [node(), self(), SchemaID] ),
   Nodes =
     [begin
        erlang:monitor(process, PID),
@@ -64,21 +66,60 @@ init([])->
 
   timer:send_after(?CYCLE, heartbeat),
 
-  {ok,#state{ nodes = maps:from_list(Nodes)}}.
+  {ok,#state{
+    nodes = maps:from_list(Nodes),
+    schema_id = SchemaID,
+    disconnected = #{}
+  }}.
 
 handle_call(Request, From, State) ->
   ?LOGWARNING("node server got an unexpected call resquest ~p from ~p",[Request,From]),
   {noreply,State}.
 
-handle_cast({handshake, Node, PID},#state{ nodes = Nodes }=State)->
+%------------------------------------------------------------------
+% handshaking
+%------------------------------------------------------------------
+handle_cast({handshake, Node, PID, SchemaID},#state{
+  nodes = Nodes,
+  schema_id = SchemaID,
+  disconnected = Disconnected
+}=State)->
 
   erlang:monitor(process, PID),
 
   zaya_schema_srv:node_up(Node, init),
 
-  {noreply,State#state{ nodes = Nodes#{ PID => Node }}};
+  {noreply,State#state{
+    nodes = Nodes#{ PID => Node },
+    disconnected = maps:remove( Node, Disconnected )
+  }};
 
-handle_cast({heartbeat, Node, PID},#state{ nodes = Nodes }=State)->
+handle_cast({handshake, Node, _PID, RemoteSchemaID},#state{ schema_id = SchemaID, disconnected = Disconnected }=State)->
+
+  ?LOGWARNING("~p node started with a different schema ID, local: ~p, remote: ~p",[
+    Node,
+    SchemaID,
+    RemoteSchemaID
+  ]),
+
+  ecall:cast(Node, ?MODULE, heartbeat, [node(), self(), SchemaID] ),
+
+  try erlang:disconnect_node( Node )
+  catch
+    _:E->
+      ?LOGERROR("unable to disconnect from node ~p, error ~p",[ Node, E ])
+  end,
+
+  {noreply,State#state{ disconnected = Disconnected#{ Node => true } }};
+
+%---------------------------------------------------------------------
+% heartbeat
+%---------------------------------------------------------------------
+handle_cast({heartbeat, Node, PID, SchemaID},#state{
+  nodes = Nodes,
+  schema_id = SchemaID,
+  disconnected = Disconnected
+}=State)->
 
   NewNodes =
     case Nodes of
@@ -90,17 +131,40 @@ handle_cast({heartbeat, Node, PID},#state{ nodes = Nodes }=State)->
         Nodes#{ PID => Node }
     end,
 
-  {noreply,State#state{ nodes = NewNodes }};
+  {noreply,State#state{
+    nodes = NewNodes,
+    disconnected = maps:remove( Node, Disconnected )
+  }};
+handle_cast({heartbeat, Node, _PID, RemoteSchemaID},#state{
+  schema_id = SchemaID,
+  disconnected = Disconnected
+}=State)->
+
+  ?LOGWARNING("~p node is running with a different schema ID, local ~p, remote ~p",[
+    Node,
+    SchemaID,
+    RemoteSchemaID
+  ]),
+
+  ecall:cast(Node, ?MODULE, heartbeat, [node(), self(), SchemaID] ),
+
+  try erlang:disconnect_node( Node )
+  catch
+    _:E->
+      ?LOGERROR("unable to disconnect from node ~p, error ~p",[ Node, E ])
+  end,
+
+  {noreply, State#state{ disconnected = Disconnected#{ Node=>true } }};
 
 handle_cast(Request,State)->
   ?LOGWARNING("node server got an unexpected cast resquest ~p",[Request]),
   {noreply,State}.
 
-handle_info(heartbeat, State)->
+handle_info(heartbeat, #state{ schema_id = SchemaID, disconnected = Disconnected } = State)->
 
   timer:send_after(?CYCLE, heartbeat),
 
-  ecall:cast_all( ?allNodes--[node()], ?MODULE, heartbeat, [node(),self()] ),
+  ecall:cast_all( ?allNodes--[node()|maps:keys( Disconnected )], ?MODULE, heartbeat, [node(),self(), SchemaID] ),
 
   {noreply,State};
 
