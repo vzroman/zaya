@@ -501,29 +501,41 @@ attach_copy(DB,Node,Params)->
     _->
       ok
   end,
-  case lists:member( Node, ?allNodes ) of
-    false->
-      throw(node_not_attached);
-    _->
-      ok
-  end,
 
-  case lists:member(Node,?dbAllNodes(DB)) of
-    true->
-      throw(already_exists);
-    _->
-      ok
-  end,
-  case ?isNodeReady( Node ) of
-    false->
-      throw(node_not_ready);
-    _->
-      ok
-  end,
+  {ok, Unlock} = elock:lock( ?locks, DB, _IsShared = false, _Timeout = infinity, ?dbReadyNodes(DB)),
 
-  case rpc:call( Node, zaya_db_srv, attach_copy, [ DB, Params ]) of
-    ok->ok;
-    {error,Error}->throw(Error)
+  try
+    case ?dbReadOnly( DB ) of
+      true -> ok;
+      _-> throw( copy_is_not_readonly )
+    end,
+
+    case lists:member( Node, ?allNodes ) of
+      false->
+        throw(node_not_attached);
+      _->
+        ok
+    end,
+
+    case lists:member(Node,?dbAllNodes(DB)) of
+      true->
+        throw(already_exists);
+      _->
+        ok
+    end,
+    case ?isNodeReady( Node ) of
+      false->
+        throw(node_not_ready);
+      _->
+        ok
+    end,
+
+    case rpc:call( Node, zaya_db_srv, attach_copy, [ DB, Params ]) of
+      ok->ok;
+      {error,Error}->throw(Error)
+    end
+  after
+    Unlock()
   end.
 
 remove_copy(DB, Node)->
@@ -646,7 +658,13 @@ read_only( DB, IsReadOnly )->
       throw({badarg,IsReadOnly})
   end,
 
-  ecall:call_all_wait(?readyNodes, zaya_db_srv, set_readonly, [DB,IsReadOnly] ).
+  ReadyNodes = ?readyNodes,
+  {ok, Unlock} = elock:lock( ?locks, DB, _IsShared = false, _Timeout = infinity, ReadyNodes),
+
+  try ecall:call_all_wait(ReadyNodes, zaya_db_srv, set_readonly, [DB,IsReadOnly] )
+  after
+    Unlock()
+  end.
 
 on_update( DB, Action, Args )->
   esubscribe:notify(?subscriptions, DB, {Action,Args} ),
