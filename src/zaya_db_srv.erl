@@ -132,7 +132,7 @@ set_readonly( DB, IsReadOnly )->
   {ok, Unlock} = elock:lock( ?locks, DB, _IsShared = false, _Timeout = infinity, [node()]),
   try zaya_schema_srv:set_db_readonly( DB, IsReadOnly )
   after
-    Unlock
+    Unlock()
   end.
 
 
