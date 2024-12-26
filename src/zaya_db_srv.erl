@@ -250,16 +250,29 @@ handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
 %%---------------------------------------------------------------------------
 %%   ADD COPY
 %%---------------------------------------------------------------------------
-handle_event(state_timeout, run, {add_copy, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
-  try
-    Ref = zaya_copy:copy( DB, Module, default_params(DB,Params), #{ live => not ?dbReadOnly(DB)}),
-    ?LOGINFO("~p database copy added",[DB]),
-    {next_state, {register_copy,Params,ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
-  catch
-    _:E->
-      ?LOGERROR("~p database add copy error ~p",[DB,E]),
+handle_event(state_timeout, run, {add_copy, InParams, ReplyTo}, #data{db = DB, module = Module} = Data) ->
+  Params = default_params(DB, InParams),
+  case prepare_backup( maps:get(dir, Params) ) of
+    {ok, Backup} ->
+      try
+        Ref = zaya_copy:copy( DB, Module, Params, #{ live => not ?dbReadOnly(DB)}),
+        ?LOGINFO("~p database copy added",[DB]),
+        purge_backup( Backup ),
+        {next_state, {register_copy, InParams, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+      catch
+        _:E->
+          ?LOGERROR("~p database add copy error ~p",[DB,E]),
+          if
+            is_pid( ReplyTo ) -> catch ReplyTo ! {error,self(),E};
+            true -> ignore
+          end,
+          restore_backup( Backup ),
+          {stop, shutdown}
+      end;
+    {error, Error}->
+      ?LOGERROR("~p prepare database backup error ~p",[DB,Error]),
       if
-        is_pid( ReplyTo ) -> catch ReplyTo ! {error,self(),E};
+        is_pid( ReplyTo ) -> catch ReplyTo ! {error,self(),{backup_error,Error}};
         true -> ignore
       end,
       {stop, shutdown}
@@ -333,7 +346,6 @@ handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref =
           Ref =/=?undefined -> catch Module:close( Ref );
           true->ignore
         end,
-        Module:remove( default_params(DB,Params) ),
         {next_state, {add_copy, Params, ?undefined}, Data#data{ref = ?undefined}, [ {state_timeout, 0, run } ] }
       catch
         _:E:S->
@@ -432,6 +444,93 @@ lock( DB, IsShared, Timeout )->
     Error ->
       Error
   end.
+
+-record(backup, { original_dir, backup_dir }).
+prepare_backup( Dir ) when is_binary(Dir); is_list( Dir )->
+  case filelib:is_dir( Dir ) of
+    true ->
+      case backup_dir( Dir ) of
+        {ok, Backup}->
+          {ok, #backup{
+            original_dir = Dir,
+            backup_dir = Backup
+          }};
+        Error ->
+          Error
+      end;
+    _->
+      {ok, undefined}
+  end;
+prepare_backup( _Dir )->
+  {ok, undefined}.
+
+purge_backup( #backup{
+  backup_dir = Dir
+})->
+  % Do it asynchronously, to let register procedure go
+  spawn_link(fun()->
+    case file:del_dir_r( Dir ) of
+      ok->
+        ok;
+      {error, Error}->
+        ?LOGERROR("unable to delete directory ~p, error ~p",[ Dir, Error ])
+    end
+  end),
+  ok;
+purge_backup( _Backup )->
+  ok.
+
+restore_backup( #backup{
+  original_dir = OriginalDir,
+  backup_dir = BackupDir
+})->
+  try rename_dir( BackupDir, OriginalDir )
+  catch
+    _:Error->
+      ?LOGERROR("unable to restore backup ~p, to ~p, error ~p",[
+        BackupDir,
+        OriginalDir,
+        Error
+      ])
+  end.
+
+backup_dir( Dir ) when is_binary( Dir )->
+  Backup = <<Dir/binary, "@zaya_backup@">>,
+  try
+    rename_dir( Dir, Backup ),
+    {ok, Backup}
+  catch
+    _:E->{error, E}
+  end;
+backup_dir( Dir ) when is_list( Dir )->
+  Backup = Dir ++ "@zaya_backup@",
+  try
+    rename_dir( Dir, Backup ),
+    {ok, Backup}
+  catch
+    _:E->{error, E}
+  end.
+
+rename_dir( From, To )->
+  case filelib:is_dir( To ) of
+    true ->
+      case file:del_dir_r( To ) of
+        ok->
+          ok;
+        {error, DelError}->
+          throw( DelError )
+      end;
+    _->
+      ok
+  end,
+
+  case file:rename( From, To ) of
+    ok ->
+      ok;
+    {error, RenameErr}->
+      throw( RenameErr )
+  end.
+
 
 %%------------------------------------------------------------------------------------
 %%  SPLIT BRAIN:
