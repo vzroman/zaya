@@ -346,7 +346,6 @@ handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref =
           Ref =/=?undefined -> catch Module:close( Ref );
           true->ignore
         end,
-        Module:remove( default_params(DB,Params) ),
         {next_state, {add_copy, Params, ?undefined}, Data#data{ref = ?undefined}, [ {state_timeout, 0, run } ] }
       catch
         _:E:S->
@@ -516,7 +515,9 @@ rename_dir( From, To )->
           ok;
         {error, DelError}->
           throw( DelError )
-      end
+      end;
+    _->
+      ok
   end,
 
   case file:rename( From, To ) of
