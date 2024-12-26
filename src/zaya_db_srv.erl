@@ -11,8 +11,10 @@
 %%=================================================================
 -export([
   create/3,
+  attach/3,
   open/1,
   add_copy/2,
+  attach_copy/2,
   remove_copy/1,
   force_load/1,
   close/1,
@@ -62,6 +64,30 @@ create( DB, Module, InParams)->
     end
   ], ?undefined ).
 
+attach( DB, Module, InParams)->
+  epipe:do([
+    fun(_)->
+      zaya_schema_srv:add_db(DB, Module),
+      maps:get(node(), InParams, ?undefined)
+    end,
+    fun
+      (_NodeParams = ?undefined)->
+        added;
+      (NodeParams)->
+        case supervisor:start_child(zaya_db_sup,[DB, {attach, NodeParams, _ReplyTo=self()}]) of
+          {ok, PID}->
+            receive
+              {attached, PID}->
+                attached;
+              {error,PID,Error}->
+                {error,Error}
+            end;
+          Error->
+            Error
+        end
+    end
+  ], ?undefined ).
+
 open( DB )->
   case supervisor:start_child(zaya_db_sup,[DB, open]) of
     {ok, _PID}->
@@ -78,6 +104,19 @@ add_copy( DB, Params )->
     {ok, PID} when is_pid( PID )->
       receive
         {added,PID}->
+          ok;
+        {error,PID,Error}->
+          {error,Error}
+      end;
+    Error->
+      Error
+  end.
+
+attach_copy( DB, Params )->
+  case supervisor:start_child(zaya_db_sup,[DB, {attach_copy, Params, _ReplyTo=self()}]) of
+    {ok, PID} when is_pid( PID )->
+      receive
+        {added, PID}->
           ok;
         {error,PID,Error}->
           {error,Error}
@@ -188,6 +227,26 @@ handle_event(state_timeout, run, {create, Params, ReplyTo}, #data{db = DB, modul
   end;
 
 %%---------------------------------------------------------------------------
+%%   ATTACH
+%%---------------------------------------------------------------------------
+handle_event(state_timeout, run, {attach, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
+  try
+    Ref = Module:open( default_params(DB, Params) ),
+    ecall:call_all_wait(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
+    if
+      is_pid( ReplyTo ) -> catch ReplyTo ! {attached, self()};
+      true -> ignore
+    end,
+    ?LOGINFO("~p database attached",[DB]),
+    {next_state, register, Data#data{ref = Ref}, [ {state_timeout, 0, run } ] }
+  catch
+    _:E->
+      ?LOGERROR("~p database attach error ~p",[DB,E]),
+      ReplyTo ! {error,self(),E},
+      {stop, shutdown}
+  end;
+
+%%---------------------------------------------------------------------------
 %%   OPEN
 %%---------------------------------------------------------------------------
 handle_event(state_timeout, run, open, #data{db = DB} = Data) ->
@@ -273,6 +332,25 @@ handle_event(state_timeout, run, {add_copy, InParams, ReplyTo}, #data{db = DB, m
       ?LOGERROR("~p prepare database backup error ~p",[DB,Error]),
       if
         is_pid( ReplyTo ) -> catch ReplyTo ! {error,self(),{backup_error,Error}};
+        true -> ignore
+      end,
+      {stop, shutdown}
+  end;
+
+%%---------------------------------------------------------------------------
+%%   ATTACH COPY
+%%---------------------------------------------------------------------------
+handle_event(state_timeout, run, {attach_copy, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
+
+  try
+    Ref = Module:open( default_params(DB, Params) ),
+    ?LOGINFO("~p database copy attached",[DB]),
+    {next_state, {register_copy, Params, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+  catch
+    _:E->
+      ?LOGERROR("~p database attach copy error ~p",[DB,E]),
+      if
+        is_pid( ReplyTo ) -> catch ReplyTo ! {error,self(),E};
         true -> ignore
       end,
       {stop, shutdown}

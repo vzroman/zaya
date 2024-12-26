@@ -73,12 +73,14 @@
 %%=================================================================
 -export([
   create/3,
+  attach/3,
   open/1, open/2,
   force_open/2,
   close/1, close/2,
   remove/1,
 
   add_copy/3,
+  attach_copy/3,
   remove_copy/2,
   set_copy_params/3,
 
@@ -367,6 +369,52 @@ create(DB, Module, Params)->
       {OKs,Errors}
   end.
 
+attach(DB, Module, Params)->
+  if
+    is_atom(DB)->
+      ok;
+    true->
+      throw(invalid_name)
+  end,
+
+  if
+    is_map( Params )->
+      ok;
+    true->
+      throw( invalid_params )
+  end,
+
+  case lists:member( DB, ?allDBs ) of
+    true ->
+      throw( already_exists );
+    _->
+      ok
+  end,
+
+  CreateNodes =
+    case maps:keys( Params ) of
+      []->
+        throw(attach_nodes_not_defined);
+      Nodes->
+        Nodes
+    end,
+
+  case CreateNodes -- (CreateNodes -- ?readyNodes) of
+    [] -> throw(attach_nodes_not_ready);
+    _->ok
+  end,
+
+  {OKs, Errors} = ecall:call_all_wait( ?readyNodes ,zaya_db_srv, attach, [DB,Module,Params]),
+
+  case [OK || OK = {_N,{ok, attached}} <- OKs ] of
+    []->
+      ecall:cast_all( ?readyNodes, ?MODULE, remove, [DB] ),
+      throw(Errors);
+    CreateOKs->
+      ?LOGINFO("~p database attached at ~p nodes",[DB,[N || {N,_} <- CreateOKs]]),
+      {OKs,Errors}
+  end.
+
 open( DB )->
 
   case ?dbModule( DB ) of
@@ -441,6 +489,39 @@ add_copy(DB,Node,Params)->
   end,
 
   case rpc:call( Node, zaya_db_srv, add_copy, [ DB, Params ]) of
+    ok->ok;
+    {error,Error}->throw(Error)
+  end.
+
+attach_copy(DB,Node,Params)->
+
+  case ?dbModule(DB) of
+    ?undefined->
+      throw(db_not_exists);
+    _->
+      ok
+  end,
+  case lists:member( Node, ?allNodes ) of
+    false->
+      throw(node_not_attached);
+    _->
+      ok
+  end,
+
+  case lists:member(Node,?dbAllNodes(DB)) of
+    true->
+      throw(already_exists);
+    _->
+      ok
+  end,
+  case ?isNodeReady( Node ) of
+    false->
+      throw(node_not_ready);
+    _->
+      ok
+  end,
+
+  case rpc:call( Node, zaya_db_srv, attach_copy, [ DB, Params ]) of
     ok->ok;
     {error,Error}->throw(Error)
   end.
