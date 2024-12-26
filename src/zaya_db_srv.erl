@@ -467,12 +467,16 @@ prepare_backup( _Dir )->
 purge_backup( #backup{
   backup_dir = Dir
 })->
-  case file:del_dir_r( Dir ) of
-    ok->
-      ok;
-    {error, Error}->
-      ?LOGERROR("unable to delete directory ~p, error ~p",[ Dir, Error ])
-  end;
+  % Do it asynchronously, to let register procedure go
+  spawn_link(fun()->
+    case file:del_dir_r( Dir ) of
+      ok->
+        ok;
+      {error, Error}->
+        ?LOGERROR("unable to delete directory ~p, error ~p",[ Dir, Error ])
+    end
+  end),
+  ok;
 purge_backup( _Backup )->
   ok.
 
