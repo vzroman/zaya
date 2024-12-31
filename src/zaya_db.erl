@@ -362,7 +362,7 @@ create(DB, Module, Params)->
 
   case [OK || OK = {_N,{ok,created}} <- OKs ] of
     []->
-      ecall:cast_all( ?readyNodes, ?MODULE, remove, [DB] ),
+      ecall:call_all_wait( ?readyNodes, ?MODULE, remove, [DB] ),
       throw(Errors);
     CreateOKs->
       ?LOGINFO("~p database created at ~p nodes",[DB,[N || {N,_} <- CreateOKs]]),
@@ -408,7 +408,7 @@ attach(DB, Module, Params)->
 
   case [OK || OK = {_N,{ok, attached}} <- OKs ] of
     []->
-      ecall:cast_all( ?readyNodes, ?MODULE, remove, [DB] ),
+      ecall:call_all_wait( ?readyNodes, ?MODULE, remove, [DB] ),
       throw(Errors);
     CreateOKs->
       ?LOGINFO("~p database attached at ~p nodes",[DB,[N || {N,_} <- CreateOKs]]),
