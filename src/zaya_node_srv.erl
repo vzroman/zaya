@@ -47,7 +47,7 @@ heartbeat(Node, PID, SchemaID)->
 start_link()->
   gen_server:start_link({local,?MODULE},?MODULE, [], []).
 
--record(state,{ nodes, schema_id, disconnected }).
+-record(state,{ nodes, schema_id, diff_schema_nodes }).
 init([])->
 
   process_flag(trap_exit,true),
@@ -69,7 +69,7 @@ init([])->
   {ok,#state{
     nodes = maps:from_list(Nodes),
     schema_id = SchemaID,
-    disconnected = #{}
+    diff_schema_nodes = #{}
   }}.
 
 handle_call(Request, From, State) ->
@@ -82,7 +82,7 @@ handle_call(Request, From, State) ->
 handle_cast({handshake, Node, PID, SchemaID},#state{
   nodes = Nodes,
   schema_id = SchemaID,
-  disconnected = Disconnected
+  diff_schema_nodes = DiffSchemaNodes
 }=State)->
 
   erlang:monitor(process, PID),
@@ -91,10 +91,10 @@ handle_cast({handshake, Node, PID, SchemaID},#state{
 
   {noreply,State#state{
     nodes = Nodes#{ PID => Node },
-    disconnected = maps:remove( Node, Disconnected )
+    diff_schema_nodes = maps:remove( Node, DiffSchemaNodes )
   }};
 
-handle_cast({handshake, Node, _PID, RemoteSchemaID},#state{ schema_id = SchemaID, disconnected = Disconnected }=State)->
+handle_cast({handshake, Node, _PID, RemoteSchemaID},#state{ schema_id = SchemaID, diff_schema_nodes = DiffSchemaNodes }=State)->
 
   ?LOGWARNING("~p node started with a different schema ID, local: ~p, remote: ~p",[
     Node,
@@ -104,13 +104,7 @@ handle_cast({handshake, Node, _PID, RemoteSchemaID},#state{ schema_id = SchemaID
 
   ecall:cast(Node, ?MODULE, heartbeat, [node(), self(), SchemaID] ),
 
-  try erlang:disconnect_node( Node )
-  catch
-    _:E->
-      ?LOGERROR("unable to disconnect from node ~p, error ~p",[ Node, E ])
-  end,
-
-  {noreply,State#state{ disconnected = Disconnected#{ Node => true } }};
+  {noreply,State#state{ diff_schema_nodes = DiffSchemaNodes#{ Node => true } }};
 
 %---------------------------------------------------------------------
 % heartbeat
@@ -118,7 +112,7 @@ handle_cast({handshake, Node, _PID, RemoteSchemaID},#state{ schema_id = SchemaID
 handle_cast({heartbeat, Node, PID, SchemaID},#state{
   nodes = Nodes,
   schema_id = SchemaID,
-  disconnected = Disconnected
+  diff_schema_nodes = DiffSchemaNodes
 }=State)->
 
   NewNodes =
@@ -133,11 +127,11 @@ handle_cast({heartbeat, Node, PID, SchemaID},#state{
 
   {noreply,State#state{
     nodes = NewNodes,
-    disconnected = maps:remove( Node, Disconnected )
+    diff_schema_nodes = maps:remove( Node, DiffSchemaNodes )
   }};
 handle_cast({heartbeat, Node, _PID, RemoteSchemaID},#state{
   schema_id = SchemaID,
-  disconnected = Disconnected
+  diff_schema_nodes = DiffSchemaNodes
 }=State)->
 
   ?LOGWARNING("~p node is running with a different schema ID, local ~p, remote ~p",[
@@ -148,23 +142,17 @@ handle_cast({heartbeat, Node, _PID, RemoteSchemaID},#state{
 
   ecall:cast(Node, ?MODULE, heartbeat, [node(), self(), SchemaID] ),
 
-  try erlang:disconnect_node( Node )
-  catch
-    _:E->
-      ?LOGERROR("unable to disconnect from node ~p, error ~p",[ Node, E ])
-  end,
-
-  {noreply, State#state{ disconnected = Disconnected#{ Node=>true } }};
+  {noreply, State#state{ diff_schema_nodes = DiffSchemaNodes#{ Node=>true } }};
 
 handle_cast(Request,State)->
   ?LOGWARNING("node server got an unexpected cast resquest ~p",[Request]),
   {noreply,State}.
 
-handle_info(heartbeat, #state{ schema_id = SchemaID, disconnected = Disconnected } = State)->
+handle_info(heartbeat, #state{ schema_id = SchemaID, diff_schema_nodes = DiffSchemaNodes } = State)->
 
   timer:send_after(?CYCLE, heartbeat),
 
-  ecall:cast_all( ?allNodes--[node()|maps:keys( Disconnected )], ?MODULE, heartbeat, [node(),self(), SchemaID] ),
+  ecall:cast_all( ?allNodes--[node()|maps:keys( DiffSchemaNodes )], ?MODULE, heartbeat, [node(),self(), SchemaID] ),
 
   {noreply,State};
 
