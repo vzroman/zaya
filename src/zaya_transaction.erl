@@ -562,7 +562,9 @@ wait_commit2( Workers ) when map_size( Workers )>0 ->
     {'DOWN', _Ref, process, W, Reason}->
       ?LOGWARNING("~p node commit2 error: ~p",[ node(W), Reason ]),
       wait_commit2( maps:remove( W, Workers ) )
-  end.
+  end;
+wait_commit2( _Workers )->
+  ok.
 
 commit_request( Master, DBs )->
 
