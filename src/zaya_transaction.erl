@@ -495,10 +495,11 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
         {W,N}
       end || N <- Nodes]),
 
-    wait_confirm(maps:keys(DBsNs), DBsNs, NsDBs, Workers, _Ns = [] )
+    RestWorkers = wait_confirm(maps:keys(DBsNs), DBsNs, NsDBs, Workers, _Ns = [] ),
 %-----------phase 2------------------------------------------
-    % Every participant is waiting {'DOWN', _, process, Master, normal}
-    % It's accepted as the phase2 confirmation
+    [ W ! {commit2, Master} || W <- maps:keys(RestWorkers) ],
+    wait_commit2( Workers ),
+    ok
   end),
 
   receive
@@ -508,8 +509,9 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
       throw( Error )
   end.
 
-wait_confirm([], _DBsNs, _NsDBs, _Workers, _Ns )->
-  ?LOGDEBUG("transaction confirmed");
+wait_confirm([], _DBsNs, _NsDBs, Workers, _Ns )->
+  ?LOGDEBUG("transaction confirmed"),
+  Workers;
 wait_confirm(DBs, DBsNs, NsDBs, Workers, Ns )->
   receive
     {confirm, W}->
@@ -553,6 +555,17 @@ wait_confirm(DBs, DBsNs, NsDBs, Workers, Ns )->
       end
   end.
 
+wait_commit2( Workers ) when map_size( Workers )>0 ->
+  receive
+    {'DOWN', _Ref, process, W, normal}->
+      wait_commit2( maps:remove( W, Workers ) );
+    {'DOWN', _Ref, process, W, Reason}->
+      ?LOGWARNING("~p node commit2 error: ~p",[ node(W), Reason ]),
+      wait_commit2( maps:remove( W, Workers ) )
+  end;
+wait_commit2( _Workers )->
+  ok.
+
 commit_request( Master, DBs )->
 
   erlang:monitor(process, Master),
@@ -563,8 +576,8 @@ commit_request( Master, DBs )->
   Master ! { confirm, self() },
 
   receive
-    {'DOWN', _Ref, process, Master, normal} ->
 %-----------phase 2------------------------------------------
+    {commit2, Master}->
       commit2( Commits ),
       on_commit(DBs);
 %-----------rollback------------------------------------------

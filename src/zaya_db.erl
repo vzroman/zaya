@@ -73,12 +73,14 @@
 %%=================================================================
 -export([
   create/3,
+  attach/3,
   open/1, open/2,
   force_open/2,
   close/1, close/2,
   remove/1,
 
   add_copy/3,
+  attach_copy/3,
   remove_copy/2,
   set_copy_params/3,
 
@@ -360,10 +362,56 @@ create(DB, Module, Params)->
 
   case [OK || OK = {_N,{ok,created}} <- OKs ] of
     []->
-      ecall:cast_all( ?readyNodes, ?MODULE, remove, [DB] ),
+      ecall:call_all_wait( ?readyNodes, ?MODULE, remove, [DB] ),
       throw(Errors);
     CreateOKs->
       ?LOGINFO("~p database created at ~p nodes",[DB,[N || {N,_} <- CreateOKs]]),
+      {OKs,Errors}
+  end.
+
+attach(DB, Module, Params)->
+  if
+    is_atom(DB)->
+      ok;
+    true->
+      throw(invalid_name)
+  end,
+
+  if
+    is_map( Params )->
+      ok;
+    true->
+      throw( invalid_params )
+  end,
+
+  case lists:member( DB, ?allDBs ) of
+    true ->
+      throw( already_exists );
+    _->
+      ok
+  end,
+
+  CreateNodes =
+    case maps:keys( Params ) of
+      []->
+        throw(attach_nodes_not_defined);
+      Nodes->
+        Nodes
+    end,
+
+  case CreateNodes -- (CreateNodes -- ?readyNodes) of
+    [] -> throw(attach_nodes_not_ready);
+    _->ok
+  end,
+
+  {OKs, Errors} = ecall:call_all_wait( ?readyNodes ,zaya_db_srv, attach, [DB,Module,Params]),
+
+  case [OK || OK = {_N,{ok, attached}} <- OKs ] of
+    []->
+      ecall:call_all_wait( ?readyNodes, ?MODULE, remove, [DB] ),
+      throw(Errors);
+    CreateOKs->
+      ?LOGINFO("~p database attached at ~p nodes",[DB,[N || {N,_} <- CreateOKs]]),
       {OKs,Errors}
   end.
 
@@ -443,6 +491,51 @@ add_copy(DB,Node,Params)->
   case rpc:call( Node, zaya_db_srv, add_copy, [ DB, Params ]) of
     ok->ok;
     {error,Error}->throw(Error)
+  end.
+
+attach_copy(DB,Node,Params)->
+
+  case ?dbModule(DB) of
+    ?undefined->
+      throw(db_not_exists);
+    _->
+      ok
+  end,
+
+  {ok, Unlock} = elock:lock( ?locks, DB, _IsShared = false, _Timeout = infinity, ?dbReadyNodes(DB)),
+
+  try
+    case ?dbReadOnly( DB ) of
+      true -> ok;
+      _-> throw( copy_is_not_readonly )
+    end,
+
+    case lists:member( Node, ?allNodes ) of
+      false->
+        throw(node_not_attached);
+      _->
+        ok
+    end,
+
+    case lists:member(Node,?dbAllNodes(DB)) of
+      true->
+        throw(already_exists);
+      _->
+        ok
+    end,
+    case ?isNodeReady( Node ) of
+      false->
+        throw(node_not_ready);
+      _->
+        ok
+    end,
+
+    case rpc:call( Node, zaya_db_srv, attach_copy, [ DB, Params ]) of
+      ok->ok;
+      {error,Error}->throw(Error)
+    end
+  after
+    Unlock()
   end.
 
 remove_copy(DB, Node)->
@@ -565,7 +658,13 @@ read_only( DB, IsReadOnly )->
       throw({badarg,IsReadOnly})
   end,
 
-  ecall:call_all_wait(?readyNodes, zaya_db_srv, set_readonly, [DB,IsReadOnly] ).
+  ReadyNodes = ?readyNodes,
+  {ok, Unlock} = elock:lock( ?locks, DB, _IsShared = false, _Timeout = infinity, ReadyNodes),
+
+  try ecall:call_all_wait(ReadyNodes, zaya_db_srv, set_readonly, [DB,IsReadOnly] )
+  after
+    Unlock()
+  end.
 
 on_update( DB, Action, Args )->
   esubscribe:notify(?subscriptions, DB, {Action,Args} ),

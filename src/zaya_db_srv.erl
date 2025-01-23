@@ -11,8 +11,10 @@
 %%=================================================================
 -export([
   create/3,
+  attach/3,
   open/1,
   add_copy/2,
+  attach_copy/2,
   remove_copy/1,
   force_load/1,
   close/1,
@@ -62,6 +64,30 @@ create( DB, Module, InParams)->
     end
   ], ?undefined ).
 
+attach( DB, Module, InParams)->
+  epipe:do([
+    fun(_)->
+      zaya_schema_srv:add_db(DB, Module),
+      maps:get(node(), InParams, ?undefined)
+    end,
+    fun
+      (_NodeParams = ?undefined)->
+        added;
+      (NodeParams)->
+        case supervisor:start_child(zaya_db_sup,[DB, {attach, NodeParams, _ReplyTo=self()}]) of
+          {ok, PID}->
+            receive
+              {attached, PID}->
+                attached;
+              {error,PID,Error}->
+                {error,Error}
+            end;
+          Error->
+            Error
+        end
+    end
+  ], ?undefined ).
+
 open( DB )->
   case supervisor:start_child(zaya_db_sup,[DB, open]) of
     {ok, _PID}->
@@ -78,6 +104,19 @@ add_copy( DB, Params )->
     {ok, PID} when is_pid( PID )->
       receive
         {added,PID}->
+          ok;
+        {error,PID,Error}->
+          {error,Error}
+      end;
+    Error->
+      Error
+  end.
+
+attach_copy( DB, Params )->
+  case supervisor:start_child(zaya_db_sup,[DB, {attach_copy, Params, _ReplyTo=self()}]) of
+    {ok, PID} when is_pid( PID )->
+      receive
+        {added, PID}->
           ok;
         {error,PID,Error}->
           {error,Error}
@@ -129,11 +168,7 @@ remove( DB )->
   end.
 
 set_readonly( DB, IsReadOnly )->
-  {ok, Unlock} = elock:lock( ?locks, DB, _IsShared = false, _Timeout = infinity, [node()]),
-  try zaya_schema_srv:set_db_readonly( DB, IsReadOnly )
-  after
-    Unlock()
-  end.
+  zaya_schema_srv:set_db_readonly( DB, IsReadOnly ).
 
 
 split_brain(DB)->
@@ -183,6 +218,26 @@ handle_event(state_timeout, run, {create, Params, ReplyTo}, #data{db = DB, modul
   catch
     _:E->
       ?LOGERROR("~p database create error ~p",[DB,E]),
+      ReplyTo ! {error,self(),E},
+      {stop, shutdown}
+  end;
+
+%%---------------------------------------------------------------------------
+%%   ATTACH
+%%---------------------------------------------------------------------------
+handle_event(state_timeout, run, {attach, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
+  try
+    Ref = Module:open( default_params(DB, Params) ),
+    ecall:call_all_wait(?readyNodes, zaya_schema_srv, add_db_copy,[ DB, node(), Params ]),
+    if
+      is_pid( ReplyTo ) -> catch ReplyTo ! {attached, self()};
+      true -> ignore
+    end,
+    ?LOGINFO("~p database attached",[DB]),
+    {next_state, register, Data#data{ref = Ref}, [ {state_timeout, 0, run } ] }
+  catch
+    _:E->
+      ?LOGERROR("~p database attach error ~p",[DB,E]),
       ReplyTo ! {error,self(),E},
       {stop, shutdown}
   end;
@@ -250,14 +305,46 @@ handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
 %%---------------------------------------------------------------------------
 %%   ADD COPY
 %%---------------------------------------------------------------------------
-handle_event(state_timeout, run, {add_copy, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
+handle_event(state_timeout, run, {add_copy, InParams, ReplyTo}, #data{db = DB, module = Module} = Data) ->
+  Params = default_params(DB, InParams),
+  case prepare_backup( maps:get(dir, Params) ) of
+    {ok, Backup} ->
+      try
+        Ref = zaya_copy:copy( DB, Module, Params, #{ live => not ?dbReadOnly(DB)}),
+        ?LOGINFO("~p database copy added",[DB]),
+        purge_backup( Backup ),
+        {next_state, {register_copy, InParams, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+      catch
+        _:E->
+          ?LOGERROR("~p database add copy error ~p",[DB,E]),
+          if
+            is_pid( ReplyTo ) -> catch ReplyTo ! {error,self(),E};
+            true -> ignore
+          end,
+          restore_backup( Backup ),
+          {stop, shutdown}
+      end;
+    {error, Error}->
+      ?LOGERROR("~p prepare database backup error ~p",[DB,Error]),
+      if
+        is_pid( ReplyTo ) -> catch ReplyTo ! {error,self(),{backup_error,Error}};
+        true -> ignore
+      end,
+      {stop, shutdown}
+  end;
+
+%%---------------------------------------------------------------------------
+%%   ATTACH COPY
+%%---------------------------------------------------------------------------
+handle_event(state_timeout, run, {attach_copy, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
+
   try
-    Ref = zaya_copy:copy( DB, Module, default_params(DB,Params), #{ live => not ?dbReadOnly(DB)}),
-    ?LOGINFO("~p database copy added",[DB]),
-    {next_state, {register_copy,Params,ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+    Ref = Module:open( default_params(DB, Params) ),
+    ?LOGINFO("~p database copy attached",[DB]),
+    {next_state, {register_copy, Params, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
   catch
     _:E->
-      ?LOGERROR("~p database add copy error ~p",[DB,E]),
+      ?LOGERROR("~p database attach copy error ~p",[DB,E]),
       if
         is_pid( ReplyTo ) -> catch ReplyTo ! {error,self(),E};
         true -> ignore
@@ -333,7 +420,6 @@ handle_event(state_timeout, run, recovery, #data{db = DB, module = Module, ref =
           Ref =/=?undefined -> catch Module:close( Ref );
           true->ignore
         end,
-        Module:remove( default_params(DB,Params) ),
         {next_state, {add_copy, Params, ?undefined}, Data#data{ref = ?undefined}, [ {state_timeout, 0, run } ] }
       catch
         _:E:S->
@@ -432,6 +518,93 @@ lock( DB, IsShared, Timeout )->
     Error ->
       Error
   end.
+
+-record(backup, { original_dir, backup_dir }).
+prepare_backup( Dir ) when is_binary(Dir); is_list( Dir )->
+  case filelib:is_dir( Dir ) of
+    true ->
+      case backup_dir( Dir ) of
+        {ok, Backup}->
+          {ok, #backup{
+            original_dir = Dir,
+            backup_dir = Backup
+          }};
+        Error ->
+          Error
+      end;
+    _->
+      {ok, undefined}
+  end;
+prepare_backup( _Dir )->
+  {ok, undefined}.
+
+purge_backup( #backup{
+  backup_dir = Dir
+})->
+  % Do it asynchronously, to let register procedure go
+  spawn_link(fun()->
+    case file:del_dir_r( Dir ) of
+      ok->
+        ok;
+      {error, Error}->
+        ?LOGERROR("unable to delete directory ~p, error ~p",[ Dir, Error ])
+    end
+  end),
+  ok;
+purge_backup( _Backup )->
+  ok.
+
+restore_backup( #backup{
+  original_dir = OriginalDir,
+  backup_dir = BackupDir
+})->
+  try rename_dir( BackupDir, OriginalDir )
+  catch
+    _:Error->
+      ?LOGERROR("unable to restore backup ~p, to ~p, error ~p",[
+        BackupDir,
+        OriginalDir,
+        Error
+      ])
+  end.
+
+backup_dir( Dir ) when is_binary( Dir )->
+  Backup = <<Dir/binary, "@zaya_backup@">>,
+  try
+    rename_dir( Dir, Backup ),
+    {ok, Backup}
+  catch
+    _:E->{error, E}
+  end;
+backup_dir( Dir ) when is_list( Dir )->
+  Backup = Dir ++ "@zaya_backup@",
+  try
+    rename_dir( Dir, Backup ),
+    {ok, Backup}
+  catch
+    _:E->{error, E}
+  end.
+
+rename_dir( From, To )->
+  case filelib:is_dir( To ) of
+    true ->
+      case file:del_dir_r( To ) of
+        ok->
+          ok;
+        {error, DelError}->
+          throw( DelError )
+      end;
+    _->
+      ok
+  end,
+
+  case file:rename( From, To ) of
+    ok ->
+      ok;
+    {error, RenameErr}->
+      throw( RenameErr )
+  end.
+
 
 %%------------------------------------------------------------------------------------
 %%  SPLIT BRAIN:

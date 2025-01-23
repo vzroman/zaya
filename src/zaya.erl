@@ -43,12 +43,14 @@
 %%=================================================================
 -export([
   db_create/3,
+  db_attach/3,
   db_open/1, db_open/2,
   db_force_open/2,
   db_close/1, db_close/2,
   db_remove/1,
 
   db_add_copy/3,
+  db_attach_copy/3,
   db_remove_copy/2,
   db_set_copy_params/3,
 
@@ -191,6 +193,9 @@ all_nodes_dbs_params()->
 db_create(DB, Module, Params)->
   zaya_db:create(DB, Module, Params).
 
+db_attach(DB, Module, Params)->
+  zaya_db:attach(DB, Module, Params).
+
 db_open(DB)->
   zaya_db:open( DB ).
 
@@ -211,6 +216,9 @@ db_remove( DB )->
 
 db_add_copy(DB,Node,Params)->
   zaya_db:add_copy(DB,Node,Params).
+
+db_attach_copy(DB,Node,Params)->
+  zaya_db:attach_copy(DB,Node,Params).
 
 db_remove_copy(DB, Node)->
   zaya_db:remove_copy( DB, Node ).

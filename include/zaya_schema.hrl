@@ -82,6 +82,12 @@
                        }])
 ).
 
+-define(SCHEMA_ID( Id ),
+  ?SCHEMA_WRITE('@schema_id@', Id)
+).
+-define(schemaId,
+  ?schemaRead('@schema_id@')
+).
 %---------------------------------Notifications-----------------------------
 -define(schemaSubscribe(PID),
   esubscribe:subscribe(?subscriptions,?schema,PID,?readyNodes)
