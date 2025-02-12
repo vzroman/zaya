@@ -287,7 +287,6 @@ run_transaction(Fun, Attempts)->
   catch
     _:{lock,_} when Attempts > 1->
       % In the case of lock errors all held locks are released and the transaction starts from scratch
-      ?LOGDEBUG("lock error ~p"),
       erase_transaction(),
       run_transaction(Fun, Attempts-1 );
     _:Error->
