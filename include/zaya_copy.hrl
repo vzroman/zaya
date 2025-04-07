@@ -7,7 +7,6 @@
 
 % constants
 -define(DEFAULT_BATCH_SIZE, 1000).
--define(DEFAULT_REMOTE_BATCH_SIZE, 4194304). % 4 MB
 -define(DEFAULT_REMOTE_ATTEMPTS,3).
 -define(DEFAULT_FLUSH_TAIL_TIMEOUT,10000). % 10 sec
 -define(CHECK_LIVE_READY_TIMER, 5000).
@@ -17,7 +16,6 @@
 }).
 
 -define(DEFAULT_REMOTE_CONFIG,#{
-  batch_size => ?DEFAULT_REMOTE_BATCH_SIZE,						% 4 MB
   attempts => ?DEFAULT_REMOTE_ATTEMPTS,
   live => ?DEFAULT_LIVE_CONFIG
 }).
@@ -31,7 +29,6 @@
 -define(LIVE_CONFIG,maps:get(live,?REMOTE_CONFIG)).
 
 -define(BATCH_SIZE,maps:get(batch_size,?CONFIG)).
--define(REMOTE_BATCH_SIZE,maps:get(batch_size,?REMOTE_CONFIG,?DEFAULT_REMOTE_BATCH_SIZE)).
 -define(FLUSH_TAIL_TIMEOUT,maps:get(flush_tail_timeout,?LIVE_CONFIG)).
 
 

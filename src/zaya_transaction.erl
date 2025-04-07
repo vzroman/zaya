@@ -226,14 +226,19 @@ do_delete([], Data)->
   Data.
 
 ensure_editable( DB )->
-  case ?dbMasters(DB) of
-    []->
-      ?dbAvailableNodes(DB);
-    Masters->
-      Nodes = ?dbAvailableNodes(DB),
-      case Masters -- (Nodes -- Masters) of
-        []-> throw({unavailable, DB});
-        _-> Nodes
+  case ?dbReadOnly(DB) of
+    true ->
+      throw({read_only, DB});
+    _->
+      case ?dbMasters(DB) of
+        []->
+          ?dbAvailableNodes(DB);
+        Masters->
+          Nodes = ?dbAvailableNodes(DB),
+          case Masters -- (Nodes -- Masters) of
+            []-> throw({unavailable, DB});
+            _-> Nodes
+          end
       end
   end.
 
@@ -287,7 +292,6 @@ run_transaction(Fun, Attempts)->
   catch
     _:{lock,_} when Attempts > 1->
       % In the case of lock errors all held locks are released and the transaction starts from scratch
-      ?LOGDEBUG("lock error ~p"),
       erase_transaction(),
       run_transaction(Fun, Attempts-1 );
     _:Error->
@@ -303,50 +307,85 @@ erase_transaction()->
 %%-----------------------------------------------------------
 %%  LOCKS
 %%-----------------------------------------------------------
+-record(locks,{ db, nodes, type, held, acc }).
 lock(DB, Keys, Type, Locks) when Type=:=read; Type=:=write->
-  case maps:is_key({?MODULE,DB}, Locks) of
-    true->
-      do_lock( Keys, DB, ?dbAvailableNodes(DB), Type, Locks );
-    _->
-      lock( DB, Keys, Type, Locks#{
-        {?MODULE,DB} => {read,lock_key( DB, _IsShared=true, _Timeout=?infinity, ?dbAvailableNodes(DB) )}
-      })
-  end;
+
+  LockNodes = ?dbAvailableNodes(DB),
+  if
+    length( LockNodes ) =:= 0 -> throw({unavailable,DB});
+    true -> ok
+  end,
+
+  % Shared lock is set on the whole DB to prevent it's copies transformations
+  % during transactions
+  InitAcc =
+    case maps:is_key({?MODULE,DB}, Locks) of
+      true->
+        #{};
+      _->
+        #{
+          {?MODULE,DB} => {read, lock_key( DB, _IsShared=true, _Timeout=?infinity, LockNodes )}
+        }
+    end,
+
+  lock(Keys, #locks{
+    db = DB,
+    nodes = LockNodes,
+    type = Type,
+    held = Locks,
+    acc = InitAcc
+  });
 lock(_DB, _Keys, none, Locks)->
   % The lock is not needed
   Locks.
 
-do_lock(_Keys, DB, []= _Nodes, _Type, _Locks)->
-  throw({unavailable,DB});
-do_lock([K|Rest], DB, Nodes, Type, Locks)->
+lock([K|Rest], #locks{
+  acc = Acc
+} = State)->
   KeyLock =
-    case Locks of
-      #{K := {HeldType,_} = Lock} when Type=:= read; HeldType =:= write ->
-        Lock;
-      _->
-        % Write locks must be set on each DB copy.
-        % Read locks. If the DB has local copy it's
-        % enough to obtain only local lock because if the transaction
-        % origin node fails the whole transaction will be aborted. Otherwise
-        % The lock must be set at each node holding DB copy.
-        % Because if we set lock only at one (or some copies) they can fall down
-        % while the transaction is not finished then the lock will be lost and the
-        % transaction can become not isolated
-        IsLocal = lists:member(node(), Nodes),
-        LockNodes =
-          if
-            Type =:= read, IsLocal->
-              [node()];
-            true->
-              Nodes
-          end,
-        {Type, lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, LockNodes )}
+    try lock_key( K, State )
+    catch
+      _:E->
+        [Unlock() || {_Type, Unlock} <- maps:values( Acc) ],
+        throw(E)
     end,
+  lock(Rest, State#locks{
+    acc = Acc#{ K => KeyLock }
+  });
+lock([], #locks{
+  held = Held,
+  acc = Acc
+})->
+  maps:merge( Held, Acc).
 
-  do_lock( Rest, DB, Nodes, Type, Locks#{ K => KeyLock } );
-
-do_lock([], _DB, _Nodes, _Type, Locks )->
-  Locks.
+lock_key(K, #locks{
+  db = DB,
+  nodes = Nodes,
+  type = Type,
+  held = Held
+})->
+  case Held of
+    #{K := {HeldType,_} = Lock} when Type=:= read; HeldType =:= write ->
+      Lock;
+    _->
+      % Write locks must be set on each DB copy.
+      % Read locks. If the DB has local copy it's
+      % enough to obtain only local lock because if the transaction
+      % origin node fails the whole transaction will be aborted. Otherwise
+      % The lock must be set at each node holding DB copy.
+      % Because if we set lock only at one (or some copies) they can fall down
+      % while the transaction is not finished then the lock will be lost and the
+      % transaction can become not isolated
+      IsLocal = lists:member(node(), Nodes),
+      LockNodes =
+        if
+          Type =:= read, IsLocal->
+            [node()];
+          true->
+            Nodes
+        end,
+      {Type, lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, LockNodes )}
+  end.
 
 lock_key( Key, IsShared, Timeout, Nodes )->
   case elock:lock( ?locks, Key, IsShared, Timeout, Nodes) of
