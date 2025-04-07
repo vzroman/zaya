@@ -226,14 +226,19 @@ do_delete([], Data)->
   Data.
 
 ensure_editable( DB )->
-  case ?dbMasters(DB) of
-    []->
-      ?dbAvailableNodes(DB);
-    Masters->
-      Nodes = ?dbAvailableNodes(DB),
-      case Masters -- (Nodes -- Masters) of
-        []-> throw({unavailable, DB});
-        _-> Nodes
+  case ?dbReadOnly(DB) of
+    true ->
+      throw({read_only, DB});
+    _->
+      case ?dbMasters(DB) of
+        []->
+          ?dbAvailableNodes(DB);
+        Masters->
+          Nodes = ?dbAvailableNodes(DB),
+          case Masters -- (Nodes -- Masters) of
+            []-> throw({unavailable, DB});
+            _-> Nodes
+          end
       end
   end.
 
