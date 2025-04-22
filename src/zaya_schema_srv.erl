@@ -69,13 +69,13 @@
 %%	NODES
 %%=================================================================
 node_up( Node, Info )->
-  gen_server:call(?MODULE, {node_up, Node, Info}).
+  gen_server:call(?MODULE, {node_up, Node, Info}, ?infinity).
 
 node_down( Node, Info )->
-  gen_server:call(?MODULE, {node_down, Node, Info}).
+  gen_server:call(?MODULE, {node_down, Node, Info}, ?infinity).
 
 remove_node( Node )->
-  gen_server:call(?MODULE, {remove_node, Node}).
+  gen_server:call(?MODULE, {remove_node, Node}, ?infinity).
 
 split_brain( Node )->
   gen_server:cast(?MODULE, {split_brain, Node}).
