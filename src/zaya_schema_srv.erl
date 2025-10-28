@@ -566,10 +566,10 @@ merge_schema([DB|Rest],OldSchema)->
       no_local_copy;
     {Params, ?undefined}->
       ?LOGINFO("~p add local copy",[DB]),
-      spawn(fun()->zaya_db_srv:add_copy(DB, Params) end);
+      spawn(fun()->add_copy(DB, Params) end);
     {Params, #{params:=?undefined}}->
       ?LOGINFO("~p add local copy",[DB]),
-      spawn(fun()->zaya_db_srv:add_copy(DB, Params) end);
+      spawn(fun()->add_copy(DB, Params) end);
     _->
       zaya_db_srv:open( DB )
   end,
@@ -577,6 +577,14 @@ merge_schema([DB|Rest],OldSchema)->
 merge_schema([], _OldSchema)->
   ok.
 
+add_copy(DB, Params)->
+  case zaya_db_srv:add_copy(DB, Params) of
+    ok -> ok;
+    Error->
+      ?LOGERROR("~p: unable to add copy, params ~p, error ~p",[DB, Params, Error]),
+      timer:sleep(5000),
+      add_copy(DB, Params)
+  end.
 %%===========================================================================
 %%  Network recovery (split brain)
 %%===========================================================================
