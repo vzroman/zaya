@@ -139,8 +139,10 @@ init([])->
 
   process_flag(trap_exit,true),
 
-  ?LOGINFO("starting schema server ~p",[self()]),
+  ?LOGINFO("check ulimit"),
+  check_ulimit(),
 
+  ?LOGINFO("starting schema server ~p",[self()]),
   try try_load()
   catch
     _:E:S->
@@ -388,6 +390,23 @@ code_change(_OldVsn, State, _Extra) ->
 %%=================================================================
 %%	Schema initialization
 %%=================================================================
+check_ulimit()->
+  Value0 = os:cmd("ulimit -n"),
+  Value1 = [S || S <-Value0, S>=$0, S=<$9],
+  Value = list_to_integer(Value1),
+  Min = ?env(min_ulimit, ?DEFAULT_MIN_ULIMIT),
+  if
+    Value < Min ->
+      Text = io_lib:format("ulimit ~p is less than minimum ~p\n Increase the limit for the process:\nulimit -n ~p\nand restart the application",[
+        Value, Min, Min
+      ]),
+      ?LOGERROR(Text),
+      io:format(Text++"\n"),
+      timer:sleep(?infinity);
+    true ->
+      ok
+  end.
+
 try_load()->
   case ?schemaExists of
     true->
