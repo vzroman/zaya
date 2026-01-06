@@ -29,6 +29,7 @@
 %%	Internal API
 %%=================================================================
 -export([
+  single_db_node_commit/1,
   single_db_commit/1,
   single_node_commit/1,
   commit_request/2
@@ -418,6 +419,8 @@ commit( Changes, Data )->
       Commit = #commit{ns = Ns} = prepare_commit( CommitData ),
 
       if
+        map_size(CommitData) =:= 1, length(Ns) =:= 1->
+          single_db_node_commit( CommitData, Ns );
         map_size(CommitData) =:= 1->
           single_db_commit( CommitData, Ns );
         length(Ns) =:= 1 ->
@@ -489,12 +492,29 @@ prepare_commit( Data )->
   }.
 
 %%-----------------------------------------------------------
+%%  SINGLE DB & NODE COMMIT
+%%-----------------------------------------------------------
+single_db_node_commit(Data, [Node])->
+  case ecall:call(Node, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
+    {ok,_} -> ok;
+    {error, Error}-> throw( Error )
+  end.
+
+single_db_node_commit( Data )->
+  [{DB, {Write, Delete}}] = maps:to_list( Data ),
+  {Ref, Module} = ?dbRefMod( DB ),
+
+  Module:commit( Ref, Write, Delete ),
+
+  on_commit( Data ).
+
+%%-----------------------------------------------------------
 %%  SINGLE DB COMMIT
 %%-----------------------------------------------------------
 single_db_commit(Data, Ns)->
-  case ecall:call_any( Ns, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
-    {ok,_}-> ok;
-    {error, Error}-> throw( Error )
+  case ecall:call_all_wait( Ns, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
+    {Replies,_} when length(Replies) > 0 -> ok;
+    {_, Errors}-> throw( Errors )
   end.
 
 single_db_commit( Data )->
