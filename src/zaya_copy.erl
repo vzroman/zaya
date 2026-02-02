@@ -447,7 +447,7 @@ wait_ready(#live{
       Module:delete(CopyRef, Keys),
       wait_ready(Live);
     {?subscriptions, ?schema, {'open_db',Source, Node}, _Node, _Actor} when Node =:= node()->
-      ?LOGINFO("~s finsish copy",[Log]);
+      ?LOGINFO("~s finish copy",[Log]);
     _->
       wait_ready( Live )
   end.
