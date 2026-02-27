@@ -57,7 +57,7 @@ init([])->
   SchemaID = ?schemaId,
 
   zaya_schema_srv:node_up(node(), init),
-  {Replies,_} = ecall:call_all_wait( ?allNodes--[node()], ?MODULE, handshake, [node(), self(), SchemaID] ),
+  {Replies,_} = ecall:call_all_wait( ?readyNodes--[node()], ?MODULE, handshake, [node(), self(), SchemaID] ),
   Nodes =
     [begin
        erlang:monitor(process, PID),

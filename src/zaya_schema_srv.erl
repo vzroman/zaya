@@ -421,7 +421,7 @@ try_load()->
           ?SCHEMA_ID({node(), erlang:system_time( microsecond ), erlang:unique_integer()}),
           ?LOGINFO("single node first start");
         Node->
-          try_attach_to([list_to_atom( Node )])
+          try_attach_to([list_to_atom( Node )], ?ATTACH_RETRIES)
       end
   end.
 
@@ -461,9 +461,9 @@ restart([])->
   ok;
 restart(Nodes)->
   ?LOGINFO("multi-node application restart, nodes ~p",[Nodes]),
-  try_attach_to( ordsets:from_list(Nodes -- [node()]) ).
+  try_attach_to( ordsets:from_list(Nodes -- [node()]), ?ATTACH_RETRIES ).
 
-try_attach_to([Node|Rest])->
+try_attach_to([Node|Rest], Attempts)->
   ?LOGINFO("trying to connect to ~p node",[Node]),
   case net_adm:ping( Node ) of
     pong->
@@ -474,7 +474,7 @@ try_attach_to([Node|Rest])->
           if
             LocalSchemaID =/= ?undefined, LocalSchemaID =/= RemoteSchemaID->
               ?LOGWARNING("~p node has differenet schema ID, local ~p, remote ~p",[Node, LocalSchemaID, RemoteSchemaID]),
-              try_attach_to( Rest );
+              try_attach_to( Rest, Attempts );
             true->
               ?LOGINFO("try to recover by schema from ~p node",[Node]),
               SchemaBackup = ?getSchema,
@@ -496,26 +496,28 @@ try_attach_to([Node|Rest])->
                   file:write_file(CorruptedSchemaPath,term_to_binary(Schema)),
 
                   ?LOGINFO("please send file:\r\n ~p\r\n and logs to your support",[CorruptedSchemaPath]),
-                  try_attach_to(Rest)
+                  try_attach_to(Rest, Attempts)
               end
           end;
         {error, Error}->
           ?LOGERROR("~p node schema request error ~p",[Node, Error]),
-          try_attach_to(Rest)
+          try_attach_to(Rest, Attempts)
       end;
     pang->
       ?LOGINFO("~p node is not available",[Node]),
-      try_attach_to( Rest )
+      try_attach_to( Rest, Attempts )
   end;
-try_attach_to([])->
+try_attach_to([], Attempts)->
   case os:getenv("ATTACH_TO") of
     false->
-      case ?readyNodes -- [node()] of
+      case ?allNodes -- [node()] of
         []->
           ?LOGINFO("multi node application full restart"),
           [ zaya_db_srv:open( DB ) || DB <- ?nodeDBs(node()) ],
           ok;
-        ReadyNodes->
+        OtherNodes when Attempts > 0->
+          try_attach_to( OtherNodes, Attempts - 1 );
+        OtherNodes ->
           case os:getenv("FORCE_START") of
             "true"->
               ?LOGWARNING("FORCE RESTART"),
@@ -526,9 +528,9 @@ try_attach_to([])->
               ?LOGWARNING("There were active nodes ~p, when the node went down. They might have more actual data.\r\n"
               ++"Try to restart them first. If those nodes are lost or this node has the latest data you can restart it with:\r\n"
                 ++" env FORCE_START=true <your application>\r\n"
-                ++"ATTENTION! All the latest data on other nodes will be lost.",[ReadyNodes]),
+                ++"ATTENTION! All the latest data on other nodes will be lost.",[OtherNodes]),
               timer:sleep(5000),
-              try_attach_to(?allNodes)
+              try_attach_to(OtherNodes, ?ATTACH_RETRIES)
           end
       end;
     Node->
