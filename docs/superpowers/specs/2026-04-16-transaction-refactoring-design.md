@@ -260,8 +260,8 @@ Worker doesn't know the coordinator's decision. Uses `pg` consensus to resolve:
          The rollback function, for each {TRef, {RW, RD}} entry:
            a. Query is_committed(TRef, node(), DB) on all participating nodes via ecall:call_all_wait
            b. If any returns true -> delete rollback entry (data is correct from phase 1)
-           c. If all return error (no node reachable) -> retry loop until at least one responds
-           d. Otherwise (at least one false, no true) -> call Callback({RW, RD}), then delete rollback entry
+           c. If any node is unreachable (error) and no true -> retry loop (unreachable node may have {committed})
+           d. All nodes respond, no true -> call Callback({RW, RD}), then delete rollback entry
 3. If rollback callback throws -> retry loop (DB stays unavailable until rollback succeeds)
 4. Mark DB available
 ```
