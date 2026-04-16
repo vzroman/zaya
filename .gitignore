@@ -1,0 +1,6 @@
+rebar.lock
+zaya.iml
+.idea/*
+_build/*
+log/*
+logs/*
