@@ -49,28 +49,29 @@ Two types of entries coexist in the same rocksdb instance:
 Performed two ways:
 
 - **On request:** `is_committed(TRef, Node, DB)` — returns `true` if a `{committed, TRef}` entry exists containing `{Node, DB}`. On match, removes `{Node, DB}` from the entry (removes the entry entirely if no nodes/DBs remain).
-- **Periodically:** For each `{committed, TRef}` entry, check every `{Node, DB}` pair — query the remote node for a corresponding rollback entry. If no rollback entry exists, remove `{Node, DB}` from the committed entry. Remove the entire entry when empty.
+- **Periodically:** For each `{committed, TRef}` entry, check every `{Node, DB}` pair — query the remote node via `has_rollback(TRef, DB)`. If no rollback entry exists, remove `{Node, DB}` from the committed entry. Remove the entire entry when empty.
 
 ### API
 
 ```erlang
-%% Write rollback entries for all persistent DBs in a transaction (single atomic batch)
--spec write(TRef, [{DB, {RollbackWrite, RollbackDelete}}]) -> ok.
-
-%% Delete rollback entries for a transaction (single atomic batch)
--spec delete(TRef, [DB]) -> ok.
-
-%% Delete rollback entries and log committed evidence in a single atomic batch.
-%% Used by workers during crash recovery broadcasting.
--spec delete_and_log_committed(TRef, [DB], FailedPersistentNodesDBs) -> ok.
+%% Direct batch write/delete to the log. Bypasses gen_server — calls
+%% zaya_rocksdb:commit(Ref, Write, Delete) directly using Ref from persistent_term.
+%% Keys are sext-encoded internally. Callers build semantic batches:
+%%   write rollbacks:       commit([{{DB, TRef}, {RW, RD}}, ...], [])
+%%   delete rollbacks:      commit([], [{DB1, TRef}, {DB2, TRef}, ...])
+%%   delete + log committed: commit([{{committed, TRef}, FailedNodesDBs}], [{DB1, TRef}, ...])
+-spec commit(Write :: [{Key, Value}], Delete :: [Key]) -> ok.
 
 %% Check if a transaction was committed. Used during DB open recovery.
 %% Returns true if {committed, TRef} entry exists for the given Node/DB.
 %% Cleans up the Node/DB from the entry on match.
 -spec is_committed(TRef, Node, DB) -> boolean().
 
+%% Check if a rollback entry exists. Used by periodic committed entry cleanup.
+-spec has_rollback(TRef, DB) -> boolean().
+
 %% Scan rollback entries for a specific DB during open.
-%% For each {TRef, {RW, RD}}: queries is_committed on participating nodes.
+%% For each {TRef, {RW, RD}}: queries is_committed on participating nodes via ecall.
 %% If committed -> deletes rollback entry. Otherwise -> calls Callback, then deletes.
 -spec rollback(DB, Callback) -> ok.
 
@@ -78,6 +79,8 @@ Performed two ways:
 %% Used for recovered (copied) DBs and DB removal.
 -spec purge(DB) -> ok.
 ```
+
+The gen_server manages: open/close the rocksdb instance, store Ref in `persistent_term`, periodic committed entry cleanup.
 
 ### Startup/Shutdown
 
@@ -113,14 +116,14 @@ Runs entirely in one call (local or remote via ecall). No spawned coordinator �
 ```
 1. Classify: Persistent = [DB || is_persistent(DB)], NeedLog = length(Persistent) > 0
 2. prepare_rollback for each DB -> collect {DB, {RW, RD}}
-3. If NeedLog -> transaction_log:write(TRef, PersistentRollbacks)
+3. If NeedLog -> transaction_log:commit([{{DB, TRef}, {RW, RD}} || ...], [])
 4. Commit each DB sequentially:
      try Module:commit(Ref, Write, Delete)
      catch ->
        rollback all previously committed: Module:commit(Ref, RW, RD)
-       if NeedLog -> transaction_log:delete(TRef, DBs)
+       if NeedLog -> transaction_log:commit([], [{DB, TRef} || ...])
        throw error
-5. If NeedLog -> transaction_log:delete(TRef, DBs)
+5. If NeedLog -> transaction_log:commit([], [{DB, TRef} || ...])
 ```
 
 ### Multi Node Commit (N DBs, N Nodes)
@@ -154,19 +157,19 @@ Phase 2:
 
 Key properties:
 - `{commit2, Workers}` and `{rollback, Workers}` include the full list of participating worker PIDs.
-- Coordinator exits with `{committed, FailedPersistentNodesDBs}` — workers that went DOWN during phase 2. Empty list means all succeeded.
+- Coordinator exits with `{committed, FailedPersistentNodesDBs}` — only nodes with persistent DBs that went DOWN during phase 2 (filtered via AllNodesDBs IsPersistent flags). Empty list means all persistent nodes succeeded.
 - Coordinator sends `{rollback}` and waits for `{rollback_done}` before returning error. Locks are held throughout.
 
 #### Worker — Phase 1
 
 ```
 1. prepare_rollback for each local DB -> collect {DB, {RW, RD}}
-2. If any persistent -> transaction_log:write(TRef, PersistentRollbacks)
+2. If any persistent -> transaction_log:commit([{{DB, TRef}, {RW, RD}} || ...], [])
 3. Commit each local DB sequentially:
      try Module:commit(Ref, Write, Delete)
      catch ->
        rollback all previously committed: Module:commit(Ref, RW, RD)
-       transaction_log:delete(TRef, DBs)
+       transaction_log:commit([], [{DB, TRef} || ...])
        exit with error
 4. Send {confirm, self()} to coordinator
 ```
@@ -179,16 +182,16 @@ Worker accepts the decision and waits for coordinator `'DOWN'`:
 
 ```
 5.1. DOWN with {committed, []} ->
-       transaction_log:delete(TRef, DBs)
+       transaction_log:commit([], [{DB, TRef} || ...])
        normal exit
 
 5.2. DOWN with {committed, FailedPersistentNodesDBs} when non-empty ->
-       transaction_log:delete_and_log_committed(TRef, DBs, FailedPersistentNodesDBs)
+       transaction_log:commit([{{committed, TRef}, FailedPersistentNodesDBs}], [{DB, TRef} || ...])
        normal exit
 
 5.3. DOWN with other Reason (coordinator crash) ->
        broadcast {committed, Workers -- [self()]} to all Workers via PID !
-       transaction_log:delete_and_log_committed(TRef, DBs, AllPersistentNodesDBs)
+       transaction_log:commit([{{committed, TRef}, AllPersistentNodesDBs}], [{DB, TRef} || ...])
        exit
 ```
 
@@ -207,7 +210,7 @@ Worker applies rollback and waits for coordinator `'DOWN'`:
        exit
 ```
 
-Rollback is applied immediately on receiving `{rollback}`: `Module:commit(Ref, RW, RD)` for each DB, then `transaction_log:delete(TRef, DBs)`.
+Rollback is applied immediately on receiving `{rollback}`: `Module:commit(Ref, RW, RD)` for each DB, then `transaction_log:commit([], [{DB, TRef} || ...])`.
 
 #### Worker — Phase 2: Case 7 (receives `'DOWN'` before `{commit2}` or `{rollback}`)
 
@@ -221,13 +224,13 @@ Worker doesn't know the coordinator's decision. Uses `pg` consensus to resolve:
 
 7.1. {committed, Workers} ->
        broadcast {committed, Workers -- [self()]} to Workers via PID !
-       transaction_log:delete_and_log_committed(TRef, DBs, AllPersistentNodesDBs)
+       transaction_log:commit([{{committed, TRef}, AllPersistentNodesDBs}], [{DB, TRef} || ...])
        exit
 
 7.2. {rollbacked, Workers} ->
        broadcast {rollbacked, Workers -- [self()]} to Workers via PID !
        apply rollback: Module:commit(Ref, RW, RD) for each DB
-       transaction_log:delete(TRef, DBs)
+       transaction_log:commit([], [{DB, TRef} || ...])
        exit
 
 7.3. pg {join} event ->
@@ -255,9 +258,10 @@ Worker doesn't know the coordinator's decision. Uses `pg` consensus to resolve:
 2. If recovered (copied) DB -> zaya_transaction_log:purge(DB)
    Else -> zaya_transaction_log:rollback(DB, fun({RW, RD}) -> Module:commit(Ref, RW, RD) end)
          The rollback function, for each {TRef, {RW, RD}} entry:
-           a. Query is_committed(TRef, node(), DB) on all participating nodes
+           a. Query is_committed(TRef, node(), DB) on all participating nodes via ecall:call_all_wait
            b. If any returns true -> delete rollback entry (data is correct from phase 1)
-           c. Otherwise -> call Callback({RW, RD}), then delete rollback entry
+           c. If all return error (no node reachable) -> retry loop until at least one responds
+           d. Otherwise (at least one false, no true) -> call Callback({RW, RD}), then delete rollback entry
 3. If rollback callback throws -> retry loop (DB stays unavailable until rollback succeeds)
 4. Mark DB available
 ```
@@ -280,7 +284,7 @@ DB remove calls `zaya_transaction_log:purge(DB)` to clean up orphaned entries.
 
 ## Accepted Trade-offs
 
-- **Race window in Phase 1:** If a node crashes after `Module:commit` succeeds but before `transaction_log:write` was called for that DB's rollback, the committed changes have no rollback record. This window is extremely narrow and no worse than the current design where the backend's own log write could similarly fail after data write.
+- **Idempotent rollback on uncommitted data:** If a worker crashes between logging rollback entries (step 2) and `Module:commit` (step 3), rollback entries exist but no data was committed. On restart, rollback is applied — writing back the same values that are already there (idempotent, no harm).
 - **Non-persistent in-memory rollback:** If the worker process errors (not crashes — try/catch prevents crashes) between committing two non-persistent DBs, rollback data is in memory and available for recovery. Node crash loses non-persistent data regardless.
 - **prepare_rollback overhead for non-persistent backends:** Adds read cost to multi-DB transactions involving ETS/pterm. Acceptable — multi-DB transactions are the less common path.
 - **No coordinator decision log:** The coordinator does not persist its commit decision. Durable commit evidence relies on workers logging `{committed}` entries. If ALL workers crash after broadcast but before batch-writing `{committed}`, no evidence survives and all nodes rollback on restart. This requires simultaneous multi-node crashes with specific timing — extremely unlikely.
