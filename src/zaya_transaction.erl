@@ -591,16 +591,17 @@ wait_confirm(DBs, DBsNs, NsDBs, Workers, Ns )->
       case maps:take(W, Workers ) of
         {N, RestWorkers}->
 
-          ?LOGDEBUG("commit node ~p down ~p",[N,Reason]),
+          ?LOGWARNING("commit node ~p down ~p",[N,Reason]),
 
           % Remove the node from the databases active nodes
           DBsNs1 =
             maps:map(fun(DB,DBNodes)->
               case DBNodes -- [N] of
                 []->
-                  ?LOGDEBUG("~p database is unavailable, reason ~p, abort transaction",[DB,Reason]),
+                  ?LOGERROR("~p database is unavailable, reason ~p, abort transaction",[DB,Reason]),
                   throw({unavailable, DB});
                 RestNodes->
+                  ?LOGWARNING("~p database is available at ~p nodes, continue the transaction",[DB,RestNodes]),
                   RestNodes
               end
             end, DBsNs),
