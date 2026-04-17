@@ -50,7 +50,7 @@ and the value is `{RollbackWrite, RollbackDelete}` — the inverse operations to
 
 **Rollbacked entries:** `{ {rollbacked, TRef}, AllParticipatingDBsNodes }` — evidence that a transaction was rolled back. `AllParticipatingDBsNodes` has format `[{DB, [Node, ...]}, ...]` listing every DB and the nodes that hold a replica of it for this transaction. Used by `is_rollbacked/1` queries during recovery and as state for the GC sweep.
 
-There is **no committed entry**. Absence of `{rollbacked, TRef}` on every reachable node implies the transaction was committed (see DB Open Flow recovery rules). The coordinator logs `{rollbacked}` on its own node before broadcasting `{rollback}`; each worker also logs `{rollbacked}` on its own node when it learns of a rollback decision.
+There is **no committed entry**. Absence of `{rollbacked, TRef}` on every reachable node implies the transaction was committed (see DB Open Flow recovery rules). When the transaction touches at least one persistent DB, the coordinator logs `{rollbacked}` on its own node before broadcasting `{rollback}` (unless the coordinator participates, in which case the local worker covers it), and each rolling-back worker also logs `{rollbacked}` on its own node. When the whole transaction is non-persistent, nothing is logged — no recovery will ever look for the marker.
 
 ### Sequence number
 
@@ -225,6 +225,7 @@ Each `commit_request` contains:
 - `TRef` — transaction reference (created on coordinator via `make_ref/0`; `node(TRef)` returns the coordinator's node and is used as durable coordinator identity during recovery).
 - `DBs` — this node's subset of the transaction data, shape `#{DB => {Write, Delete}}`.
 - `AllParticipatingDBsNodes` — `[{DB, [Node, ...]}, ...]` listing every DB and its replica nodes for this transaction. Embedded verbatim into any `{rollbacked, TRef}` entry the worker writes.
+- `AnyPersistent` — `boolean()`, set by the coordinator to `true` if at least one participating DB (on any node) is persistent. Every `{rollbacked, TRef}` write — coordinator's 4.1 and workers' 2.2 / 5.2 / 6.3.2 / 6.3.3.1 — is guarded by this flag. When the whole transaction is non-persistent, nothing is logged anywhere: there are no rollback-data entries to write and no cross-node recovery will ever query `is_rollbacked/1` for this TRef.
 - `Coordinator` — coordinator PID (workers `erlang:monitor` it).
 
 #### Coordinator (spawned process, monitored by owner)
@@ -247,11 +248,14 @@ Each `commit_request` contains:
    3.3. Exit normal.
 
 4. Any worker 'DOWN' before its {commit1, confirm} — rollback path:
-   4.1. If the coordinator's own node is NOT a participant:
+   4.1. If AnyPersistent AND the coordinator's own node is NOT a participant:
           transaction_log:commit(
               [{{rollbacked, TRef}, AllParticipatingDBsNodes}], []).
-        If the coordinator is a participant, skip — the local worker's
-        step 2.2 or 5.2 writes {rollbacked} on this node.
+        Otherwise skip:
+          * coordinator is a participant → the local worker's step 2.2 or 5.2
+            writes {rollbacked} on this node;
+          * AnyPersistent is false → the transaction is fully non-persistent,
+            no recovery will ever look for the marker.
    4.2. Broadcast {rollback, AllWorkers} to all surviving workers via ecall:send.
    4.3. Wait for 'DOWN' from every worker.
    4.4. Exit with the original error (owner releases locks and re-raises).
@@ -261,7 +265,7 @@ Key properties:
 
 - `{commit2, AllWorkers}` and `{rollback, AllWorkers}` carry the full list of participating worker PIDs so that any worker can broadcast peer-to-peer if the coordinator dies.
 - The coordinator does **not** log on the commit path — committed is the default state in the absence of `{rollbacked, TRef}`.
-- The coordinator logs `{rollbacked}` **only** when its own node has no participating DBs (coordinator-non-participant case)<roman>If the transaction is non-persistent (all DBs) then no logging too</roman>. Otherwise the local worker covers it. `is_rollbacked/1` on `node(TRef)` is always answerable either way: if the coordinator is a participant, the local worker writes the marker; if not, step 4.1 writes it directly.
+- The coordinator logs `{rollbacked}` **only** when the transaction touches at least one persistent DB AND its own node has no participating DBs (coordinator-non-participant case). If the coordinator participates, the local worker writes the marker; if the transaction is entirely non-persistent, no marker is written anywhere. `is_rollbacked/1` on `node(TRef)` is always answerable whenever it can matter: if any persistent DB exists, either the local worker (participant case) or step 4.1 (non-participant case) writes the marker.
 
 #### Worker
 
@@ -281,11 +285,11 @@ Single state machine. The worker monitors the coordinator from the start.
 2. Phase 1 error (catch branch in step 1.3 or anywhere in step 1):
    2.1. Local rollback for any DB already committed in 1.3:
         Module:commit(Ref, RW, RD).
-   2.2. If any persistent ->
-        transaction_log:commit(
-            [{{rollbacked, TRef}, AllParticipatingDBsNodes}],
-            [#rollback{db=DB, seq=Seq, tref=TRef} || ...]).
-        — single batch: log {rollbacked} + delete pending rollback entries.
+   2.2. Single batch combining two conditionally-included groups:
+          Writes  = [{{rollbacked, TRef}, AllParticipatingDBsNodes}]   % only if AnyPersistent
+          Deletes = [#rollback{db=DB, seq=Seq, tref=TRef} || ...]      % only if any LOCAL DB is persistent (step 1.2 actually wrote them)
+        If both groups are empty, skip the call entirely.
+        transaction_log:commit(Writes, Deletes).
    2.3. Exit with error (the coordinator sees 'DOWN' and goes to step 4).
 
 3. Phase 1 ok:
@@ -296,25 +300,32 @@ Single state machine. The worker monitors the coordinator from the start.
    4.1. Reply {commit2, confirmed, self()} to coordinator via ecall:send.
    4.2. Wait for coordinator 'DOWN':
         4.2.1. 'DOWN' normal:
-               * transaction_log:commit([], [#rollback{db=DB, seq=Seq, tref=TRef} || ...])
-                 — delete rollback entries.
+               * If any LOCAL DB is persistent ->
+                   transaction_log:commit(
+                       [], [#rollback{db=DB, seq=Seq, tref=TRef} || ...]).
                * Exit normal.
         4.2.2. 'DOWN' other Reason (coordinator crashed after we confirmed):
                * Broadcast {committed, AllWorkers -- [self()]} to peer workers via ecall:send.
-               * transaction_log:commit([], [#rollback{db=DB, seq=Seq, tref=TRef} || ...])
-                 — delete rollback entries.
+               * If any LOCAL DB is persistent ->
+                   transaction_log:commit(
+                       [], [#rollback{db=DB, seq=Seq, tref=TRef} || ...]).
                * Exit normal.
                (No {committed} log entry — committed is the default.)
 
 5. On {rollback, AllWorkers}:
    5.1. Broadcast {rollbacked, AllWorkers -- [self()]} to peer workers via ecall:send.
-   5.2. transaction_log:commit(<roman>If the whole transaction is non-persistent (all DBs, not only local) then no logging</roman>
-            [{{rollbacked, TRef}, AllParticipatingDBsNodes}], []).
+   5.2. If AnyPersistent ->
+          transaction_log:commit(
+              [{{rollbacked, TRef}, AllParticipatingDBsNodes}], []).
         — log {rollbacked} BEFORE applying the rollback so recovery on this
           node will always see evidence even if the apply step crashes.
+        If AnyPersistent is false skip — no recovery query will ever ask.
    5.3. Apply rollback: Module:commit(Ref, RW, RD) for each local DB.
-   5.4. transaction_log:commit([], [#rollback{db=DB, seq=Seq, tref=TRef} || ...])
-        — delete rollback entries; the {rollbacked, TRef} marker stays.
+   5.4. If any LOCAL DB is persistent ->
+          transaction_log:commit(
+              [], [#rollback{db=DB, seq=Seq, tref=TRef} || ...]).
+        (delete rollback entries that 1.2 wrote; the {rollbacked, TRef}
+         marker — if 5.2 wrote it — stays.)
    5.5. Exit normal. (Coordinator is also waiting for our 'DOWN' in 4.3.)
 
 6. Coordinator 'DOWN' before {commit2} or {rollback} arrived — worker
@@ -326,25 +337,31 @@ Single state machine. The worker monitors the coordinator from the start.
    6.3. Wait for one of:
         6.3.1. {committed, _} from a peer:
                * Broadcast {committed, AllWorkers -- [self()]} via ecall:send.
-               * transaction_log:commit([], [#rollback{db=DB, seq=Seq, tref=TRef} || ...])
-                 — delete rollback entries.
+               * If any LOCAL DB is persistent ->
+                   transaction_log:commit(
+                       [], [#rollback{db=DB, seq=Seq, tref=TRef} || ...]).
                * Exit normal.
         6.3.2. {rollbacked, _} from a peer:
                * Broadcast {rollbacked, AllWorkers -- [self()]} via ecall:send.
-               * transaction_log:commit( <roman>If the whole transaction is non-persistent (all DBs, not only local) then no logging</roman>
-                     [{{rollbacked, TRef}, AllParticipatingDBsNodes}], []).
+               * If AnyPersistent ->
+                   transaction_log:commit(
+                       [{{rollbacked, TRef}, AllParticipatingDBsNodes}], []).
                * Apply rollback: Module:commit(Ref, RW, RD) for each local DB.
-               * transaction_log:commit([], [#rollback{db=DB, seq=Seq, tref=TRef} || ...]).
+               * If any LOCAL DB is persistent ->
+                   transaction_log:commit(
+                       [], [#rollback{db=DB, seq=Seq, tref=TRef} || ...]).
                * Exit normal.
         6.3.3. Re-evaluate consensus on every pg {join} event and every {nodedown, Node}:
                if for every participating node either (a) the node is nodedown,
                or (b) the node's worker is in the pg group, then the worker
                rolls back independently:
-                 * transaction_log:commit( <roman>If the whole transaction is non-persistent (all DBs, not only local) then no logging</roman>
-                       [{{rollbacked, TRef}, AllParticipatingDBsNodes}], []).
+                 * If AnyPersistent ->
+                     transaction_log:commit(
+                         [{{rollbacked, TRef}, AllParticipatingDBsNodes}], []).
                  * Apply rollback.
-                 * transaction_log:commit(
-                       [], [#rollback{db=DB, seq=Seq, tref=TRef} || ...]).
+                 * If any LOCAL DB is persistent ->
+                     transaction_log:commit(
+                         [], [#rollback{db=DB, seq=Seq, tref=TRef} || ...]).
                  * Exit normal.
                Any participating node that is alive and NOT in the pg group is
                treated as "will broadcast" — keep waiting. No other wakeups;
@@ -364,14 +381,19 @@ Single state machine. The worker monitors the coordinator from the start.
                  a broadcast.
 ```
 
-**Guard asymmetry (implementation note):** step 1.2 is guarded by "if any local DB is persistent" because `#rollback{}` entries only exist to replay inverse operations on *this* node's persistent data during recovery. The `{rollbacked, TRef}` writes in 5.2 / 6.3.2 / 6.3.3.1 have no such guard — the marker is cluster-wide evidence for peer `is_rollbacked/1` queries, and a worker with only non-persistent local DBs still contributes to that N-way redundancy. Mirror this reasoning as an inline comment at each unguarded write site in the code.
+**Two guards (implementation note):** the rollback-data and the `{rollbacked, TRef}` writes use different guards — mirror both as inline comments at each write site in the code.
+
+- **`#rollback{}` entries** (step 1.2, plus the delete-side of 2.2 / 4.2.1 / 4.2.2 / 5.4 / 6.3.1 / 6.3.2 / 6.3.3) are guarded by "any **local** DB is persistent". They replay inverse operations on this node's persistent data during recovery; non-persistent local DBs need nothing.
+- **`{rollbacked, TRef}` marker writes** (coordinator 4.1; worker 2.2 / 5.2 / 6.3.2 / 6.3.3.1) are guarded by `AnyPersistent` — true iff **any** participating DB on any node is persistent. A worker with only non-persistent local DBs still contributes to cluster-wide evidence when the transaction touches a remote persistent DB; but if the whole transaction is non-persistent, nobody will ever query `is_rollbacked/1` for this TRef.
 
 **pg semantics (per the consensus rule):** A worker joins `pg:join(zaya_transaction, TRef)` exactly when it enters step 6. A worker that has decided (steps 4 or 5) is never in the group — either it already broadcast `{committed}` / `{rollbacked}` or it is about to. So an alive peer that is not in the group is treated as "a broadcast is coming; keep waiting". Step 6.3.3 fires only when every peer is either in the group or has its node down. Step 6.3.4's timer poll covers the one case pg can't distinguish: a peer that phase-1-failed, ran step 2.2 (wrote `{rollbacked}` locally) and exited without ever joining pg — from the other workers' perspective it looks alive-and-silent; the poll finds the disk evidence directly.
 
 ### Log vs. No-Log Decision
 
-- All DBs non-persistent: prepare_rollback for all, keep rollback in memory only (no log). If node crashes, non-persistent data is lost anyway.
-- Any persistent DB: prepare_rollback for all, log persistent rollbacks.
+The decision applies to both kinds of log entry (`#rollback{}` data entries and the `{rollbacked, TRef}` marker).
+
+- **All DBs non-persistent** (`AnyPersistent = false`): `prepare_rollback` for all, keep rollback data in memory only — no `#rollback{}` entries and no `{rollbacked, TRef}` marker. If a node crashes non-persistent data is lost anyway, and no recovery query will ever look for the marker.
+- **Any persistent DB** (`AnyPersistent = true`): `prepare_rollback` for all; each worker logs `#rollback{}` entries for its local persistent DBs (step 1.2), and any worker that reaches a rollback decision logs the cluster-wide `{rollbacked, TRef}` marker on its node. The coordinator also logs the marker on its own node iff it is not a participant (step 4.1).
 
 ## DB Open Flow in `zaya_db_srv`
 
@@ -448,9 +470,9 @@ Single state machine. The worker monitors the coordinator from the start.
 - **Idempotent rollback on uncommitted data:** If a worker crashes between logging rollback entries (step 1.2) and the per-DB `Module:commit` (step 1.3), rollback entries exist but no data was committed. On recovery the rollback is applied — writing back the same values that are already there (idempotent, no harm).
 - **Non-persistent in-memory rollback:** If a worker process errors (not crashes — try/catch prevents crashes) between committing two non-persistent DBs, rollback data is in memory and available for in-process recovery. Node crash loses non-persistent data regardless.
 - **`prepare_rollback` overhead for non-persistent backends:** adds a read cost to multi-DB transactions involving ETS/pterm. Acceptable — multi-DB transactions are the uncommon path.
-- **`{rollbacked}`-only logging; commit is the default:** The log records rollbacks, never commits. Absence of `{rollbacked, TRef}` on every reachable node implies committed (R2). This eliminates the `{committed}` log-entry GC complexity at the cost of one assumption: cluster-wide reachability of *some* node with evidence. The coordinator logs `{rollbacked}` on its own node before broadcasting `{rollback}`, and every rolling-back worker also logs `{rollbacked}` on its own node — so even with cascading failures the evidence is N-way redundant.
+- **`{rollbacked}`-only logging; commit is the default:** The log records rollbacks, never commits. Absence of `{rollbacked, TRef}` on every reachable node implies committed (R2). This eliminates the `{committed}` log-entry GC complexity at the cost of one assumption: cluster-wide reachability of *some* node with evidence. When the transaction touches any persistent DB, the marker is written N-way redundantly — by the coordinator on its node (if non-participant) plus every rolling-back worker on its own node — so even with cascading failures the evidence survives. Fully non-persistent transactions skip the marker entirely (no recovery will ever query for it).
 - **R1 wins over R2 (peer-evidence beats coordinator-not-found):** If a phase-1-failing worker logs `{rollbacked}` and exits before the coordinator finishes its own `{rollbacked}` write, recovery on a third node could see "coordinator not_found" + "peer rollbacked" simultaneously. The rule order `R1 > R2` accepts the rollback in this case (per concern C2). The reverse ordering would risk treating a rolled-back transaction as committed.
-- **Coordinator-non-participant overhead:** When the coordinator's node has no participating DBs, its `{rollbacked}` log entry references DBs that don't live there. Intentional: the coordinator is the source of truth and `node(TRef)` is the canonical lookup. Cost is one fsync per rollback only; the happy path never logs on the coordinator.
+- **Coordinator-non-participant overhead:** When the coordinator's node has no participating DBs but the transaction has at least one persistent DB, step 4.1 writes a `{rollbacked}` entry on a node that otherwise holds no data for the transaction. Intentional: the coordinator is the source of truth and `node(TRef)` is the canonical lookup. Cost is one fsync per rollback only; the happy path never logs on the coordinator, and fully non-persistent transactions never log anywhere.
 - **Cluster-wide recovery query:** `is_rollbacked/1` is invoked on every known node, not just DB replicas, so any node with evidence is reached. Non-participants harmlessly answer `{ok, false}`. One `ecall:call_all_wait` per stuck TRef during a DB's open scan (no batching of TRefs into a single call — per F15 resolution).
 - **Stuck recovery via env override:** When the coordinator is unreachable AND no peer has `{rollbacked}` evidence, recovery loops on R3 until either evidence arrives or `PENDING_TRANSACTIONS` is set. The env is global per boot; operators inspect candidates via `zaya:list_pending_transactions/0`. Env stays set across restarts until the operator clears it.
 - **O(N²) peer broadcasts:** Workers broadcast `{committed}` / `{rollbacked}` to all peers in steps 4.2.2, 5.1, 6.3.1, and 6.3.2. Acceptable for typical cluster sizes; revisit if N grows large. Erlang messages are cheap and rollback is the unhappy path.
