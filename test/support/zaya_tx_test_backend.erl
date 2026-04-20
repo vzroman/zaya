@@ -26,13 +26,20 @@ create(Params) ->
 
 open(Params) ->
   Dir = dir_key(Params),
-  Table = ets:new(?MODULE, [public, ordered_set]),
-  ets:insert(Table, snapshot(Dir)),
-  #{dir => Dir, table => Table}.
+  case persistent_term:get({?MODULE, open_count, Dir}, 0) of
+    0 ->
+      persistent_term:put({?MODULE, open_count, Dir}, 1),
+      Table = ets:new(?MODULE, [public, ordered_set]),
+      ets:insert(Table, snapshot(Dir)),
+      #{dir => Dir, table => Table};
+    _ ->
+      erlang:error({already_open, Dir})
+  end.
 
 close(#{dir := Dir, table := Table}) ->
   sync(Dir, Table),
   catch ets:delete(Table),
+  persistent_term:erase({?MODULE, open_count, Dir}),
   ok.
 
 commit(#{dir := Dir, table := Table}, Write, Delete) ->
@@ -95,6 +102,7 @@ remove(Params) ->
   Dir = dir_key(Params),
   persistent_term:erase({?MODULE, store, Dir}),
   persistent_term:erase({?MODULE, commit_count, Dir}),
+  persistent_term:erase({?MODULE, open_count, Dir}),
   ok.
 
 is_persistent() ->
@@ -129,6 +137,7 @@ reset(ParamsOrDir) ->
   Dir = dir_key(ParamsOrDir),
   persistent_term:erase({?MODULE, store, Dir}),
   persistent_term:erase({?MODULE, commit_count, Dir}),
+  persistent_term:erase({?MODULE, open_count, Dir}),
   persistent_term:erase({?MODULE, fail_once, Dir}),
   persistent_term:erase({?MODULE, fail_after_confirm, Dir}),
   ok.

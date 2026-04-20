@@ -26,8 +26,8 @@
 -define(REF_KEY, {?MODULE, ref}).
 -define(ATOMICS_REF_KEY, {?MODULE, atomics_ref}).
 -define(PENDING_TABLE, zaya_transaction_log_pending_transactions).
--define(DEFAULT_REF_WAIT_TIMEOUT_MS, 30000).
--define(DEFAULT_REF_WAIT_POLL_MS, 100).
+-define(DEFAULT_REF_WAIT_TIMEOUT_MS, 600000).
+-define(DEFAULT_REF_WAIT_POLL_MS, 1000).
 
 -record(state, {
   ref,

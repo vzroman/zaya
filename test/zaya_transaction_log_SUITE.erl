@@ -19,6 +19,7 @@
   pending_transaction_visibility_tracks_manual_decision_test/1,
   db_open_replays_pending_rollback_test/1,
   db_open_retries_after_rollback_commit_failure_test/1,
+  db_open_retries_after_post_commit_failure_without_leaking_ref_test/1,
   attach_copy_purges_stale_rollbacks_test/1
 ]).
 
@@ -31,6 +32,7 @@ all() ->
     pending_transaction_visibility_tracks_manual_decision_test,
     db_open_replays_pending_rollback_test,
     db_open_retries_after_rollback_commit_failure_test,
+    db_open_retries_after_post_commit_failure_without_leaking_ref_test,
     attach_copy_purges_stale_rollbacks_test
   ].
 
@@ -268,6 +270,35 @@ db_open_retries_after_rollback_commit_failure_test(Config) ->
     ok = wait_until(fun() -> zaya:is_db_available(DB) end, 80),
     ?assertEqual([{item, old_value}], zaya:read(DB, [item])),
     ?assertEqual(1, zaya_tx_test_backend:commit_count(FullParams))
+  after
+    cleanup_db(DB, FullParams)
+  end.
+
+db_open_retries_after_post_commit_failure_without_leaking_ref_test(Config) ->
+  DB = test_db(db_open_retries_after_post_commit_failure_without_leaking_ref_test),
+  Params = db_params(Config, "db-open-fail-after-confirm"),
+  FullParams = zaya_db_srv:default_params(DB, Params),
+  try
+    ok = zaya_schema_srv:add_db(DB, zaya_tx_test_backend),
+    ok = zaya_schema_srv:add_db_copy(DB, node(), Params),
+    ok = zaya_tx_test_backend:seed(FullParams, [{item, newer_value}]),
+    TRef = make_ref(),
+    Seq = zaya_transaction_log:seq(),
+    ok = zaya_transaction_log:commit(
+      [
+        {{rollbacked, TRef}, [{DB, [node()]}]},
+        {{rollback, DB, Seq, TRef}, {[{item, old_value}], []}}
+      ],
+      []
+    ),
+    ok = zaya_tx_test_backend:fail_after_confirm(FullParams),
+    ok = zaya_db_srv:open(DB),
+    timer:sleep(300),
+    ?assertEqual(false, zaya:is_db_available(DB)),
+    ?assertEqual(1, zaya_tx_test_backend:commit_count(FullParams)),
+    ok = wait_until(fun() -> zaya:is_db_available(DB) end, 80),
+    ?assertEqual([{item, old_value}], zaya:read(DB, [item])),
+    ?assertEqual(2, zaya_tx_test_backend:commit_count(FullParams))
   after
     cleanup_db(DB, FullParams)
   end.
