@@ -14,6 +14,7 @@
 -export([
   seq_and_marker_roundtrip_test/1,
   rollback_replays_newest_first_test/1,
+  recovery_classifier_treats_unexpected_replies_as_errors_test/1,
   rollback_callback_failure_preserves_entries_across_retry_test/1,
   purge_deletes_only_db_entries_test/1,
   pending_transaction_visibility_tracks_manual_decision_test/1,
@@ -27,6 +28,7 @@ all() ->
   [
     seq_and_marker_roundtrip_test,
     rollback_replays_newest_first_test,
+    recovery_classifier_treats_unexpected_replies_as_errors_test,
     rollback_callback_failure_preserves_entries_across_retry_test,
     purge_deletes_only_db_entries_test,
     pending_transaction_visibility_tracks_manual_decision_test,
@@ -102,6 +104,31 @@ rollback_replays_newest_first_test(_Config) ->
       {[{item, old_value}], []}
     ],
     lists:reverse(get(applied_rollbacks))
+  ).
+
+recovery_classifier_treats_unexpected_replies_as_errors_test(_Config) ->
+  Node1 = node(),
+  Node2 = list_to_atom("other1@nohost"),
+  Node3 = list_to_atom("other2@nohost"),
+  Node4 = list_to_atom("other3@nohost"),
+  ?assertEqual(
+    {
+      [{Node1, {ok, false}}],
+      [
+        {Node2, {error, timeout}},
+        {Node3, {badrpc, nodedown}},
+        {Node4, noconnection}
+      ]
+    },
+    zaya_transaction_log:classify_recovery_responses(
+      [
+        {Node1, {ok, false}},
+        {Node2, {error, timeout}},
+        {Node3, {badrpc, nodedown}},
+        {Node4, noconnection}
+      ],
+      []
+    )
   ).
 
 rollback_callback_failure_preserves_entries_across_retry_test(_Config) ->

@@ -23,6 +23,12 @@
   code_change/3
 ]).
 
+-ifdef(TEST).
+-export([
+  classify_recovery_responses/2
+]).
+-endif.
+
 -define(REF_KEY, {?MODULE, ref}).
 -define(ATOMICS_REF_KEY, {?MODULE, atomics_ref}).
 -define(PENDING_TABLE, zaya_transaction_log_pending_transactions).
@@ -207,14 +213,31 @@ wait_for_ref(RemainingMs) ->
       {ok, Ref}
   end.
 
+classify_recovery_responses(Replies0, Errors) ->
+  {ReachableReplies, ReplyErrors} =
+    lists:foldl(
+      fun({Node, Reply}, {ReachableAcc, ErrorAcc}) ->
+        case Reply of
+          {ok, true} ->
+            {[{Node, Reply} | ReachableAcc], ErrorAcc};
+          {ok, false} ->
+            {[{Node, Reply} | ReachableAcc], ErrorAcc};
+          {error, timeout} ->
+            {ReachableAcc, [{Node, Reply} | ErrorAcc]};
+          _ ->
+            {ReachableAcc, [{Node, Reply} | ErrorAcc]}
+        end
+      end,
+      {[], []},
+      Replies0
+    ),
+  {lists:reverse(ReachableReplies), lists:reverse(ReplyErrors) ++ Errors}.
+
 decide_recovery(TRef) ->
   {Replies0, Errors} =
     ecall:call_all_wait(zaya:all_nodes(), ?MODULE, is_rollbacked, [TRef]),
-  ReachableReplies =
-    [{Node, Reply} || {Node, Reply} <- Replies0, Reply =/= {error, timeout}],
-  TimeoutReplies =
-    [{Node, timeout} || {Node, {error, timeout}} <- Replies0],
-  CombinedErrors = TimeoutReplies ++ Errors,
+  {ReachableReplies, CombinedErrors} =
+    classify_recovery_responses(Replies0, Errors),
   case lists:any(fun({_Node, Reply}) -> Reply =:= {ok, true} end, ReachableReplies) of
     true ->
       rollback;
@@ -242,11 +265,8 @@ pending_transaction_decision(TRef) ->
 pending_transaction_decision_loop(TRef) ->
   {Replies0, Errors} =
     ecall:call_all_wait(zaya:all_nodes(), ?MODULE, is_rollbacked, [TRef]),
-  ReachableReplies =
-    [{Node, Reply} || {Node, Reply} <- Replies0, Reply =/= {error, timeout}],
-  TimeoutReplies =
-    [{Node, timeout} || {Node, {error, timeout}} <- Replies0],
-  CombinedErrors = TimeoutReplies ++ Errors,
+  {ReachableReplies, CombinedErrors} =
+    classify_recovery_responses(Replies0, Errors),
   case lists:any(fun({_Node, Reply}) -> Reply =:= {ok, true} end, ReachableReplies) of
     true ->
       rollback;
