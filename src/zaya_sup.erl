@@ -43,6 +43,15 @@ init([]) ->
     modules=>[elock]
   },
 
+  TransactionLogServer = #{
+    id=>zaya_transaction_log,
+    start=>{zaya_transaction_log,start_link,[]},
+    restart=>permanent,
+    shutdown=> ?env(stop_timeout, ?DEFAULT_STOP_TIMEOUT),
+    type=>worker,
+    modules=>[zaya_transaction_log]
+  },
+
   DBSup=#{
     id=>zaya_db_sup,
     start=>{zaya_db_sup,start_link,[]},
@@ -79,9 +88,9 @@ init([]) ->
   {ok, {Supervisor, [
     SubscriptionsServer,
     LockServer,
+    TransactionLogServer,
     DBSup,
     SchemaServer,
     NodeServer
   ]}}.
-
 

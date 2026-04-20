@@ -277,6 +277,12 @@ handle_event(state_timeout, run, try_open, #data{db = DB, module = Module} = Dat
 
   try
     Ref = Module:open( default_params(DB, ?dbNodeParams(DB,node())) ),
+    ok = zaya_transaction_log:rollback(
+      DB,
+      fun({RollbackWrite, RollbackDelete}) ->
+        Module:commit(Ref, RollbackWrite, RollbackDelete)
+      end
+    ),
     {next_state, register, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
   catch
     _:E->
@@ -311,6 +317,7 @@ handle_event(state_timeout, run, {add_copy, InParams, ReplyTo}, #data{db = DB, m
     {ok, Backup} ->
       try
         Ref = zaya_copy:copy( DB, Module, Params, #{ live => not ?dbReadOnly(DB)}),
+        ok = zaya_transaction_log:purge(DB),
         ?LOGINFO("~p database copy added",[DB]),
         purge_backup( Backup ),
         {next_state, {register_copy, InParams, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
@@ -340,6 +347,7 @@ handle_event(state_timeout, run, {attach_copy, Params, ReplyTo}, #data{db = DB, 
 
   try
     Ref = Module:open( default_params(DB, Params) ),
+    ok = zaya_transaction_log:purge(DB),
     ?LOGINFO("~p database copy attached",[DB]),
     {next_state, {register_copy, Params, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
   catch
@@ -673,4 +681,3 @@ update_nodes( [N|Rest], DB )->
   end;
 update_nodes([], _DB )->
   error.
-
