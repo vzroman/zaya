@@ -14,8 +14,11 @@
 -export([
   seq_and_marker_roundtrip_test/1,
   rollback_replays_newest_first_test/1,
+  rollback_callback_failure_preserves_entries_across_retry_test/1,
   purge_deletes_only_db_entries_test/1,
+  pending_transaction_visibility_tracks_manual_decision_test/1,
   db_open_replays_pending_rollback_test/1,
+  db_open_retries_after_rollback_commit_failure_test/1,
   attach_copy_purges_stale_rollbacks_test/1
 ]).
 
@@ -23,8 +26,11 @@ all() ->
   [
     seq_and_marker_roundtrip_test,
     rollback_replays_newest_first_test,
+    rollback_callback_failure_preserves_entries_across_retry_test,
     purge_deletes_only_db_entries_test,
+    pending_transaction_visibility_tracks_manual_decision_test,
     db_open_replays_pending_rollback_test,
+    db_open_retries_after_rollback_commit_failure_test,
     attach_copy_purges_stale_rollbacks_test
   ].
 
@@ -48,9 +54,11 @@ end_per_suite(_Config) ->
 
 init_per_testcase(_Name, Config) ->
   put(applied_rollbacks, []),
+  os:unsetenv("PENDING_TRANSACTIONS"),
   Config.
 
 end_per_testcase(_Name, _Config) ->
+  os:unsetenv("PENDING_TRANSACTIONS"),
   ok.
 
 seq_and_marker_roundtrip_test(_Config) ->
@@ -82,7 +90,8 @@ rollback_replays_newest_first_test(_Config) ->
   ok = zaya_transaction_log:rollback(
     orders,
     fun(RollbackOps) ->
-      put(applied_rollbacks, [RollbackOps | get(applied_rollbacks)])
+      put(applied_rollbacks, [RollbackOps | get(applied_rollbacks)]),
+      ok
     end
   ),
   ?assertEqual(
@@ -92,6 +101,46 @@ rollback_replays_newest_first_test(_Config) ->
     ],
     lists:reverse(get(applied_rollbacks))
   ).
+
+rollback_callback_failure_preserves_entries_across_retry_test(_Config) ->
+  TRef = make_ref(),
+  Seq = zaya_transaction_log:seq(),
+  RollbackOps = {[{item, old_value}], []},
+  ok = zaya_transaction_log:commit(
+    [
+      {{rollbacked, TRef}, [{orders, [node()]}]},
+      {{rollback, orders, Seq, TRef}, RollbackOps}
+    ],
+    []
+  ),
+  ?assertException(
+    error,
+    {badmatch, callback_failed},
+    zaya_transaction_log:rollback(
+      orders,
+      fun(_Ops) ->
+        callback_failed
+      end
+    )
+  ),
+  put(applied_rollbacks, []),
+  ok = zaya_transaction_log:rollback(
+    orders,
+    fun(Ops) ->
+      put(applied_rollbacks, [Ops | get(applied_rollbacks)]),
+      ok
+    end
+  ),
+  ?assertEqual([RollbackOps], lists:reverse(get(applied_rollbacks))),
+  put(applied_rollbacks, []),
+  ok = zaya_transaction_log:rollback(
+    orders,
+    fun(Ops) ->
+      put(applied_rollbacks, [Ops | get(applied_rollbacks)]),
+      ok
+    end
+  ),
+  ?assertEqual([], get(applied_rollbacks)).
 
 purge_deletes_only_db_entries_test(_Config) ->
   TRef = make_ref(),
@@ -105,6 +154,63 @@ purge_deletes_only_db_entries_test(_Config) ->
   ),
   ok = zaya_transaction_log:purge(orders),
   ?assertEqual({ok, true}, zaya_transaction_log:is_rollbacked(TRef)).
+
+pending_transaction_visibility_tracks_manual_decision_test(_Config) ->
+  DB = test_db(pending_transaction_visibility_tracks_manual_decision_test),
+  Participation = [],
+  {CoordinatorNode, TRef} = make_remote_ref(),
+  try
+    ok = zaya_schema_srv:node_up(CoordinatorNode, pending_transaction_test),
+    Seq = zaya_transaction_log:seq(),
+    ok = zaya_transaction_log:commit(
+      [
+        {{rollback, DB, Seq, TRef}, {[{item, old_value}], []}}
+      ],
+      []
+    ),
+    Parent = self(),
+    RollbackPid =
+      spawn(fun() ->
+        Result =
+          catch zaya_transaction_log:rollback(
+            DB,
+            fun(Ops) ->
+              Parent ! {rollback_callback, self(), Ops},
+              ok
+            end
+          ),
+        Parent ! {rollback_finished, self(), Result}
+      end),
+    ok = wait_until(fun() -> pending_transaction_visible(TRef, Participation, undefined) end, 100),
+    ?assertEqual(
+      [{TRef, Participation, undefined}],
+      zaya:list_pending_transactions()
+    ),
+    os:putenv("PENDING_TRANSACTIONS", "ROLLBACK"),
+    ok = wait_until(fun() -> pending_transaction_visible(TRef, Participation, rollback) end, 20),
+    ?assertEqual(
+      [{TRef, Participation, rollback}],
+      zaya:list_pending_transactions()
+    ),
+    receive
+      {rollback_callback, RollbackPid, {[{item, old_value}], []}} ->
+        ok
+    after 7000 ->
+      ct:fail(rollback_callback_timeout)
+    end,
+    receive
+      {rollback_finished, RollbackPid, ok} ->
+        ok;
+      {rollback_finished, RollbackPid, Result} ->
+        ct:fail({unexpected_rollback_result, Result})
+    after 7000 ->
+      ct:fail(rollback_finish_timeout)
+    end,
+    ?assertEqual([], zaya:list_pending_transactions())
+  after
+    cleanup_schema_node(CoordinatorNode),
+    os:unsetenv("PENDING_TRANSACTIONS")
+  end.
 
 db_open_replays_pending_rollback_test(Config) ->
   DB = test_db(db_open_replays_pending_rollback_test),
@@ -131,6 +237,35 @@ db_open_replays_pending_rollback_test(Config) ->
     ok = wait_until(fun() -> whereis(DB) =:= undefined end),
     ok = zaya_db_srv:open(DB),
     ok = wait_until(fun() -> zaya:is_db_available(DB) end),
+    ?assertEqual([{item, old_value}], zaya:read(DB, [item])),
+    ?assertEqual(1, zaya_tx_test_backend:commit_count(FullParams))
+  after
+    cleanup_db(DB, FullParams)
+  end.
+
+db_open_retries_after_rollback_commit_failure_test(Config) ->
+  DB = test_db(db_open_retries_after_rollback_commit_failure_test),
+  Params = db_params(Config, "db-open-fail-once"),
+  FullParams = zaya_db_srv:default_params(DB, Params),
+  try
+    ok = zaya_schema_srv:add_db(DB, zaya_tx_test_backend),
+    ok = zaya_schema_srv:add_db_copy(DB, node(), Params),
+    ok = zaya_tx_test_backend:seed(FullParams, [{item, newer_value}]),
+    TRef = make_ref(),
+    Seq = zaya_transaction_log:seq(),
+    ok = zaya_transaction_log:commit(
+      [
+        {{rollbacked, TRef}, [{DB, [node()]}]},
+        {{rollback, DB, Seq, TRef}, {[{item, old_value}], []}}
+      ],
+      []
+    ),
+    ok = zaya_tx_test_backend:fail_once(FullParams),
+    ok = zaya_db_srv:open(DB),
+    timer:sleep(300),
+    ?assertEqual(false, zaya:is_db_available(DB)),
+    ?assertEqual(0, zaya_tx_test_backend:commit_count(FullParams)),
+    ok = wait_until(fun() -> zaya:is_db_available(DB) end, 80),
     ?assertEqual([{item, old_value}], zaya:read(DB, [item])),
     ?assertEqual(1, zaya_tx_test_backend:commit_count(FullParams))
   after
@@ -220,3 +355,25 @@ ensure_stopped(DB) ->
           ok
       end
   end.
+
+pending_transaction_visible(TRef, Participation, Action) ->
+  case zaya:list_pending_transactions() of
+    [{ListedTRef, ListedParticipation, ListedAction}] ->
+      ListedTRef =:= TRef andalso
+        ListedParticipation =:= Participation andalso
+        ListedAction =:= Action;
+    _ ->
+      false
+  end.
+
+make_remote_ref() ->
+  Node = list_to_atom("other0@nohost"),
+  Ref = make_ref(),
+  OldNode = atom_to_binary(node(), latin1),
+  NewNode = atom_to_binary(Node, latin1),
+  {Node, binary_to_term(binary:replace(term_to_binary(Ref), OldNode, NewNode, [global]))}.
+
+cleanup_schema_node(Node) ->
+  catch zaya_schema_srv:node_down(Node, pending_transaction_test),
+  catch zaya_schema_srv:remove_node(Node),
+  ok.

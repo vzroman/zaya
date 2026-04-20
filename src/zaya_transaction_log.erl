@@ -25,9 +25,9 @@
 
 -define(REF_KEY, {?MODULE, ref}).
 -define(ATOMICS_REF_KEY, {?MODULE, atomics_ref}).
--define(PENDING_KEY, {?MODULE, pending_transactions}).
--define(REF_WAIT_ATTEMPTS, 10).
--define(REF_WAIT_MS, 100).
+-define(PENDING_TABLE, zaya_transaction_log_pending_transactions).
+-define(DEFAULT_REF_WAIT_TIMEOUT_MS, 30000).
+-define(DEFAULT_REF_WAIT_POLL_MS, 100).
 
 -record(state, {
   ref,
@@ -47,7 +47,7 @@ commit(Write, Delete) ->
   zaya_rocksdb:commit(Ref, Write, Delete).
 
 is_rollbacked(TRef) ->
-  case wait_for_ref(?REF_WAIT_ATTEMPTS) of
+  case wait_for_ref(ref_wait_timeout_ms()) of
     {ok, Ref} ->
       case zaya_rocksdb:read(Ref, [{rollbacked, TRef}]) of
         [{{rollbacked, TRef}, _}] -> {ok, true};
@@ -63,7 +63,7 @@ rollback(DB, Callback) ->
     fun({{rollback, RollbackDB, Seq, TRef}, {RollbackWrite, RollbackDelete}}) ->
       case decide_recovery(TRef) of
         rollback ->
-          _ = Callback({RollbackWrite, RollbackDelete}),
+          ok = Callback({RollbackWrite, RollbackDelete}),
           ok = commit([], [{rollback, RollbackDB, Seq, TRef}]);
         commit ->
           ok = commit([], [{rollback, RollbackDB, Seq, TRef}])
@@ -82,7 +82,15 @@ purge(DB) ->
   end.
 
 list_pending_transactions() ->
-  maps:values(persistent_term:get(?PENDING_KEY, #{})).
+  case ets:info(?PENDING_TABLE) of
+    undefined ->
+      [];
+    _ ->
+      [
+        {TRef, Participation, pending_env_action()}
+        || {TRef, Participation} <- ets:tab2list(?PENDING_TABLE)
+      ]
+  end.
 
 init([]) ->
   Config0 = application:get_env(zaya, transaction_log, #{}),
@@ -117,7 +125,7 @@ init([]) ->
   ok = atomics:put(AtomicsRef, 1, Seed),
   persistent_term:put(?REF_KEY, Ref),
   persistent_term:put(?ATOMICS_REF_KEY, AtomicsRef),
-  persistent_term:put(?PENDING_KEY, #{}),
+  ensure_pending_table(),
   schedule_cleanup(maps:get(cleanup_interval_ms, Config)),
   {ok, #state{
     ref = Ref,
@@ -173,20 +181,28 @@ handle_info(_Info, State) ->
 terminate(_Reason, #state{ref = Ref}) ->
   persistent_term:erase(?REF_KEY),
   persistent_term:erase(?ATOMICS_REF_KEY),
-  persistent_term:erase(?PENDING_KEY),
   catch zaya_rocksdb:close(Ref),
   ok.
 
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
-wait_for_ref(0) ->
-  {error, timeout};
-wait_for_ref(Attempts) ->
+wait_for_ref(infinity) ->
   case persistent_term:get(?REF_KEY, undefined) of
     undefined ->
-      timer:sleep(?REF_WAIT_MS),
-      wait_for_ref(Attempts - 1);
+      timer:sleep(ref_wait_poll_ms()),
+      wait_for_ref(infinity);
+    Ref ->
+      {ok, Ref}
+  end;
+wait_for_ref(RemainingMs) when RemainingMs =< 0 ->
+  {error, timeout};
+wait_for_ref(RemainingMs) ->
+  case persistent_term:get(?REF_KEY, undefined) of
+    undefined ->
+      SleepMs = erlang:min(ref_wait_poll_ms(), RemainingMs),
+      timer:sleep(SleepMs),
+      wait_for_ref(RemainingMs - SleepMs);
     Ref ->
       {ok, Ref}
   end.
@@ -289,17 +305,12 @@ rollback_entries(DB) ->
   ).
 
 put_pending_transaction(TRef, Participation) ->
-  Pending = persistent_term:get(?PENDING_KEY, #{}),
-  persistent_term:put(
-    ?PENDING_KEY,
-    Pending#{
-      TRef => {TRef, Participation, pending_env_action()}
-    }
-  ).
+  true = ets:insert(?PENDING_TABLE, {TRef, Participation}),
+  ok.
 
 remove_pending_transaction(TRef) ->
-  Pending = persistent_term:get(?PENDING_KEY, #{}),
-  persistent_term:put(?PENDING_KEY, maps:remove(TRef, Pending)).
+  true = ets:delete(?PENDING_TABLE, TRef),
+  ok.
 
 cleanup_rollbacked_entry(Ref, TRef, NodesByDB) ->
   AllDBs = zaya:all_dbs(),
@@ -343,3 +354,35 @@ schedule_cleanup(Interval) when is_integer(Interval), Interval > 0 ->
   ok;
 schedule_cleanup(_Interval) ->
   ok.
+
+ensure_pending_table() ->
+  case ets:info(?PENDING_TABLE) of
+    undefined ->
+      _ =
+        ets:new(
+          ?PENDING_TABLE,
+          [named_table, public, set, {read_concurrency, true}, {write_concurrency, true}]
+        ),
+      ok;
+    _ ->
+      true = ets:delete_all_objects(?PENDING_TABLE),
+      ok
+  end.
+
+ref_wait_timeout_ms() ->
+  case maps:get(ref_wait_timeout_ms, application:get_env(zaya, transaction_log, #{}), ?DEFAULT_REF_WAIT_TIMEOUT_MS) of
+    infinity ->
+      infinity;
+    TimeoutMs when is_integer(TimeoutMs), TimeoutMs > 0 ->
+      TimeoutMs;
+    _ ->
+      ?DEFAULT_REF_WAIT_TIMEOUT_MS
+  end.
+
+ref_wait_poll_ms() ->
+  case maps:get(ref_wait_poll_ms, application:get_env(zaya, transaction_log, #{}), ?DEFAULT_REF_WAIT_POLL_MS) of
+    PollMs when is_integer(PollMs), PollMs > 0 ->
+      PollMs;
+    _ ->
+      ?DEFAULT_REF_WAIT_POLL_MS
+  end.

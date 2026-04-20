@@ -37,11 +37,12 @@ close(#{dir := Dir, table := Table}) ->
 
 commit(#{dir := Dir, table := Table}, Write, Delete) ->
   persistent_term:put({?MODULE, last_tref}, make_ref()),
-  maybe_fail(),
+  maybe_fail_once(Dir),
   ets:insert(Table, Write),
   [ets:delete(Table, Key) || Key <- Delete],
   persistent_term:put({?MODULE, commit_count, Dir}, commit_count(Dir) + 1),
   sync(Dir, Table),
+  maybe_fail_after_confirm(Dir),
   ok.
 
 prepare_rollback(#{table := Table}, Write, Delete) ->
@@ -100,11 +101,11 @@ is_persistent() ->
   true.
 
 fail_once(DB) ->
-  persistent_term:put({?MODULE, fail_once, DB}, true),
+  persistent_term:put({?MODULE, fail_once, dir_key(DB)}, true),
   ok.
 
 fail_after_confirm(DB) ->
-  persistent_term:put({?MODULE, fail_after_confirm, DB}, true),
+  persistent_term:put({?MODULE, fail_after_confirm, dir_key(DB)}, true),
   ok.
 
 last_tref() ->
@@ -128,10 +129,27 @@ reset(ParamsOrDir) ->
   Dir = dir_key(ParamsOrDir),
   persistent_term:erase({?MODULE, store, Dir}),
   persistent_term:erase({?MODULE, commit_count, Dir}),
+  persistent_term:erase({?MODULE, fail_once, Dir}),
+  persistent_term:erase({?MODULE, fail_after_confirm, Dir}),
   ok.
 
-maybe_fail() ->
-  ok.
+maybe_fail_once(Dir) ->
+  fail_if_requested({?MODULE, fail_once, Dir}, {forced_failure, Dir}).
+
+maybe_fail_after_confirm(Dir) ->
+  fail_if_requested(
+    {?MODULE, fail_after_confirm, Dir},
+    {forced_failure_after_confirm, Dir}
+  ).
+
+fail_if_requested(Key, Error) ->
+  case persistent_term:get(Key, false) of
+    true ->
+      persistent_term:erase(Key),
+      erlang:error(Error);
+    false ->
+      ok
+  end.
 
 sync(Dir, Table) ->
   persistent_term:put(
