@@ -4,3 +4,4 @@ zaya.iml
 _build/*
 log/*
 logs/*
+DB/*
