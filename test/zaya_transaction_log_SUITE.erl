@@ -2,6 +2,7 @@
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
+-include("zaya_transaction.hrl").
 
 -export([
   all/0,
@@ -72,7 +73,7 @@ seq_and_marker_roundtrip_test(_Config) ->
   Seq1 = zaya_transaction_log:seq(),
   ?assertEqual(Seq0 + 1, Seq1),
   ok = zaya_transaction_log:commit(
-    [{{rollbacked, TRef}, [{orders, [node()]}]}],
+    [{#rollbacked{tref = TRef}, [{orders, [node()]}]}],
     []
   ),
   ?assertEqual({ok, true}, zaya_transaction_log:is_rollbacked(TRef)).
@@ -84,10 +85,10 @@ rollback_replays_newest_first_test(_Config) ->
   Seq1 = zaya_transaction_log:seq(),
   ok = zaya_transaction_log:commit(
     [
-      {{rollbacked, Older}, [{orders, [node()]}]},
-      {{rollback, orders, Seq0, Older}, {[{item, old_value}], []}},
-      {{rollbacked, Newer}, [{orders, [node()]}]},
-      {{rollback, orders, Seq1, Newer}, {[{item, newer_value}], []}}
+      {#rollbacked{tref = Older}, [{orders, [node()]}]},
+      {#rollback{db = orders, seq = Seq0, tref = Older}, {[{item, old_value}], []}},
+      {#rollbacked{tref = Newer}, [{orders, [node()]}]},
+      {#rollback{db = orders, seq = Seq1, tref = Newer}, {[{item, newer_value}], []}}
     ],
     []
   ),
@@ -111,15 +112,11 @@ recovery_classifier_treats_unexpected_replies_as_errors_test(_Config) ->
   Node2 = list_to_atom("other1@nohost"),
   Node3 = list_to_atom("other2@nohost"),
   Node4 = list_to_atom("other3@nohost"),
+  Node5 = list_to_atom("other4@nohost"),
+  %% Reachable nodes reported as {Node, Result}; unreachable ones collapse
+  %% into a single ErrorCount. The initial Errors list also contributes.
   ?assertEqual(
-    {
-      [{Node1, {ok, false}}],
-      [
-        {Node2, {error, timeout}},
-        {Node3, {badrpc, nodedown}},
-        {Node4, noconnection}
-      ]
-    },
+    {[{Node1, false}], 4},
     zaya_transaction_log:classify_recovery_responses(
       [
         {Node1, {ok, false}},
@@ -127,7 +124,7 @@ recovery_classifier_treats_unexpected_replies_as_errors_test(_Config) ->
         {Node3, {badrpc, nodedown}},
         {Node4, noconnection}
       ],
-      []
+      [{Node5, disconnected}]
     )
   ).
 
@@ -137,8 +134,8 @@ rollback_callback_failure_preserves_entries_across_retry_test(_Config) ->
   RollbackOps = {[{item, old_value}], []},
   ok = zaya_transaction_log:commit(
     [
-      {{rollbacked, TRef}, [{orders, [node()]}]},
-      {{rollback, orders, Seq, TRef}, RollbackOps}
+      {#rollbacked{tref = TRef}, [{orders, [node()]}]},
+      {#rollback{db = orders, seq = Seq, tref = TRef}, RollbackOps}
     ],
     []
   ),
@@ -176,8 +173,8 @@ purge_deletes_only_db_entries_test(_Config) ->
   Seq = zaya_transaction_log:seq(),
   ok = zaya_transaction_log:commit(
     [
-      {{rollbacked, TRef}, [{orders, [node()]}]},
-      {{rollback, orders, Seq, TRef}, {[{item, old_value}], []}}
+      {#rollbacked{tref = TRef}, [{orders, [node()]}]},
+      {#rollback{db = orders, seq = Seq, tref = TRef}, {[{item, old_value}], []}}
     ],
     []
   ),
@@ -193,7 +190,7 @@ pending_transaction_visibility_tracks_manual_decision_test(_Config) ->
     Seq = zaya_transaction_log:seq(),
     ok = zaya_transaction_log:commit(
       [
-        {{rollback, DB, Seq, TRef}, {[{item, old_value}], []}}
+        {#rollback{db = DB, seq = Seq, tref = TRef}, {[{item, old_value}], []}}
       ],
       []
     ),
@@ -253,8 +250,8 @@ db_open_replays_pending_rollback_test(Config) ->
     Seq = zaya_transaction_log:seq(),
     ok = zaya_transaction_log:commit(
       [
-        {{rollbacked, TRef}, [{DB, [node()]}]},
-        {{rollback, DB, Seq, TRef}, {[{item, old_value}], []}}
+        {#rollbacked{tref = TRef}, [{DB, [node()]}]},
+        {#rollback{db = DB, seq = Seq, tref = TRef}, {[{item, old_value}], []}}
       ],
       []
     ),
@@ -284,8 +281,8 @@ db_open_retries_after_rollback_commit_failure_test(Config) ->
     Seq = zaya_transaction_log:seq(),
     ok = zaya_transaction_log:commit(
       [
-        {{rollbacked, TRef}, [{DB, [node()]}]},
-        {{rollback, DB, Seq, TRef}, {[{item, old_value}], []}}
+        {#rollbacked{tref = TRef}, [{DB, [node()]}]},
+        {#rollback{db = DB, seq = Seq, tref = TRef}, {[{item, old_value}], []}}
       ],
       []
     ),
@@ -313,8 +310,8 @@ db_open_retries_after_post_commit_failure_without_leaking_ref_test(Config) ->
     Seq = zaya_transaction_log:seq(),
     ok = zaya_transaction_log:commit(
       [
-        {{rollbacked, TRef}, [{DB, [node()]}]},
-        {{rollback, DB, Seq, TRef}, {[{item, old_value}], []}}
+        {#rollbacked{tref = TRef}, [{DB, [node()]}]},
+        {#rollback{db = DB, seq = Seq, tref = TRef}, {[{item, old_value}], []}}
       ],
       []
     ),
@@ -341,8 +338,8 @@ attach_copy_purges_stale_rollbacks_test(Config) ->
     Seq = zaya_transaction_log:seq(),
     ok = zaya_transaction_log:commit(
       [
-        {{rollbacked, TRef}, [{DB, [node()]}]},
-        {{rollback, DB, Seq, TRef}, {[{item, old_value}], []}}
+        {#rollbacked{tref = TRef}, [{DB, [node()]}]},
+        {#rollback{db = DB, seq = Seq, tref = TRef}, {[{item, old_value}], []}}
       ],
       []
     ),
