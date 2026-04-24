@@ -276,27 +276,28 @@ handle_event(state_timeout, run, open, #data{db = DB} = Data) ->
 handle_event(state_timeout, run, try_open, #data{db = DB, module = Module} = Data) ->
 
   try
-    Ref =
-      with_owned_ref(
-        Module,
-        fun() ->
-          Module:open( default_params(DB, ?dbNodeParams(DB,node())) )
-        end,
-        fun(Ref0) ->
-          ok = zaya_transaction_log:rollback(
-            DB,
-            fun({RollbackWrite, RollbackDelete}) ->
-              Module:commit(Ref0, RollbackWrite, RollbackDelete)
-            end
-          ),
-          Ref0
-        end
-      ),
-    {next_state, register, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+    Ref = Module:open( default_params(DB, ?dbNodeParams(DB,node())) ),
+    {next_state, rollback, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
   catch
     _:E->
       ?LOGERROR("~p database open error ~p",[DB,E]),
       {next_state, open, Data, [ {state_timeout, 5000, run } ] }
+  end;
+
+handle_event(state_timeout, run, rollback, #data{db = DB, module = Module, ref = Ref} = Data) ->
+
+  try
+    ok = zaya_transaction_log:rollback(
+      DB,
+      fun({RollbackWrite, RollbackDelete}) ->
+        Module:commit(Ref, RollbackWrite, RollbackDelete)
+      end
+    ),
+    {next_state, register, Data, [ {state_timeout, 0, run } ] }
+  catch
+    _:E->
+      ?LOGERROR("~p database rollback error ~p",[DB,E]),
+      { keep_state_and_data, [ {state_timeout, 5000, run } ] }
   end;
 
 handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
@@ -325,20 +326,10 @@ handle_event(state_timeout, run, {add_copy, InParams, ReplyTo}, #data{db = DB, m
   case prepare_backup( maps:get(dir, Params) ) of
     {ok, Backup} ->
       try
-        Ref =
-          with_owned_ref(
-            Module,
-            fun() ->
-              zaya_copy:copy( DB, Module, Params, #{ live => not ?dbReadOnly(DB)})
-            end,
-            fun(Ref0) ->
-              ok = zaya_transaction_log:purge(DB),
-              Ref0
-            end
-          ),
+        Ref = zaya_copy:copy( DB, Module, Params, #{ live => not ?dbReadOnly(DB)}),
         ?LOGINFO("~p database copy added",[DB]),
         purge_backup( Backup ),
-        {next_state, {register_copy, InParams, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+        {next_state, {purge_transaction_log, InParams, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
       catch
         _:E->
           ?LOGERROR("~p database add copy error ~p",[DB,E]),
@@ -364,19 +355,9 @@ handle_event(state_timeout, run, {add_copy, InParams, ReplyTo}, #data{db = DB, m
 handle_event(state_timeout, run, {attach_copy, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
 
   try
-    Ref =
-      with_owned_ref(
-        Module,
-        fun() ->
-          Module:open( default_params(DB, Params) )
-        end,
-        fun(Ref0) ->
-          ok = zaya_transaction_log:purge(DB),
-          Ref0
-        end
-      ),
+    Ref = Module:open( default_params(DB, Params) ),
     ?LOGINFO("~p database copy attached",[DB]),
-    {next_state, {register_copy, Params, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
+    {next_state, {purge_transaction_log, Params, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
   catch
     _:E->
       ?LOGERROR("~p database attach copy error ~p",[DB,E]),
@@ -386,6 +367,16 @@ handle_event(state_timeout, run, {attach_copy, Params, ReplyTo}, #data{db = DB, 
       end,
       {stop, shutdown}
   end;
+
+handle_event(state_timeout, run, {purge_transaction_log, Params, ReplyTo}, #data{db = DB} = Data) ->
+
+  try
+    ok = zaya_transaction_log:purge(DB)
+  catch
+    _:E->
+      ?LOGERROR("~p database transaction log purge error ~p",[DB,E])
+  end,
+  {next_state, {register_copy, Params, ReplyTo}, Data, [ {state_timeout, 0, run } ] };
 
 handle_event(state_timeout, run, {register_copy,Params,ReplyTo}, #data{db = DB} = Data) ->
   case ecall:call_all(?readyNodes, zaya_schema_srv, add_db_copy, [DB, node(), Params] ) of
@@ -539,16 +530,6 @@ default_params(DB, Params )->
 
   Params#{ dir => Dir ++"/"++atom_to_list(DB) }.
 
-with_owned_ref(Module, OpenFun, UseFun) ->
-  Ref = OpenFun(),
-  try
-    UseFun(Ref)
-  catch
-    Class:Reason:Stack ->
-      catch Module:close(Ref),
-      erlang:raise(Class, Reason, Stack)
-  end.
-
 lock( DB, IsShared, Timeout )->
   Nodes =
     if
@@ -611,7 +592,9 @@ restore_backup( #backup{
         OriginalDir,
         Error
       ])
-  end.
+  end;
+restore_backup( _Backup )->
+  ok.
 
 backup_dir( Dir ) when is_binary( Dir )->
   Backup = <<Dir/binary, "@zaya_backup@">>,
