@@ -112,19 +112,17 @@ recovery_classifier_treats_unexpected_replies_as_errors_test(_Config) ->
   Node2 = list_to_atom("other1@nohost"),
   Node3 = list_to_atom("other2@nohost"),
   Node4 = list_to_atom("other3@nohost"),
-  Node5 = list_to_atom("other4@nohost"),
-  %% Reachable nodes reported as {Node, Result}; unreachable ones collapse
-  %% into a single ErrorCount. The initial Errors list also contributes.
+  %% Reachable nodes are reported as {Node, Result}; unreachable and
+  %% unexpected replies are ignored by the classifier.
   ?assertEqual(
-    {[{Node1, false}], 4},
+    [{Node1, false}],
     zaya_transaction_log:classify_recovery_responses(
       [
         {Node1, {ok, false}},
         {Node2, {error, timeout}},
         {Node3, {badrpc, nodedown}},
         {Node4, noconnection}
-      ],
-      [{Node5, disconnected}]
+      ]
     )
   ).
 
@@ -183,10 +181,10 @@ purge_deletes_only_db_entries_test(_Config) ->
 
 pending_transaction_visibility_tracks_manual_decision_test(_Config) ->
   DB = test_db(pending_transaction_visibility_tracks_manual_decision_test),
-  Participation = [],
   {CoordinatorNode, TRef} = make_remote_ref(),
   try
     ok = zaya_schema_srv:node_up(CoordinatorNode, pending_transaction_test),
+    ExpectedPending = #{TRef => #{DB => zaya:db_all_nodes(DB)}},
     Seq = zaya_transaction_log:seq(),
     ok = zaya_transaction_log:commit(
       [
@@ -207,17 +205,9 @@ pending_transaction_visibility_tracks_manual_decision_test(_Config) ->
           ),
         Parent ! {rollback_finished, self(), Result}
       end),
-    ok = wait_until(fun() -> pending_transaction_visible(TRef, Participation, undefined) end, 100),
-    ?assertEqual(
-      [{TRef, Participation, undefined}],
-      zaya:list_pending_transactions()
-    ),
+    ok = wait_until(fun() -> pending_transaction_visible(ExpectedPending) end, 100),
+    ?assertEqual(ExpectedPending, zaya:list_pending_transactions()),
     os:putenv("PENDING_TRANSACTIONS", "ROLLBACK"),
-    ok = wait_until(fun() -> pending_transaction_visible(TRef, Participation, rollback) end, 20),
-    ?assertEqual(
-      [{TRef, Participation, rollback}],
-      zaya:list_pending_transactions()
-    ),
     receive
       {rollback_callback, RollbackPid, {[{item, old_value}], []}} ->
         ok
@@ -232,7 +222,7 @@ pending_transaction_visibility_tracks_manual_decision_test(_Config) ->
     after 7000 ->
       ct:fail(rollback_finish_timeout)
     end,
-    ?assertEqual([], zaya:list_pending_transactions())
+    ?assertEqual(#{}, zaya:list_pending_transactions())
   after
     cleanup_schema_node(CoordinatorNode),
     os:unsetenv("PENDING_TRANSACTIONS")
@@ -411,15 +401,8 @@ ensure_stopped(DB) ->
       end
   end.
 
-pending_transaction_visible(TRef, Participation, Action) ->
-  case zaya:list_pending_transactions() of
-    [{ListedTRef, ListedParticipation, ListedAction}] ->
-      ListedTRef =:= TRef andalso
-        ListedParticipation =:= Participation andalso
-        ListedAction =:= Action;
-    _ ->
-      false
-  end.
+pending_transaction_visible(ExpectedPending) ->
+  zaya:list_pending_transactions() =:= ExpectedPending.
 
 make_remote_ref() ->
   Node = list_to_atom("other0@nohost"),

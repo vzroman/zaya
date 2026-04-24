@@ -388,7 +388,7 @@ purge(DB)->
   Ref = persistent_term:get({?MODULE, ref}),
   zaya_rocksdb:foldl(
     Ref,
-    #{start => {rollback, DB}, stop => {rollback, DB, '$end'}},
+    #{start => {rollback, DB, 0, 0}, stop => {rollback, DB, '$end', '$end'}},
     fun({EncodedKey, _Value}, ok)->
       zaya_rocksdb:delete(Ref, [EncodedKey]),
       ok
@@ -549,7 +549,7 @@ end_per_suite(_Config)->
 single_db_commit_skips_log_test(_Config)->
   DBs = #{orders => {[{id, committed}], []}},
   ok = zaya_transaction:single_db_node_commit(DBs),
-  ?assertEqual([], zaya_transaction_log:list_pending_transactions()).
+  ?assertEqual(#{}, zaya_transaction_log:list_pending_transactions()).
 
 single_node_worker_rolls_back_and_cleans_marker_test(_Config)->
   DBs = #{

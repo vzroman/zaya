@@ -27,7 +27,7 @@
 
 -ifdef(TEST).
 -export([
-  classify_recovery_responses/2
+  classify_recovery_responses/1
 ]).
 -endif.
 
@@ -45,8 +45,9 @@
   cleanup_interval_ms
 }).
 
-start_link() ->
-  gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+%%------------------------------------------------------------------------------------
+%%  API
+%%------------------------------------------------------------------------------------
 
 seq() ->
   atomics:add_get((runtime())#runtime.atomics_ref, 1, 1) - 1.
@@ -71,11 +72,11 @@ rollback(DB, Callback) ->
     fun({#rollback{} = Key, {RollbackWrite, RollbackDelete}}) ->
       case decide_recovery(Key#rollback.tref) of
         rollback ->
-          ok = Callback({RollbackWrite, RollbackDelete}),
-          ok = commit([], [Key]);
+          ok = Callback({RollbackWrite, RollbackDelete});
         commit ->
-          ok = commit([], [Key])
-      end
+          ok
+      end,
+      ok = commit([], [Key])
     end,
     Entries
   ),
@@ -88,35 +89,18 @@ purge(DB) ->
     _ -> zaya_rocksdb:delete(db_ref(), Keys)
   end.
 
-%% Enumerate every transaction with a live rollback entry in the log.
-%% An entry is "pending" until its rollback is applied or purged.
 list_pending_transactions() ->
-  describe_pending(pending_trefs(fun(_DB) -> true end)).
+  pending_transactions(rollback_bounds()).
 
 list_pending_transactions(DB) ->
-  describe_pending(pending_trefs(fun(EntryDB) -> EntryDB =:= DB end)).
+  pending_transactions(rollback_bounds(DB)).
 
-describe_pending(TRefs) ->
-  Action = pending_env_action(),
-  [{TRef, rollback_participants(TRef), Action} || TRef <- TRefs].
+%%------------------------------------------------------------------------------------
+%%  OTP callbacks
+%%------------------------------------------------------------------------------------
 
-pending_trefs(Filter) ->
-  Set =
-    zaya_rocksdb:foldl(
-      db_ref(),
-      #{},
-      fun
-        ({#rollback{db = DB, tref = TRef}, _Value}, Acc) ->
-          case Filter(DB) of
-            true -> sets:add_element(TRef, Acc);
-            false -> Acc
-          end;
-        (_, Acc) ->
-          Acc
-      end,
-      sets:new()
-    ),
-  sets:to_list(Set).
+start_link() ->
+  gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 init([]) ->
   #{cleanup_interval_ms := Interval} = Settings = read_config(),
@@ -126,47 +110,6 @@ init([]) ->
   %% are not kept around for a full interval.
   self() ! cleanup,
   {ok, #state{cleanup_interval_ms = Interval}}.
-
-read_config() ->
-  Raw = application:get_env(zaya, transaction_log, #{}),
-  #{
-    dir => maps:get(dir, Raw, filename:join(zaya:schema_dir(), "TLOG")),
-    storage_options => maps:with([pool, rocksdb], Raw),
-    cleanup_interval_ms => validate_cleanup_interval(maps:get(cleanup_interval_ms, Raw, ?DEFAULT_CLEANUP_INTERVAL_MS))
-  }.
-
-validate_cleanup_interval(Value) when is_integer(Value), Value > 0 ->
-  Value;
-validate_cleanup_interval(Invalid) ->
-  ?LOGERROR(
-    "invalid cleanup_interval_ms=~p; falling back to default ~p",
-    [Invalid, ?DEFAULT_CLEANUP_INTERVAL_MS]
-  ),
-  ?DEFAULT_CLEANUP_INTERVAL_MS.
-
-open_log_db(#{dir := Dir, storage_options := Storage}) ->
-  StorageConfig = Storage#{dir => Dir},
-  DbRef =
-    case filelib:is_dir(Dir) of
-      true -> zaya_rocksdb:open(StorageConfig);
-      false -> zaya_rocksdb:create(StorageConfig)
-    end,
-  AtomicsRef = atomics:new(1, [{signed, false}]),
-  ok = atomics:put(AtomicsRef, 1, init_seq(DbRef)),
-  #runtime{db_ref = DbRef, atomics_ref = AtomicsRef}.
-
-init_seq(DbRef) ->
-  zaya_rocksdb:foldl(
-    DbRef,
-    #{},
-    fun
-      ({#rollback{seq = Seq}, _Value}, Acc) ->
-        erlang:max(Seq + 1, Acc);
-      (_, Acc) ->
-        Acc
-    end,
-    0
-  ).
 
 handle_call(_Request, _From, State) ->
   {reply, {error, unsupported}, State}.
@@ -184,7 +127,7 @@ handle_info(cleanup, State = #state{cleanup_interval_ms = Interval}) ->
         [Class, Reason, Stack]
       )
   end,
-  schedule_cleanup(Interval),
+  erlang:send_after(Interval, self(), cleanup),
   {noreply, State};
 handle_info(_Info, State) ->
   {noreply, State}.
@@ -201,6 +144,10 @@ terminate(_Reason, _State) ->
 
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
+
+%%------------------------------------------------------------------------------------
+%%  Runtime
+%%------------------------------------------------------------------------------------
 
 runtime() ->
   persistent_term:get(?RUNTIME_KEY).
@@ -228,20 +175,88 @@ wait_for_runtime(RemainingMs) ->
       {ok, Runtime}
   end.
 
+%%------------------------------------------------------------------------------------
+%%  Config
+%%------------------------------------------------------------------------------------
+
+read_config() ->
+  Raw = application:get_env(zaya, transaction_log, #{}),
+  #{
+    dir => maps:get(dir, Raw, filename:join(zaya:schema_dir(), "TLOG")),
+    storage_options => maps:with([pool, rocksdb], Raw),
+    cleanup_interval_ms => validate_cleanup_interval(maps:get(cleanup_interval_ms, Raw, ?DEFAULT_CLEANUP_INTERVAL_MS))
+  }.
+
+validate_cleanup_interval(Value) when is_integer(Value), Value > 0 ->
+  Value;
+validate_cleanup_interval(Invalid) ->
+  ?LOGERROR(
+    "invalid cleanup_interval_ms=~p; falling back to default ~p",
+    [Invalid, ?DEFAULT_CLEANUP_INTERVAL_MS]
+  ),
+  ?DEFAULT_CLEANUP_INTERVAL_MS.
+
+ref_wait_timeout_ms() ->
+  case maps:get(ref_wait_timeout_ms, application:get_env(zaya, transaction_log, #{}), ?DEFAULT_REF_WAIT_TIMEOUT_MS) of
+    infinity ->
+      infinity;
+    TimeoutMs when is_integer(TimeoutMs), TimeoutMs > 0 ->
+      TimeoutMs;
+    _ ->
+      ?DEFAULT_REF_WAIT_TIMEOUT_MS
+  end.
+
+ref_wait_poll_ms() ->
+  case maps:get(ref_wait_poll_ms, application:get_env(zaya, transaction_log, #{}), ?DEFAULT_REF_WAIT_POLL_MS) of
+    PollMs when is_integer(PollMs), PollMs > 0 ->
+      PollMs;
+    _ ->
+      ?DEFAULT_REF_WAIT_POLL_MS
+  end.
+
+%%------------------------------------------------------------------------------------
+%%  Log storage
+%%------------------------------------------------------------------------------------
+
+open_log_db(#{dir := Dir, storage_options := Storage}) ->
+  StorageConfig = Storage#{dir => Dir},
+  DbRef =
+    case filelib:is_dir(Dir) of
+      true -> zaya_rocksdb:open(StorageConfig);
+      false -> zaya_rocksdb:create(StorageConfig)
+    end,
+  AtomicsRef = atomics:new(1, [{signed, false}]),
+  ok = atomics:put(AtomicsRef, 1, init_seq(DbRef)),
+  #runtime{db_ref = DbRef, atomics_ref = AtomicsRef}.
+
+init_seq(DbRef) ->
+  zaya_rocksdb:foldl(
+    DbRef,
+    rollback_bounds(),
+    fun({#rollback{seq = Seq}, _Value}, Acc) ->
+      erlang:max(Seq + 1, Acc)
+    end,
+    0
+  ).
+
+%%------------------------------------------------------------------------------------
+%%  Recovery decision
+%%------------------------------------------------------------------------------------
+
 %% Classify ecall:call_all_wait/4 output into a compact decision shape.
 %% Reachable nodes are those that returned a boolean {ok, true|false};
-%% everything else (bad tuples, timeouts, RPC errors) counts as an error.
-classify_recovery_responses(Replies, Errors) ->
+%% everything else (bad tuples, timeouts, RPC errors) is ignored.
+classify_recovery_responses(Replies) ->
   lists:foldl(
-    fun({Node, Reply}, {ReachableAcc, ErrorCount}) ->
+    fun({Node, Reply}, ReachableAcc) ->
       case Reply of
         {ok, Result} when is_boolean(Result) ->
-          {[{Node, Result} | ReachableAcc], ErrorCount};
+          [{Node, Result} | ReachableAcc];
         _ ->
-          {ReachableAcc, ErrorCount + 1}
+          ReachableAcc
       end
     end,
-    {[], length(Errors)},
+    [],
     Replies
   ).
 
@@ -251,9 +266,9 @@ classify_recovery_responses(Replies, Errors) ->
 %%   - commit:   the coordinator replied "no marker" and no peer said otherwise.
 %%   - pending:  neither conclusive (coordinator unreachable, no peer evidence).
 probe_recovery(TRef) ->
-  {Replies, Errors} =
+  {Replies, _Errors} =
     ecall:call_all_wait(zaya:all_nodes(), ?MODULE, is_rollbacked, [TRef]),
-  {Reachable, _ErrorCount} = classify_recovery_responses(Replies, Errors),
+  Reachable = classify_recovery_responses(Replies),
   case lists:any(fun({_, R}) -> R end, Reachable) of
     true ->
       %% R1: any peer marker wins, even over a coordinator "false".
@@ -269,19 +284,13 @@ probe_recovery(TRef) ->
 
 decide_recovery(TRef) ->
   case probe_recovery(TRef) of
-    pending  -> pending_transaction_decision_loop(TRef);
-    Decision -> Decision
-  end.
-
-pending_transaction_decision_loop(TRef) ->
-  case probe_recovery(TRef) of
     pending ->
       %% Still no conclusive answer. Either an operator has set the
       %% env override, or we keep retrying until peer evidence shows up.
       case pending_env_action() of
         undefined ->
           timer:sleep(1000),
-          pending_transaction_decision_loop(TRef);
+          decide_recovery(TRef);
         Action ->
           ?LOGWARNING("~p ~p by PENDING_TRANSACTIONS", [TRef, Action]),
           Action
@@ -297,24 +306,60 @@ pending_env_action() ->
     _ -> undefined
   end.
 
-rollback_participants(TRef) ->
-  case zaya_rocksdb:read(db_ref(), [#rollbacked{tref = TRef}]) of
-    [{_, NodesByDB}] -> NodesByDB;
-    [] -> []
+%%------------------------------------------------------------------------------------
+%%  Rollback entries
+%%------------------------------------------------------------------------------------
+
+pending_transactions(Query) ->
+  {Pending, _NodesCache} =
+    zaya_rocksdb:foldl(
+      db_ref(),
+      Query,
+      fun({#rollback{db = DB, tref = TRef}, _Value}, {PendingAcc, NodesCache}) ->
+        DBMap = maps:get(TRef, PendingAcc, #{}),
+        case maps:is_key(DB, DBMap) of
+          true ->
+            {PendingAcc, NodesCache};
+          false ->
+            {Nodes, NodesCache1} = nodes_for_db(DB, NodesCache),
+            {PendingAcc#{TRef => DBMap#{DB => Nodes}}, NodesCache1}
+        end
+      end,
+      {#{}, #{}}
+    ),
+  Pending.
+
+nodes_for_db(DB, Cache) ->
+  case maps:find(DB, Cache) of
+    {ok, Nodes} ->
+      {Nodes, Cache};
+    error ->
+      Nodes = zaya:db_all_nodes(DB),
+      {Nodes, Cache#{DB => Nodes}}
   end.
 
 rollback_entries(DB) ->
   zaya_rocksdb:foldl(
     db_ref(),
-    #{},
-    fun
-      ({#rollback{db = EntryDB} = Key, Value}, Acc) when EntryDB =:= DB ->
-        [{Key, Value} | Acc];
-      (_, Acc) ->
-        Acc
+    rollback_bounds(DB),
+    fun({#rollback{} = Key, Value}, Acc) ->
+      [{Key, Value} | Acc]
     end,
     []
   ).
+
+rollback_bounds() ->
+  #{start => {rollback, 0, 0, 0}, stop => {rollback, [], 0, 0}}.
+
+rollback_bounds(DB) ->
+  #{start => #rollback{db = DB, seq = 0, tref = 0}, stop => #rollback{db = DB, seq = '$end', tref = '$end'}}.
+
+rollbacked_bounds() ->
+  #{start => #rollbacked{tref = 0}, stop => #rollbacked{tref = []}}.
+
+%%------------------------------------------------------------------------------------
+%%  Cleanup
+%%------------------------------------------------------------------------------------
 
 cleanup(Ref) ->
   ActiveTRefs = clean_rollbacks(Ref, zaya:node_dbs(node())),
@@ -325,17 +370,14 @@ clean_rollbacks(Ref, LocalDBs) ->
   {ActiveTRefs, StaleKeys} =
     zaya_rocksdb:foldl(
       Ref,
-      #{},
-      fun
-        ({#rollback{db = DB, tref = TRef} = Key, _Value}, {ActiveAcc, DeleteAcc}) ->
-          case lists:member(DB, LocalDBs) of
-            true  -> {sets:add_element(TRef, ActiveAcc), DeleteAcc};
-            false -> {ActiveAcc, [Key | DeleteAcc]}
-          end;
-        (_, Acc) ->
-          Acc
+      rollback_bounds(),
+      fun({#rollback{db = DB, tref = TRef} = Key, _Value}, {ActiveAcc, DeleteAcc}) ->
+        case lists:member(DB, LocalDBs) of
+          true  -> {ActiveAcc#{TRef => []}, DeleteAcc};
+          false -> {ActiveAcc, [Key | DeleteAcc]}
+        end
       end,
-      {sets:new(), []}
+      {#{}, []}
     ),
   maybe_delete(Ref, StaleKeys),
   ActiveTRefs.
@@ -343,17 +385,14 @@ clean_rollbacks(Ref, LocalDBs) ->
 clean_rollbacked(Ref, ActiveTRefs) ->
   zaya_rocksdb:foldl(
     Ref,
-    #{},
-    fun
-      ({#rollbacked{tref = TRef}, NodesByDB}, ok) ->
-        %% A {rollbacked} marker is load-bearing while any of its
-        %% transaction's #rollback{} entries still live locally.
-        case sets:is_element(TRef, ActiveTRefs) of
-          true  -> ok;
-          false -> cleanup_rollbacked_entry(Ref, TRef, NodesByDB)
-        end;
-      (_, ok) ->
-        ok
+    rollbacked_bounds(),
+    fun({#rollbacked{tref = TRef}, NodesByDB}, ok) ->
+      %% A {rollbacked} marker is load-bearing while any of its
+      %% transaction's #rollback{} entries still live locally.
+      case is_map_key(TRef, ActiveTRefs) of
+        true  -> ok;
+        false -> cleanup_rollbacked_entry(Ref, TRef, NodesByDB)
+      end
     end,
     ok
   ).
@@ -398,27 +437,3 @@ maybe_delete(_Ref, []) ->
   ok;
 maybe_delete(Ref, Keys) ->
   zaya_rocksdb:delete(Ref, Keys).
-
-schedule_cleanup(Interval) when is_integer(Interval), Interval > 0 ->
-  erlang:send_after(Interval, self(), cleanup),
-  ok;
-schedule_cleanup(_Interval) ->
-  ok.
-
-ref_wait_timeout_ms() ->
-  case maps:get(ref_wait_timeout_ms, application:get_env(zaya, transaction_log, #{}), ?DEFAULT_REF_WAIT_TIMEOUT_MS) of
-    infinity ->
-      infinity;
-    TimeoutMs when is_integer(TimeoutMs), TimeoutMs > 0 ->
-      TimeoutMs;
-    _ ->
-      ?DEFAULT_REF_WAIT_TIMEOUT_MS
-  end.
-
-ref_wait_poll_ms() ->
-  case maps:get(ref_wait_poll_ms, application:get_env(zaya, transaction_log, #{}), ?DEFAULT_REF_WAIT_POLL_MS) of
-    PollMs when is_integer(PollMs), PollMs > 0 ->
-      PollMs;
-    _ ->
-      ?DEFAULT_REF_WAIT_POLL_MS
-  end.

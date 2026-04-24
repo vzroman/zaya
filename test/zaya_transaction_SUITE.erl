@@ -65,7 +65,7 @@ single_db_commit_skips_log_test(Config) ->
     ok = restart_db(DB),
     ?assertEqual([{item, committed_value}], zaya:read(DB, [item])),
     ?assertEqual(1, zaya_tx_test_backend:commit_count(FullParams)),
-    ?assertEqual([], zaya:list_pending_transactions())
+    ?assertEqual(#{}, zaya:list_pending_transactions())
   after
     cleanup_db(DB, FullParams)
   end.
@@ -101,7 +101,7 @@ single_node_worker_rolls_back_and_cleans_marker_test(Config) ->
     ?assertEqual([{item, old_audit}], zaya:read(Audit, [item])),
     ?assertEqual(OrdersCommits, zaya_tx_test_backend:commit_count(OrdersFullParams)),
     ?assertEqual(2, zaya_tx_test_backend:commit_count(AuditFullParams)),
-    ?assertEqual([], zaya:list_pending_transactions())
+    ?assertEqual(#{}, zaya:list_pending_transactions())
   after
     cleanup_db(Orders, OrdersFullParams),
     cleanup_db(Audit, AuditFullParams)
@@ -167,7 +167,7 @@ multi_node_worker_rolls_back_after_coordinator_decision_test(Config) ->
       zaya_tx_test_backend:commit_count(OrdersFullParams)
     ),
     ?assertEqual(2, zaya_tx_test_backend:commit_count(AuditFullParams)),
-    ?assertEqual([], zaya:list_pending_transactions())
+    ?assertEqual(#{}, zaya:list_pending_transactions())
   after
     cleanup_db(Orders, OrdersFullParams),
     cleanup_db(Audit, AuditFullParams)

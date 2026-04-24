@@ -31,7 +31,14 @@ A gen_server started as part of `zaya_sup`, one per node.
 A zaya_rocksdb instance with pool. Directory configurable via application env:
 
 ```erlang
-{transaction_log, #{dir => "...", pool => #{...}}}
+{transaction_log, #{
+    dir => "...",
+    pool => #{...},
+    rocksdb => #{...},
+    cleanup_interval_ms => 60000,
+    ref_wait_timeout_ms => 600000,
+    ref_wait_poll_ms => 1000
+}}
 ```
 
 Defaults to `zaya:schema_dir() ++ "/TLOG"`.
@@ -117,7 +124,8 @@ Performed by the `zaya_transaction_log` gen_server on a periodic timer. A single
         {ok, boolean()} | {error, timeout}.
 
 %% Scan rollback entries for a specific DB during open, newest-first.
-%% Iterates {rollback, DB, _, _} via rocksdb foldr (decreasing `seq` order).
+%% Iterates the bounded {rollback, DB, _, _} key range and applies entries
+%% in decreasing `seq` order.
 %% For each #rollback{seq=Seq, tref=TRef} with value {RW, RD}: queries
 %% is_rollbacked(TRef) cluster-wide via ecall:call_all_wait(zaya:all_nodes(), ...)
 %% and resolves per the recovery rule order in DB Open Flow. Applies Callback
@@ -135,16 +143,13 @@ Performed by the `zaya_transaction_log` gen_server on a periodic timer. A single
 
 %% Enumerate transactions stuck in recovery (coordinator unreachable, no
 %% peer evidence). Used together with the PENDING_TRANSACTIONS env override
-%% for manual operator resolution. Returns the rollback record's TRef along
-%% with the participation map and the action that PENDING_TRANSACTIONS would
-%% trigger.
+%% for manual operator resolution. Returns each rollback record's TRef
+%% mapped to the current participating DB topology.
 -spec list_pending_transactions() ->
-        [{TRef :: reference(),
-          AllParticipatingDBsNodes :: [{atom(), [node()]}],
-          PendingAction :: rollback | commit | undefined}].
+        #{TRef :: reference() => #{DB :: atom() => [node()]}}.
 ```
 
-**API / gen_server boundary.** None of the API functions above (`seq/0`, `commit/2`, `is_rollbacked/1`, `rollback/2`, `purge/1`, `list_pending_transactions/0`) call or cast the gen_server. Each operates on the rocksdb log directly via the Ref kept in `persistent_term` (for `seq/0`, an `atomics` ref likewise kept in `persistent_term`). The gen_server's role is confined to: opening/closing the rocksdb instance and installing the Refs in `persistent_term`, the one-shot startup scan that seeds `seq`, and the periodic Rollbacked Entry Cleanup sweep described above.
+**API / gen_server boundary.** None of the API functions above (`seq/0`, `commit/2`, `is_rollbacked/1`, `rollback/2`, `purge/1`, `list_pending_transactions/0,1`) call or cast the gen_server. Each operates on the rocksdb log directly via the Ref kept in `persistent_term` (for `seq/0`, an `atomics` ref likewise kept in `persistent_term`). The gen_server's role is confined to: opening/closing the rocksdb instance and installing the Refs in `persistent_term`, the one-shot startup scan that seeds `seq`, and the periodic Rollbacked Entry Cleanup sweep described above.
 
 ### Startup/Shutdown
 
@@ -449,7 +454,7 @@ The decision applies to both kinds of log entry (`#rollback{}` data entries and 
 
 **DB remove.** `zaya_db_srv` does **not** call `purge/1` on DB removal. Instead, the `zaya_transaction_log` periodic GC sweep recognises removed DBs (those no longer in `zaya:all_dbs()`) and, on the next pass, (a) deletes every `#rollback{db = RemovedDB, _ = _}` entry and (b) strips `RemovedDB` from every `{rollbacked, TRef}` entry's `AllParticipatingDBsNodes` list (removing the entry entirely when its list becomes empty). `purge/1` remains reserved for the copied-DB case in step 2.
 
-`zaya:list_pending_transactions/0` enumerates TRefs currently stuck in R3's retry loop, so an operator can review and set `PENDING_TRANSACTIONS` accordingly.
+`zaya:list_pending_transactions/0,1` enumerates TRefs currently stuck in R3's retry loop, so an operator can review and set `PENDING_TRANSACTIONS` accordingly.
 
 ## Changes by Repository
 
