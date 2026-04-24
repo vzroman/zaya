@@ -3,6 +3,7 @@
 
 -include("zaya.hrl").
 -include("zaya_schema.hrl").
+-include("zaya_transaction.hrl").
 
 -define(transaction,{?MODULE,'$transaction$'}).
 -record(transaction,{data, changes ,locks}).
@@ -1002,7 +1003,8 @@ maybe_write_single_node_log(TRef, PersistentCommits) ->
   ok =
     maybe_log_batch(
       rollback_entries(PersistentCommits, Seq, TRef) ++
-      [{{rollbacked, TRef}, [{Commit#local_commit.db, [node()]} || Commit <- PersistentCommits]}],
+      [{#rollbacked{tref = TRef},
+        [{Commit#local_commit.db, [node()]} || Commit <- PersistentCommits]}],
       []
     ),
   Seq.
@@ -1012,7 +1014,7 @@ maybe_delete_single_node_log(_TRef, _PersistentCommits, undefined) ->
 maybe_delete_single_node_log(TRef, PersistentCommits, Seq) ->
   maybe_log_batch(
     [],
-    rollback_keys(PersistentCommits, Seq, TRef) ++ [{rollbacked, TRef}]
+    rollback_keys(PersistentCommits, Seq, TRef) ++ [#rollbacked{tref = TRef}]
   ).
 
 maybe_write_worker_rollbacks(_TRef, []) ->
@@ -1030,7 +1032,7 @@ maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq) ->
 maybe_write_rollbacked(_TRef, _AllParticipatingDBsNodes, false) ->
   ok;
 maybe_write_rollbacked(TRef, AllParticipatingDBsNodes, true) ->
-  maybe_log_batch([{{rollbacked, TRef}, AllParticipatingDBsNodes}], []).
+  maybe_log_batch([{#rollbacked{tref = TRef}, AllParticipatingDBsNodes}], []).
 
 maybe_write_coordinator_rollbacked(_TRef, _AllParticipatingDBsNodes, false, _Nodes) ->
   ok;
@@ -1039,13 +1041,13 @@ maybe_write_coordinator_rollbacked(TRef, AllParticipatingDBsNodes, true, Nodes) 
     true ->
       ok;
     false ->
-      maybe_log_batch([{{rollbacked, TRef}, AllParticipatingDBsNodes}], [])
+      maybe_log_batch([{#rollbacked{tref = TRef}, AllParticipatingDBsNodes}], [])
   end.
 
 maybe_log_worker_failure(TRef, AllParticipatingDBsNodes, AnyPersistent, LocalPersistent, Seq) ->
   Writes =
     case AnyPersistent of
-      true -> [{{rollbacked, TRef}, AllParticipatingDBsNodes}];
+      true -> [{#rollbacked{tref = TRef}, AllParticipatingDBsNodes}];
       false -> []
     end,
   Deletes =
@@ -1062,14 +1064,14 @@ maybe_log_batch(Writes, Deletes) ->
 
 rollback_entries(LocalCommits, Seq, TRef) ->
   [
-    {{rollback, Commit#local_commit.db, Seq, TRef},
+    {#rollback{db = Commit#local_commit.db, seq = Seq, tref = TRef},
      {Commit#local_commit.rollback_write, Commit#local_commit.rollback_delete}}
     || Commit <- LocalCommits
   ].
 
 rollback_keys(LocalCommits, Seq, TRef) ->
   [
-    {rollback, Commit#local_commit.db, Seq, TRef}
+    #rollback{db = Commit#local_commit.db, seq = Seq, tref = TRef}
     || Commit <- LocalCommits
   ].
 

@@ -21,9 +21,7 @@
   {included_applications,[
 
   ]},
-  {env,[
-    {transaction_log, #{}}
-  ]},
+  {env,[]},
   {modules, []},
 
   {licenses, ["Apache 2.0"]},
