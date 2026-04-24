@@ -5,6 +5,9 @@
 
 -behaviour(gen_server).
 
+%%=================================================================
+%%	API
+%%=================================================================
 -export([
   start_link/0,
   seq/0,
@@ -16,6 +19,9 @@
   list_pending_transactions/1
 ]).
 
+%%=================================================================
+%%	OTP API
+%%=================================================================
 -export([
   init/1,
   handle_call/3,
@@ -111,10 +117,12 @@ init([]) ->
   self() ! cleanup,
   {ok, #state{cleanup_interval_ms = Interval}}.
 
-handle_call(_Request, _From, State) ->
+handle_call(Unexpected, From, State) ->
+  ?LOGWARNING("unexpected call request ~p, from: ~p",[Unexpected, From]),
   {reply, {error, unsupported}, State}.
 
-handle_cast(_Request, State) ->
+handle_cast(Unexpected, State) ->
+  ?LOGWARNING("unexpected cast request ~p",[Unexpected]),
   {noreply, State}.
 
 handle_info(cleanup, State = #state{cleanup_interval_ms = Interval}) ->
@@ -311,32 +319,20 @@ pending_env_action() ->
 %%------------------------------------------------------------------------------------
 
 pending_transactions(Query) ->
-  {Pending, _NodesCache} =
-    zaya_rocksdb:foldl(
-      db_ref(),
-      Query,
-      fun({#rollback{db = DB, tref = TRef}, _Value}, {PendingAcc, NodesCache}) ->
-        DBMap = maps:get(TRef, PendingAcc, #{}),
-        case maps:is_key(DB, DBMap) of
-          true ->
-            {PendingAcc, NodesCache};
-          false ->
-            {Nodes, NodesCache1} = nodes_for_db(DB, NodesCache),
-            {PendingAcc#{TRef => DBMap#{DB => Nodes}}, NodesCache1}
-        end
-      end,
-      {#{}, #{}}
-    ),
-  Pending.
-
-nodes_for_db(DB, Cache) ->
-  case maps:find(DB, Cache) of
-    {ok, Nodes} ->
-      {Nodes, Cache};
-    error ->
-      Nodes = zaya:db_all_nodes(DB),
-      {Nodes, Cache#{DB => Nodes}}
-  end.
+  zaya_rocksdb:foldl(
+    db_ref(),
+    Query,
+    fun({#rollback{db = DB, tref = TRef}, _Value}, Acc) ->
+      DBMap = maps:get(TRef, Acc, #{}),
+      case maps:is_key(DB, DBMap) of
+        true ->
+          Acc;
+        false ->
+          Acc#{TRef => DBMap#{DB => zaya:db_all_nodes(DB)}}
+      end
+    end,
+    #{}
+  ).
 
 rollback_entries(DB) ->
   zaya_rocksdb:foldl(
@@ -353,9 +349,6 @@ rollback_bounds() ->
 
 rollback_bounds(DB) ->
   #{start => #rollback{db = DB, seq = 0, tref = 0}, stop => #rollback{db = DB, seq = '$end', tref = '$end'}}.
-
-rollbacked_bounds() ->
-  #{start => #rollbacked{tref = 0}, stop => #rollbacked{tref = []}}.
 
 %%------------------------------------------------------------------------------------
 %%  Cleanup
@@ -379,13 +372,16 @@ clean_rollbacks(Ref, LocalDBs) ->
       end,
       {#{}, []}
     ),
-  maybe_delete(Ref, StaleKeys),
+  StaleKeys =/= [] andalso zaya_rocksdb:delete(Ref, StaleKeys),
   ActiveTRefs.
 
 clean_rollbacked(Ref, ActiveTRefs) ->
   zaya_rocksdb:foldl(
     Ref,
-    rollbacked_bounds(),
+    #{
+      start => #rollbacked{tref = 0},
+      stop => #rollbacked{tref = []}
+    },
     fun({#rollbacked{tref = TRef}, NodesByDB}, ok) ->
       %% A {rollbacked} marker is load-bearing while any of its
       %% transaction's #rollback{} entries still live locally.
@@ -433,7 +429,3 @@ cleanup_rollbacked_entry(Ref, TRef, NodesByDB) ->
       zaya_rocksdb:write(Ref, [{#rollbacked{tref = TRef}, Remaining}])
   end.
 
-maybe_delete(_Ref, []) ->
-  ok;
-maybe_delete(Ref, Keys) ->
-  zaya_rocksdb:delete(Ref, Keys).
