@@ -567,6 +567,21 @@ single_node_commit( DBs )->
       throw( Error )
   end.
 
+run_single_node_worker(TRef, DBs) ->
+  LocalCommits = prepare_local_commits(DBs),
+  PersistentCommits = persistent_commits(LocalCommits),
+  Seq = maybe_write_single_node_log(TRef, PersistentCommits),
+  case apply_local_commits(LocalCommits) of
+    ok ->
+      ok = maybe_delete_single_node_log(TRef, PersistentCommits, Seq),
+      on_commit(DBs),
+      exit(normal);
+    {error, Class, Reason, Stack} ->
+      ok = rollback_local_commits(LocalCommits),
+      ok = maybe_delete_single_node_log(TRef, PersistentCommits, Seq),
+      erlang:raise(Class, Reason, Stack)
+  end.
+
 %%-----------------------------------------------------------
 %%  MULTI NODE COMMIT
 %%-----------------------------------------------------------
@@ -599,21 +614,6 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
       ok;
     {'DOWN', Ref, process, Coordinator, Error}->
       throw( Error )
-  end.
-
-run_single_node_worker(TRef, DBs) ->
-  LocalCommits = prepare_local_commits(DBs),
-  PersistentCommits = persistent_commits(LocalCommits),
-  Seq = maybe_write_single_node_log(TRef, PersistentCommits),
-  case apply_local_commits(LocalCommits) of
-    ok ->
-      ok = maybe_delete_single_node_log(TRef, PersistentCommits, Seq),
-      on_commit(DBs),
-      exit(normal);
-    {error, Class, Reason, Stack} ->
-      ok = rollback_local_commits(LocalCommits),
-      ok = maybe_delete_single_node_log(TRef, PersistentCommits, Seq),
-      erlang:raise(Class, Reason, Stack)
   end.
 
 run_multi_node_coordinator(TRef, Data, Nodes, NsDBs, AllParticipatingDBsNodes, AnyPersistent) ->
