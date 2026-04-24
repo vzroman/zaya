@@ -1,19 +1,14 @@
 
 -module(zaya).
 
--behaviour(application).
-
 %%=================================================================
 %%	Service API
 %%=================================================================
 -export([
-  start/2,
-  stop/1,
   start/0,
   stop/0,
   remove_node/1,
-  schema_dir/0,
-  list_pending_transactions/0
+  schema_dir/0
 ]).
 
 %%=================================================================
@@ -138,20 +133,11 @@ start()->
 stop()->
   zaya_sup:stop().
 
-start(_StartType, _StartArgs) ->
-  zaya_sup:start_link().
-
-stop(_State) ->
-  ok.
-
 remove_node(Node)->
   zaya_node:remove (Node ).
 
 schema_dir()->
   zaya_schema_srv:schema_dir().
-
-list_pending_transactions() ->
-  zaya_transaction_log:list_pending_transactions().
 
 %%%%---------------------------------------------------------------
 %%%%	Nodes Info API

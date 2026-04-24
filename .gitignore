@@ -1,8 +1,0 @@
-rebar.lock
-zaya.iml
-.worktrees/*
-.idea/*
-_build/*
-log/*
-logs/*
-DB/*
