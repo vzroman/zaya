@@ -2,6 +2,7 @@
  [{description, "Distributed multi-database management system based on Erlang technologies"},
   {vsn, git},
   {registered, []},
+  {mod, {zaya, []}},
   {applications,
    [kernel,
     stdlib,
@@ -20,7 +21,9 @@
   {included_applications,[
 
   ]},
-  {env,[]},
+  {env,[
+    {transaction_log, #{}}
+  ]},
   {modules, []},
 
   {licenses, ["Apache 2.0"]},

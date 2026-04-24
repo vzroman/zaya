@@ -276,7 +276,22 @@ handle_event(state_timeout, run, open, #data{db = DB} = Data) ->
 handle_event(state_timeout, run, try_open, #data{db = DB, module = Module} = Data) ->
 
   try
-    Ref = Module:open( default_params(DB, ?dbNodeParams(DB,node())) ),
+    Ref =
+      with_owned_ref(
+        Module,
+        fun() ->
+          Module:open( default_params(DB, ?dbNodeParams(DB,node())) )
+        end,
+        fun(Ref0) ->
+          ok = zaya_transaction_log:rollback(
+            DB,
+            fun({RollbackWrite, RollbackDelete}) ->
+              Module:commit(Ref0, RollbackWrite, RollbackDelete)
+            end
+          ),
+          Ref0
+        end
+      ),
     {next_state, register, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
   catch
     _:E->
@@ -310,7 +325,17 @@ handle_event(state_timeout, run, {add_copy, InParams, ReplyTo}, #data{db = DB, m
   case prepare_backup( maps:get(dir, Params) ) of
     {ok, Backup} ->
       try
-        Ref = zaya_copy:copy( DB, Module, Params, #{ live => not ?dbReadOnly(DB)}),
+        Ref =
+          with_owned_ref(
+            Module,
+            fun() ->
+              zaya_copy:copy( DB, Module, Params, #{ live => not ?dbReadOnly(DB)})
+            end,
+            fun(Ref0) ->
+              ok = zaya_transaction_log:purge(DB),
+              Ref0
+            end
+          ),
         ?LOGINFO("~p database copy added",[DB]),
         purge_backup( Backup ),
         {next_state, {register_copy, InParams, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
@@ -339,7 +364,17 @@ handle_event(state_timeout, run, {add_copy, InParams, ReplyTo}, #data{db = DB, m
 handle_event(state_timeout, run, {attach_copy, Params, ReplyTo}, #data{db = DB, module = Module} = Data) ->
 
   try
-    Ref = Module:open( default_params(DB, Params) ),
+    Ref =
+      with_owned_ref(
+        Module,
+        fun() ->
+          Module:open( default_params(DB, Params) )
+        end,
+        fun(Ref0) ->
+          ok = zaya_transaction_log:purge(DB),
+          Ref0
+        end
+      ),
     ?LOGINFO("~p database copy attached",[DB]),
     {next_state, {register_copy, Params, ReplyTo}, Data#data{ ref = Ref }, [ {state_timeout, 0, run } ] }
   catch
@@ -503,6 +538,16 @@ default_params(DB, Params )->
     end,
 
   Params#{ dir => Dir ++"/"++atom_to_list(DB) }.
+
+with_owned_ref(Module, OpenFun, UseFun) ->
+  Ref = OpenFun(),
+  try
+    UseFun(Ref)
+  catch
+    Class:Reason:Stack ->
+      catch Module:close(Ref),
+      erlang:raise(Class, Reason, Stack)
+  end.
 
 lock( DB, IsShared, Timeout )->
   Nodes =
@@ -673,4 +718,3 @@ update_nodes( [N|Rest], DB )->
   end;
 update_nodes([], _DB )->
   error.
-
