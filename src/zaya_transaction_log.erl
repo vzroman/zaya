@@ -12,7 +12,7 @@
   start_link/0,
   seq/0,
   commit/2,
-  is_rollbacked/1,
+  is_aborted/1,
   rollback/2,
   purge/1,
   list_pending_transactions/0,
@@ -61,10 +61,10 @@ seq() ->
 commit(Write, Delete) ->
   zaya_rocksdb:commit(db_ref(), Write, Delete).
 
-is_rollbacked(TRef) ->
+is_aborted(TRef) ->
   case wait_for_runtime(ref_wait_timeout_ms()) of
     {ok, #runtime{db_ref = Ref}} ->
-      case zaya_rocksdb:read(Ref, [#rollbacked{tref = TRef}]) of
+      case zaya_rocksdb:read(Ref, [#aborted{tref = TRef}]) of
         [_] -> {ok, true};
         [] -> {ok, false}
       end;
@@ -270,12 +270,12 @@ classify_recovery_responses(Replies) ->
 
 %% Single source of truth for the recovery decision tree.
 %% Returns rollback | commit | pending.
-%%   - rollback: any reachable node has a {rollbacked} marker.
+%%   - rollback: any reachable node has a {aborted} marker.
 %%   - commit:   the coordinator replied "no marker" and no peer said otherwise.
 %%   - pending:  neither conclusive (coordinator unreachable, no peer evidence).
 probe_recovery(TRef) ->
   {Replies, _Errors} =
-    ecall:call_all_wait(zaya:all_nodes(), ?MODULE, is_rollbacked, [TRef]),
+    ecall:call_all_wait(zaya:all_nodes(), ?MODULE, is_aborted, [TRef]),
   Reachable = classify_recovery_responses(Replies),
   case lists:any(fun({_, R}) -> R end, Reachable) of
     true ->
@@ -356,7 +356,7 @@ rollback_bounds(DB) ->
 
 cleanup(Ref) ->
   ActiveTRefs = clean_rollbacks(Ref, zaya:node_dbs(node())),
-  clean_rollbacked(Ref, ActiveTRefs),
+  clean_aborted(Ref, ActiveTRefs),
   ok.
 
 clean_rollbacks(Ref, LocalDBs) ->
@@ -375,25 +375,25 @@ clean_rollbacks(Ref, LocalDBs) ->
   StaleKeys =/= [] andalso zaya_rocksdb:delete(Ref, StaleKeys),
   ActiveTRefs.
 
-clean_rollbacked(Ref, ActiveTRefs) ->
+clean_aborted(Ref, ActiveTRefs) ->
   zaya_rocksdb:foldl(
     Ref,
     #{
-      start => #rollbacked{tref = 0},
-      stop => #rollbacked{tref = []}
+      start => #aborted{tref = 0},
+      stop => #aborted{tref = []}
     },
-    fun({#rollbacked{tref = TRef}, NodesByDB}, ok) ->
-      %% A {rollbacked} marker is load-bearing while any of its
+    fun({#aborted{tref = TRef}, NodesByDB}, ok) ->
+      %% A {aborted} marker is load-bearing while any of its
       %% transaction's #rollback{} entries still live locally.
       case is_map_key(TRef, ActiveTRefs) of
         true  -> ok;
-        false -> cleanup_rollbacked_entry(Ref, TRef, NodesByDB)
+        false -> cleanup_aborted_entry(Ref, TRef, NodesByDB)
       end
     end,
     ok
   ).
 
-cleanup_rollbacked_entry(Ref, TRef, NodesByDB) ->
+cleanup_aborted_entry(Ref, TRef, NodesByDB) ->
   %% Shrink (DB, [Node]) participation: drop removed DBs, drop
   %% decommissioned nodes, and drop nodes that already resolved
   %% recovery for this DB (proven by membership in db_available_nodes/1).
@@ -424,8 +424,8 @@ cleanup_rollbacked_entry(Ref, TRef, NodesByDB) ->
     ),
   case Remaining of
     [] ->
-      zaya_rocksdb:delete(Ref, [#rollbacked{tref = TRef}]);
+      zaya_rocksdb:delete(Ref, [#aborted{tref = TRef}]);
     _ ->
-      zaya_rocksdb:write(Ref, [{#rollbacked{tref = TRef}, Remaining}])
+      zaya_rocksdb:write(Ref, [{#aborted{tref = TRef}, Remaining}])
   end.
 

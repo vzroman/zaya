@@ -15,9 +15,9 @@
   db,
   module,
   ref,
-  operation,
-  rollback,
-  is_persistent
+  is_persistent,
+  commit,
+  rollback
 }).
 -record(commit_request,{
   tref,
@@ -60,7 +60,6 @@
   single_db_node_commit/1,
   single_db_commit/1,
   single_node_commit/1,
-  do_single_node_commit/2,
   commit_request/1
 ]).
 
@@ -523,15 +522,12 @@ prepare_commit( Data )->
 %%-----------------------------------------------------------
 %%  SINGLE DB & NODE COMMIT
 %%-----------------------------------------------------------
-single_db_node_commit(Data, [Node])->
-  case Node =:= node() of
-    true ->
-      single_db_node_commit(Data);
-    false ->
-      case ecall:call(Node, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
-        {ok,_} -> ok;
-        {error, Error}-> throw( Error )
-      end
+single_db_node_commit(Data, [N]) when N=:=node()->
+  single_db_node_commit(Data);
+single_db_node_commit(Data, [N])->
+  case ecall:call(N, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
+    {ok,_} -> ok;
+    {error, Error}-> throw( Error )
   end.
 
 single_db_node_commit( Data )->
@@ -564,23 +560,11 @@ single_db_commit( Data )->
 %%-----------------------------------------------------------
 %%  SINGLE NODE COMMIT
 %%-----------------------------------------------------------
-single_node_commit( DBs, [N])->
-  TRef = make_ref(),
-  case N =:= node() of
-    true ->
-      single_node_commit(DBs);
-    false ->
-      case ecall:call(N, ?MODULE, do_single_node_commit, [TRef, DBs]) of
-        {ok,_}-> ok;
-        {error, Error}-> throw( Error )
-      end
-  end.
-single_node_commit( DBs )->
-  TRef = make_ref(),
+single_node_commit(DBs, [N]) when N=:=node()->
   {Worker, Ref} =
     spawn_monitor(
       fun()->
-        do_single_node_commit(TRef, DBs)
+        single_node_commit(DBs)
       end
     ),
   receive
@@ -588,43 +572,82 @@ single_node_commit( DBs )->
       ok;
     {'DOWN', Ref, process, Worker, Error}->
       throw( Error )
+  end;
+single_node_commit( DBs, [N])->
+  case ecall:call(N, ?MODULE, ?FUNCTION_NAME, [DBs]) of
+    {ok,_}-> ok;
+    {error, Error}-> throw( Error )
   end.
 
-do_single_node_commit(TRef, DBs) ->
-  LocalCommits = prepare_local_commits(DBs),
-  PersistentCommits = persistent_commits(LocalCommits),
-  Seq = maybe_write_single_node_log(TRef, PersistentCommits),
-  case apply_local_commits(LocalCommits) of
-    ok ->
-      ok = maybe_delete_single_node_log(TRef, PersistentCommits, Seq),
-      on_commit(DBs),
-      ok;
-    {error, Class, Reason, Stack} ->
-      ok = rollback_local_commits(LocalCommits),
-      ok = maybe_delete_single_node_log(TRef, PersistentCommits, Seq),
-      erlang:raise(Class, Reason, Stack)
-  end.
-
-maybe_write_single_node_log(_TRef, []) ->
-  undefined;
-maybe_write_single_node_log(TRef, PersistentCommits) ->
-  Seq = zaya_transaction_log:seq(),
-  ok =
-    maybe_log_batch(
-      rollback_entries(PersistentCommits, Seq, TRef) ++
-      [{#rollbacked{tref = TRef},
-        [{Commit#local_commit.db, [node()]} || Commit <- PersistentCommits]}],
-      []
+single_node_commit(DBs) ->
+  Commits = prepare_local_commits(DBs),
+  IsPersistent = 
+    lists:any(
+      fun(#local_commit{is_persistent = IsPersistent})->
+        IsPersistent
+      end,
+      Commits
     ),
-  Seq.
+  do_single_node_commit(IsPersistent, DBs, Commits).
 
-maybe_delete_single_node_log(_TRef, _PersistentCommits, undefined) ->
-  ok;
-maybe_delete_single_node_log(TRef, PersistentCommits, Seq) ->
-  maybe_log_batch(
-    [],
-    rollback_keys(PersistentCommits, Seq, TRef) ++ [#rollbacked{tref = TRef}]
-  ).
+do_single_node_commit(_IsPersistent = false, DBs, Commits)->
+  try
+    apply_local_commits(Commits),
+    on_commit(DBs)
+  catch
+    C:E:S->
+      rollback_local_commits(Commits),
+      erlang:raise(C,E,S)
+  end;
+
+do_single_node_commit(_IsPersistent = true, DBs, Commits)->
+
+  TRef = make_ref(),
+  Log = prepare_log(Commits, TRef),
+
+  % Write the decision marker (#aborted) in an atomic batch with the rollback log
+  Rollbacked = #aborted{tref = TRef},
+  zaya_transaction_log:commit(
+    [{Rollbacked, [node()]} | Log],
+    _Deletes = []
+  ),
+
+  try
+    apply_local_commits( Commits ),
+    on_commit(DBs),
+    ok
+  catch
+    C:E:S->
+      rollback_local_commits(Commits),
+      erlang:raise(C,E,S)
+  after
+    zaya_transaction_log:commit(
+      _Writes = [],
+      [Rollbacked | [R || {R,_} <- Log]]
+    )
+  end.
+
+prepare_log( Commits, TRef )->
+  Seq = zaya_transaction_log:seq(),
+  [ prepare_log(Seq, TRef, C) || C = #local_commit{ is_persistent = true} <- Commits].
+prepare_log(
+    Seq,
+    TRef,
+    #local_commit{
+      db = DB,
+      rollback = #ops{
+        write = Write,
+        delete = Delete
+      }
+    }
+)->
+  Key = #rollback{
+    db = DB,
+    seq = Seq,
+    tref = TRef
+  },
+  Value = {Write, Delete},
+  {Key, Value}.
 
 %%-----------------------------------------------------------
 %%  MULTI NODE COMMIT
@@ -1036,39 +1059,38 @@ maybe_log_batch(Writes, Deletes) ->
 %%  LOCAL COMMIT HELPERS
 %%-----------------------------------------------------------
 prepare_local_commits(DBs) ->
-  [
-    prepare_local_commit(DB, Ops)
-    || {DB, Ops} <- lists:sort(maps:to_list(DBs))
-  ].
+  [ prepare_local_commit(DB, Ops) || {DB, Ops} <- maps:to_list(DBs) ].
 
 prepare_local_commit(DB, {Write, Delete}) ->
   {Ref, Module} = ?dbRefMod(DB),
   {RollbackWrite, RollbackDelete} = Module:prepare_rollback(Ref, Write, Delete),
+  IsPersistent = Module:is_persistent(),
   #local_commit{
     db = DB,
     module = Module,
     ref = Ref,
-    operation = #ops{write = Write, delete = Delete},
-    rollback = #ops{write = RollbackWrite, delete = RollbackDelete},
-    is_persistent = Module:is_persistent()
+    is_persistent = IsPersistent,
+    commit = #ops{
+      write = Write, 
+      delete = Delete
+    },
+    rollback = #ops{
+      write = RollbackWrite, 
+      delete = RollbackDelete
+    }
   }.
 
-persistent_commits(LocalCommits) ->
-  [Commit || Commit = #local_commit{is_persistent = true} <- LocalCommits].
-
 apply_local_commits(LocalCommits) ->
-  try
-    [apply_local_commit(Commit) || Commit <- LocalCommits],
-    ok
-  catch
-    Class:Reason:Stack->
-      {error, Class, Reason, Stack}
-  end.
+  [apply_local_commit(Commit) || Commit <- LocalCommits],
+  ok.
 
 apply_local_commit(#local_commit{
   module = Module,
   ref = Ref,
-  operation = #ops{write = Write, delete = Delete}
+  commit = #ops{
+    write = Write, 
+    delete = Delete
+  }
 }) ->
   Module:commit(Ref, Write, Delete).
 
@@ -1080,7 +1102,10 @@ rollback_local_commit(#local_commit{
   db = DB,
   module = Module,
   ref = Ref,
-  rollback = #ops{write = RollbackWrite, delete = RollbackDelete}
+  rollback = #ops{
+    write = RollbackWrite, 
+    delete = RollbackDelete
+  }
 }) ->
   try Module:commit(Ref, RollbackWrite, RollbackDelete)
   catch
