@@ -4,7 +4,7 @@
 
 **Goal:** Replace backend-owned transaction logs with a central `zaya_transaction_log` service and migrate all transaction-aware backends to the reduced `commit/3`, `prepare_rollback/3`, and `is_persistent/0` contract without changing user-facing transaction semantics.
 
-**Architecture:** `zaya` becomes the only owner of transaction durability and recovery. `zaya_transaction_log` stores rollback data and `{rollbacked, TRef}` evidence in a dedicated RocksDB instance, `zaya_db_srv` replays unresolved rollback data while opening a DB, and `zaya_transaction` switches from backend-managed `commit1/commit2/rollback` to coordinator/worker FSMs that write directly to the central log. Backends shrink to storage adapters that can compute inverse operations and apply a batch.
+**Architecture:** `zaya` becomes the only owner of transaction durability and recovery. `zaya_transaction_log` stores rollback data and `{aborted, TRef}` evidence in a dedicated RocksDB instance, `zaya_db_srv` replays unresolved rollback data while opening a DB, and `zaya_transaction` switches from backend-managed `commit1/commit2/rollback` to coordinator/worker FSMs that write directly to the central log. Backends shrink to storage adapters that can compute inverse operations and apply a batch.
 
 **Tech Stack:** Erlang/OTP (`gen_server`, `gen_statem`, `pg`, `persistent_term`, `atomics`), Common Test, `ecall`, `zaya_rocksdb`, `sext`
 
@@ -83,15 +83,15 @@ end_per_testcase(_Name, _Config)->
 
 seq_and_marker_roundtrip_test(_Config)->
   TRef = make_ref(),
-  ?assertEqual({ok, false}, zaya_transaction_log:is_rollbacked(TRef)),
+  ?assertEqual({ok, false}, zaya_transaction_log:is_aborted(TRef)),
   Seq0 = zaya_transaction_log:seq(),
   Seq1 = zaya_transaction_log:seq(),
   ?assertEqual(Seq0 + 1, Seq1),
   ok = zaya_transaction_log:commit(
-    [{{rollbacked, TRef}, [{orders, [node()]}]}],
+    [{{aborted, TRef}, [{orders, [node()]}]}],
     []
   ),
-  ?assertEqual({ok, true}, zaya_transaction_log:is_rollbacked(TRef)).
+  ?assertEqual({ok, true}, zaya_transaction_log:is_aborted(TRef)).
 
 rollback_replays_newest_first_test(_Config)->
   Older = make_ref(),
@@ -100,9 +100,9 @@ rollback_replays_newest_first_test(_Config)->
   Seq1 = zaya_transaction_log:seq(),
   ok = zaya_transaction_log:commit(
     [
-      {{rollbacked, Older}, [{orders, [node()]}]},
+      {{aborted, Older}, [{orders, [node()]}]},
       {{rollback, orders, Seq0, Older}, {[{item, old_value}], []}},
-      {{rollbacked, Newer}, [{orders, [node()]}]},
+      {{aborted, Newer}, [{orders, [node()]}]},
       {{rollback, orders, Seq1, Newer}, {[{item, newer_value}], []}}
     ],
     []
@@ -126,13 +126,13 @@ purge_deletes_only_db_entries_test(_Config)->
   Seq = zaya_transaction_log:seq(),
   ok = zaya_transaction_log:commit(
     [
-      {{rollbacked, TRef}, [{orders, [node()]}]},
+      {{aborted, TRef}, [{orders, [node()]}]},
       {{rollback, orders, Seq, TRef}, {[{item, old_value}], []}}
     ],
     []
   ),
   ok = zaya_transaction_log:purge(orders),
-  ?assertEqual({ok, true}, zaya_transaction_log:is_rollbacked(TRef)).
+  ?assertEqual({ok, true}, zaya_transaction_log:is_aborted(TRef)).
 ```
 
 - [ ] **Step 2: Run the new suite and verify it fails because the log service does not exist yet**
@@ -156,7 +156,7 @@ Expected: Common Test fails with `undef` for `zaya_transaction_log:*` calls and 
   start_link/0,
   seq/0,
   commit/2,
-  is_rollbacked/1,
+  is_aborted/1,
   rollback/2,
   purge/1,
   list_pending_transactions/0
@@ -190,9 +190,9 @@ commit(Write, Delete)->
   EncodedDelete = [sext:encode(Key) || Key <- Delete],
   zaya_rocksdb:commit(Ref, EncodedWrite, EncodedDelete).
 
-is_rollbacked(TRef)->
+is_aborted(TRef)->
   Ref = persistent_term:get({?MODULE, ref}),
-  case zaya_rocksdb:read(Ref, [sext:encode({rollbacked, TRef})]) of
+  case zaya_rocksdb:read(Ref, [sext:encode({aborted, TRef})]) of
     [{_, _}] -> {ok, true};
     [] -> {ok, false}
   end.
@@ -355,7 +355,7 @@ rollback(DB, Callback)->
 
 decide_recovery(TRef)->
   {Replies, Errors} =
-    ecall:call_all_wait(zaya:all_nodes(), ?MODULE, is_rollbacked, [TRef]),
+    ecall:call_all_wait(zaya:all_nodes(), ?MODULE, is_aborted, [TRef]),
   case lists:any(fun({_Node, Reply}) -> Reply =:= {ok, true} end, Replies) of
     true ->
       rollback;
@@ -421,7 +421,7 @@ handle_info(cleanup, State = #state{cleanup_interval_ms = Interval})->
       #{},
       fun({EncodedKey, EncodedValue}, ok)->
         case sext:decode(EncodedKey) of
-          {rollbacked, TRef} ->
+          {aborted, TRef} ->
             case sets:is_element(TRef, Active) of
               true ->
                 ok;
@@ -560,7 +560,7 @@ single_node_worker_rolls_back_and_cleans_marker_test(_Config)->
   ?assertThrow(_Reason, zaya_transaction:single_node_commit(DBs)),
   ?assertEqual(
     {ok, false},
-    zaya_transaction_log:is_rollbacked(zaya_tx_test_backend:last_tref())
+    zaya_transaction_log:is_aborted(zaya_tx_test_backend:last_tref())
   ).
 
 coordinator_down_peers_converge_on_rollback_test(_Config)->
@@ -680,7 +680,7 @@ run_single_node_worker(_Parent, TRef, DBs)->
              {Commit#local_commit.rollback_write, Commit#local_commit.rollback_delete}}
             || Commit <- Persistent
           ] ++
-          [{{rollbacked, TRef}, [{Commit#local_commit.db, [node()]} || Commit <- Persistent]}],
+          [{{aborted, TRef}, [{Commit#local_commit.db, [node()]} || Commit <- Persistent]}],
           []
         ),
         Seq0
@@ -700,7 +700,7 @@ run_single_node_worker(_Parent, TRef, DBs)->
             {rollback, Commit#local_commit.db, Seq, TRef}
             || Commit <- Persistent
           ] ++
-          [{rollbacked, TRef}]
+          [{aborted, TRef}]
         )
     end,
     exit(normal)
@@ -723,7 +723,7 @@ run_single_node_worker(_Parent, TRef, DBs)->
               {rollback, Commit#local_commit.db, Seq, TRef}
               || Commit <- Persistent
             ] ++
-            [{rollbacked, TRef}]
+            [{aborted, TRef}]
           )
       end,
       erlang:raise(Class, Reason, Stack)
@@ -824,7 +824,7 @@ commit_request(#worker_request{
       ok;
     {rollback, _Workers} ->
       ok = zaya_transaction_log:commit(
-        [{{rollbacked, TRef}, AllParticipatingDBsNodes}],
+        [{{aborted, TRef}, AllParticipatingDBsNodes}],
         []
       ),
       [
@@ -1278,7 +1278,7 @@ git -C /home/roman/PROJECTS/SOURCES/zaya_pterm_leveldb commit -m "refactor: shri
 
 **Spec coverage**
 
-- Central `zaya_transaction_log` process, per-node RocksDB storage, `seq/0`, direct `commit/2`, `is_rollbacked/1`, `rollback/2`, `purge/1`, and `list_pending_transactions/0`: covered in Task 1.
+- Central `zaya_transaction_log` process, per-node RocksDB storage, `seq/0`, direct `commit/2`, `is_aborted/1`, `rollback/2`, `purge/1`, and `list_pending_transactions/0`: covered in Task 1.
 - DB-open recovery rules, copied-DB purge path, and public `zaya:list_pending_transactions/0`: covered in Task 1.
 - Single-DB, single-node, and multi-node transaction execution changes in `zaya_transaction.erl`: covered in Task 2.
 - Removal of backend-owned `commit1/commit2/rollback` and backend log directories: covered in Tasks 3, 4, and 5.

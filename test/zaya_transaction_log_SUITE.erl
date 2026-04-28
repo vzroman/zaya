@@ -68,15 +68,15 @@ end_per_testcase(_Name, _Config) ->
 
 seq_and_marker_roundtrip_test(_Config) ->
   TRef = make_ref(),
-  ?assertEqual({ok, false}, zaya_transaction_log:is_rollbacked(TRef)),
+  ?assertEqual({ok, false}, zaya_transaction_log:is_aborted(TRef)),
   Seq0 = zaya_transaction_log:seq(),
   Seq1 = zaya_transaction_log:seq(),
   ?assertEqual(Seq0 + 1, Seq1),
   ok = zaya_transaction_log:commit(
-    [{#rollbacked{tref = TRef}, [{orders, [node()]}]}],
+    [{#aborted{tref = TRef}, [{orders, [node()]}]}],
     []
   ),
-  ?assertEqual({ok, true}, zaya_transaction_log:is_rollbacked(TRef)).
+  ?assertEqual({ok, true}, zaya_transaction_log:is_aborted(TRef)).
 
 rollback_replays_newest_first_test(_Config) ->
   Older = make_ref(),
@@ -85,9 +85,9 @@ rollback_replays_newest_first_test(_Config) ->
   Seq1 = zaya_transaction_log:seq(),
   ok = zaya_transaction_log:commit(
     [
-      {#rollbacked{tref = Older}, [{orders, [node()]}]},
+      {#aborted{tref = Older}, [{orders, [node()]}]},
       {#rollback{db = orders, seq = Seq0, tref = Older}, {[{item, old_value}], []}},
-      {#rollbacked{tref = Newer}, [{orders, [node()]}]},
+      {#aborted{tref = Newer}, [{orders, [node()]}]},
       {#rollback{db = orders, seq = Seq1, tref = Newer}, {[{item, newer_value}], []}}
     ],
     []
@@ -132,7 +132,7 @@ rollback_callback_failure_preserves_entries_across_retry_test(_Config) ->
   RollbackOps = {[{item, old_value}], []},
   ok = zaya_transaction_log:commit(
     [
-      {#rollbacked{tref = TRef}, [{orders, [node()]}]},
+      {#aborted{tref = TRef}, [{orders, [node()]}]},
       {#rollback{db = orders, seq = Seq, tref = TRef}, RollbackOps}
     ],
     []
@@ -171,13 +171,13 @@ purge_deletes_only_db_entries_test(_Config) ->
   Seq = zaya_transaction_log:seq(),
   ok = zaya_transaction_log:commit(
     [
-      {#rollbacked{tref = TRef}, [{orders, [node()]}]},
+      {#aborted{tref = TRef}, [{orders, [node()]}]},
       {#rollback{db = orders, seq = Seq, tref = TRef}, {[{item, old_value}], []}}
     ],
     []
   ),
   ok = zaya_transaction_log:purge(orders),
-  ?assertEqual({ok, true}, zaya_transaction_log:is_rollbacked(TRef)).
+  ?assertEqual({ok, true}, zaya_transaction_log:is_aborted(TRef)).
 
 pending_transaction_visibility_tracks_manual_decision_test(_Config) ->
   DB = test_db(pending_transaction_visibility_tracks_manual_decision_test),
@@ -240,7 +240,7 @@ db_open_replays_pending_rollback_test(Config) ->
     Seq = zaya_transaction_log:seq(),
     ok = zaya_transaction_log:commit(
       [
-        {#rollbacked{tref = TRef}, [{DB, [node()]}]},
+        {#aborted{tref = TRef}, [{DB, [node()]}]},
         {#rollback{db = DB, seq = Seq, tref = TRef}, {[{item, old_value}], []}}
       ],
       []
@@ -271,7 +271,7 @@ db_open_retries_after_rollback_commit_failure_test(Config) ->
     Seq = zaya_transaction_log:seq(),
     ok = zaya_transaction_log:commit(
       [
-        {#rollbacked{tref = TRef}, [{DB, [node()]}]},
+        {#aborted{tref = TRef}, [{DB, [node()]}]},
         {#rollback{db = DB, seq = Seq, tref = TRef}, {[{item, old_value}], []}}
       ],
       []
@@ -300,7 +300,7 @@ db_open_retries_after_post_commit_failure_without_leaking_ref_test(Config) ->
     Seq = zaya_transaction_log:seq(),
     ok = zaya_transaction_log:commit(
       [
-        {#rollbacked{tref = TRef}, [{DB, [node()]}]},
+        {#aborted{tref = TRef}, [{DB, [node()]}]},
         {#rollback{db = DB, seq = Seq, tref = TRef}, {[{item, old_value}], []}}
       ],
       []
@@ -328,7 +328,7 @@ attach_copy_purges_stale_rollbacks_test(Config) ->
     Seq = zaya_transaction_log:seq(),
     ok = zaya_transaction_log:commit(
       [
-        {#rollbacked{tref = TRef}, [{DB, [node()]}]},
+        {#aborted{tref = TRef}, [{DB, [node()]}]},
         {#rollback{db = DB, seq = Seq, tref = TRef}, {[{item, old_value}], []}}
       ],
       []

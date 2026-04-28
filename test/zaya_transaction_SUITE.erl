@@ -100,7 +100,7 @@ single_node_worker_rolls_back_and_cleans_marker_test(Config) ->
     ok = setup_local_db(Audit, AuditParams, [{item, old_audit}]),
     ok = zaya_tx_test_backend:fail_after_confirm(AuditFullParams),
     ?assertException(
-      throw,
+      error,
       _,
       zaya_transaction:single_node_commit(
         #{

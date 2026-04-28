@@ -9,8 +9,8 @@
   tref :: reference()
 }).
 
-%% Cluster-wide "transaction rolled back" marker key.
-%% On-disk tuple form: {rollbacked, TRef}.
+%% Cluster-wide "transaction aborted" marker key.
+%% On-disk tuple form: {aborted, TRef}.
 -record(aborted, {
   tref :: reference()
 }).
