@@ -10,21 +10,23 @@
 ]).
 
 -export([
+  single_db_node_commit_uses_local_fast_path_test/1,
   single_db_commit_skips_log_test/1,
   single_node_worker_rolls_back_and_cleans_marker_test/1,
   multi_node_worker_rolls_back_after_coordinator_decision_test/1
 ]).
 
--record(worker_request, {
+-record(commit_request, {
   tref,
   dbs,
-  all_participating_dbs_nodes,
-  any_persistent,
+  scope,
+  is_persistent,
   coordinator
 }).
 
 all() ->
   [
+    single_db_node_commit_uses_local_fast_path_test,
     single_db_commit_skips_log_test,
     single_node_worker_rolls_back_and_cleans_marker_test,
     multi_node_worker_rolls_back_after_coordinator_decision_test
@@ -50,6 +52,22 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
   ok = application:stop(zaya),
   ok.
+
+single_db_node_commit_uses_local_fast_path_test(Config) ->
+  DB = test_db(single_db_node_commit_uses_local_fast_path_test),
+  Params = db_params(Config, "single-db-local-node"),
+  FullParams = zaya_db_srv:default_params(DB, Params),
+  try
+    ok = setup_local_db(DB, Params, [{item, old_value}]),
+    ok = zaya_transaction:single_db_node_commit(
+      #{DB => {[{item, committed_value}], []}},
+      [node()]
+    ),
+    ?assertEqual([{item, committed_value}], zaya:read(DB, [item])),
+    ?assertEqual(self(), zaya_tx_test_backend:last_commit_pid(FullParams))
+  after
+    cleanup_db(DB, FullParams)
+  end.
 
 single_db_commit_skips_log_test(Config) ->
   DB = test_db(single_db_commit_skips_log_test),
@@ -122,17 +140,17 @@ multi_node_worker_rolls_back_after_coordinator_decision_test(Config) ->
       spawn_monitor(
         fun() ->
           zaya_transaction:commit_request(
-            #worker_request{
+            #commit_request{
               tref = make_ref(),
               dbs = #{
                 Orders => {[{item, new_orders}], []},
                 Audit => {[{item, new_audit}], []}
               },
-              all_participating_dbs_nodes = [
+              scope = [
                 {Orders, [node()]},
                 {Audit, [node()]}
               ],
-              any_persistent = true,
+              is_persistent = true,
               coordinator = Coordinator
             }
           )

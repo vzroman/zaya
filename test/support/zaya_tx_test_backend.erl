@@ -17,6 +17,7 @@
   seed/2,
   snapshot/1,
   commit_count/1,
+  last_commit_pid/1,
   reset/1
 ]).
 
@@ -44,6 +45,7 @@ close(#{dir := Dir, table := Table}) ->
 
 commit(#{dir := Dir, table := Table}, Write, Delete) ->
   persistent_term:put({?MODULE, last_tref}, make_ref()),
+  persistent_term:put({?MODULE, last_commit_pid, Dir}, self()),
   maybe_fail_once(Dir),
   ets:insert(Table, Write),
   [ets:delete(Table, Key) || Key <- Delete],
@@ -133,10 +135,15 @@ commit_count(ParamsOrDir) ->
   Dir = dir_key(ParamsOrDir),
   persistent_term:get({?MODULE, commit_count, Dir}, 0).
 
+last_commit_pid(ParamsOrDir) ->
+  Dir = dir_key(ParamsOrDir),
+  persistent_term:get({?MODULE, last_commit_pid, Dir}, undefined).
+
 reset(ParamsOrDir) ->
   Dir = dir_key(ParamsOrDir),
   persistent_term:erase({?MODULE, store, Dir}),
   persistent_term:erase({?MODULE, commit_count, Dir}),
+  persistent_term:erase({?MODULE, last_commit_pid, Dir}),
   persistent_term:erase({?MODULE, open_count, Dir}),
   persistent_term:erase({?MODULE, fail_once, Dir}),
   persistent_term:erase({?MODULE, fail_after_confirm, Dir}),

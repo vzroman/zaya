@@ -7,22 +7,32 @@
 
 -define(transaction,{?MODULE,'$transaction$'}).
 -record(transaction,{data, changes ,locks}).
+-record(ops,{
+  write,
+  delete
+}).
 -record(local_commit,{
   db,
   module,
   ref,
-  write,
-  delete,
-  rollback_write,
-  rollback_delete,
-  persistent
+  operation,
+  rollback,
+  is_persistent
 }).
--record(worker_request,{
+-record(commit_request,{
   tref,
   dbs,
-  all_participating_dbs_nodes,
-  any_persistent,
+  scope,
+  is_persistent,
   coordinator
+}).
+-record(multi_node_context,{
+  tref,
+  data,
+  nodes,
+  ns_dbs,
+  scope,
+  is_persistent
 }).
 
 -define(LOCK_TIMEOUT, 60000).
@@ -46,9 +56,11 @@
 %%	Internal API
 %%=================================================================
 -export([
+  single_db_node_commit/2,
   single_db_node_commit/1,
   single_db_commit/1,
   single_node_commit/1,
+  do_single_node_commit/2,
   commit_request/1
 ]).
 
@@ -512,9 +524,14 @@ prepare_commit( Data )->
 %%  SINGLE DB & NODE COMMIT
 %%-----------------------------------------------------------
 single_db_node_commit(Data, [Node])->
-  case ecall:call(Node, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
-    {ok,_} -> ok;
-    {error, Error}-> throw( Error )
+  case Node =:= node() of
+    true ->
+      single_db_node_commit(Data);
+    false ->
+      case ecall:call(Node, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
+        {ok,_} -> ok;
+        {error, Error}-> throw( Error )
+      end
   end.
 
 single_db_node_commit( Data )->
@@ -548,16 +565,22 @@ single_db_commit( Data )->
 %%  SINGLE NODE COMMIT
 %%-----------------------------------------------------------
 single_node_commit( DBs, [N])->
-  case ecall:call(N,?MODULE, ?FUNCTION_NAME, [ DBs ]) of
-    {ok,_}-> ok;
-    {error, Error}-> throw( Error )
+  TRef = make_ref(),
+  case N =:= node() of
+    true ->
+      single_node_commit(DBs);
+    false ->
+      case ecall:call(N, ?MODULE, do_single_node_commit, [TRef, DBs]) of
+        {ok,_}-> ok;
+        {error, Error}-> throw( Error )
+      end
   end.
 single_node_commit( DBs )->
   TRef = make_ref(),
   {Worker, Ref} =
     spawn_monitor(
       fun()->
-        run_single_node_worker(TRef, DBs)
+        do_single_node_commit(TRef, DBs)
       end
     ),
   receive
@@ -567,7 +590,7 @@ single_node_commit( DBs )->
       throw( Error )
   end.
 
-run_single_node_worker(TRef, DBs) ->
+do_single_node_commit(TRef, DBs) ->
   LocalCommits = prepare_local_commits(DBs),
   PersistentCommits = persistent_commits(LocalCommits),
   Seq = maybe_write_single_node_log(TRef, PersistentCommits),
@@ -575,38 +598,60 @@ run_single_node_worker(TRef, DBs) ->
     ok ->
       ok = maybe_delete_single_node_log(TRef, PersistentCommits, Seq),
       on_commit(DBs),
-      exit(normal);
+      ok;
     {error, Class, Reason, Stack} ->
       ok = rollback_local_commits(LocalCommits),
       ok = maybe_delete_single_node_log(TRef, PersistentCommits, Seq),
       erlang:raise(Class, Reason, Stack)
   end.
 
+maybe_write_single_node_log(_TRef, []) ->
+  undefined;
+maybe_write_single_node_log(TRef, PersistentCommits) ->
+  Seq = zaya_transaction_log:seq(),
+  ok =
+    maybe_log_batch(
+      rollback_entries(PersistentCommits, Seq, TRef) ++
+      [{#rollbacked{tref = TRef},
+        [{Commit#local_commit.db, [node()]} || Commit <- PersistentCommits]}],
+      []
+    ),
+  Seq.
+
+maybe_delete_single_node_log(_TRef, _PersistentCommits, undefined) ->
+  ok;
+maybe_delete_single_node_log(TRef, PersistentCommits, Seq) ->
+  maybe_log_batch(
+    [],
+    rollback_keys(PersistentCommits, Seq, TRef) ++ [#rollbacked{tref = TRef}]
+  ).
+
 %%-----------------------------------------------------------
 %%  MULTI NODE COMMIT
 %%-----------------------------------------------------------
 multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
   TRef = make_ref(),
-  AllParticipatingDBsNodes = maps:to_list(DBsNs),
-  AnyPersistent =
+  Scope = maps:to_list(DBsNs),
+  IsPersistent =
     lists:any(
       fun(DB)->
-        {_Ref, Module} = ?dbRefMod(DB),
+        Module = ?dbModule(DB),
         Module:is_persistent()
       end,
       maps:keys(Data)
     ),
+  Context = #multi_node_context{
+    tref = TRef,
+    data = Data,
+    nodes = Nodes,
+    ns_dbs = NsDBs,
+    scope = Scope,
+    is_persistent = IsPersistent
+  },
   {Coordinator, Ref} =
     spawn_monitor(
       fun()->
-        run_multi_node_coordinator(
-          TRef,
-          Data,
-          Nodes,
-          NsDBs,
-          AllParticipatingDBsNodes,
-          AnyPersistent
-        )
+        run_multi_node_coordinator(Context)
       end
     ),
   receive
@@ -616,17 +661,13 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
       throw( Error )
   end.
 
-run_multi_node_coordinator(TRef, Data, Nodes, NsDBs, AllParticipatingDBsNodes, AnyPersistent) ->
-  Workers =
-    spawn_workers(
-      Nodes,
-      NsDBs,
-      Data,
-      TRef,
-      AllParticipatingDBsNodes,
-      AnyPersistent,
-      self()
-    ),
+run_multi_node_coordinator(#multi_node_context{
+  tref = TRef,
+  nodes = Nodes,
+  scope = Scope,
+  is_persistent = IsPersistent
+} = Context) ->
+  Workers = spawn_workers(Context, self()),
   case wait_commit1_confirms(Workers, Workers) of
     ok ->
       WorkerPids = maps:keys(Workers),
@@ -634,7 +675,7 @@ run_multi_node_coordinator(TRef, Data, Nodes, NsDBs, AllParticipatingDBsNodes, A
       wait_commit2(Workers),
       exit(normal);
     {error, Error, SurvivingWorkers} ->
-      ok = maybe_write_coordinator_rollbacked(TRef, AllParticipatingDBsNodes, AnyPersistent, Nodes),
+      ok = maybe_write_coordinator_rollbacked(TRef, Scope, IsPersistent, Nodes),
       WorkerPids = maps:keys(SurvivingWorkers),
       ok = broadcast_workers(WorkerPids, {rollback, WorkerPids}),
       wait_worker_downs(SurvivingWorkers),
@@ -680,11 +721,11 @@ wait_worker_downs(Workers) when map_size(Workers) > 0 ->
 wait_worker_downs(_Workers) ->
   ok.
 
-commit_request(#worker_request{
+commit_request(#commit_request{
   tref = TRef,
   dbs = DBs,
-  all_participating_dbs_nodes = AllParticipatingDBsNodes,
-  any_persistent = AnyPersistent,
+  scope = Scope,
+  is_persistent = IsPersistent,
   coordinator = Coordinator
 })->
   erlang:monitor(process, Coordinator),
@@ -700,15 +741,15 @@ commit_request(#worker_request{
             LocalCommits,
             LocalPersistent,
             Seq,
-            AllParticipatingDBsNodes,
-            AnyPersistent
+            Scope,
+            IsPersistent
           );
         {error, Class, Reason, Stack} ->
           ok = rollback_local_commits(LocalCommits),
           ok = maybe_log_worker_failure(
             TRef,
-            AllParticipatingDBsNodes,
-            AnyPersistent,
+            Scope,
+            IsPersistent,
             LocalPersistent,
             Seq
           ),
@@ -717,8 +758,8 @@ commit_request(#worker_request{
     {error, Class, Reason, Stack} ->
       ok = maybe_log_worker_failure(
         TRef,
-        AllParticipatingDBsNodes,
-        AnyPersistent,
+        Scope,
+        IsPersistent,
         [],
         undefined
       ),
@@ -743,8 +784,8 @@ wait_worker_decision(
   LocalCommits,
   LocalPersistent,
   Seq,
-  AllParticipatingDBsNodes,
-  AnyPersistent
+  Scope,
+  IsPersistent
 ) ->
   receive
     {commit2, Workers}->
@@ -752,7 +793,7 @@ wait_worker_decision(
       wait_after_commit2(Coordinator, Workers, DBs, TRef, LocalPersistent, Seq);
     {rollback, Workers}->
       ok = broadcast_workers(Workers, {rollbacked, self()}),
-      ok = maybe_write_rollbacked(TRef, AllParticipatingDBsNodes, AnyPersistent),
+      ok = maybe_write_rollbacked(TRef, Scope, IsPersistent),
       ok = rollback_local_commits(LocalCommits),
       ok = maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq),
       exit(normal);
@@ -763,8 +804,8 @@ wait_worker_decision(
         LocalCommits,
         LocalPersistent,
         Seq,
-        AllParticipatingDBsNodes,
-        AnyPersistent
+        Scope,
+        IsPersistent
       )
   end.
 
@@ -791,8 +832,8 @@ resolve_unknown_worker_decision(
   LocalCommits,
   LocalPersistent,
   Seq,
-  AllParticipatingDBsNodes,
-  AnyPersistent
+  Scope,
+  IsPersistent
 ) ->
   ok = ensure_pg_scope(),
   Group = worker_group(TRef),
@@ -800,7 +841,7 @@ resolve_unknown_worker_decision(
   {PgRef, _Members} = pg:monitor(Group),
   [
     erlang:monitor_node(Node, true)
-    || Node <- all_participating_nodes(AllParticipatingDBsNodes),
+    || Node <- all_participating_nodes(Scope),
        Node =/= node()
   ],
   wait_unknown_worker_decision(
@@ -812,8 +853,8 @@ resolve_unknown_worker_decision(
     LocalCommits,
     LocalPersistent,
     Seq,
-    AllParticipatingDBsNodes,
-    AnyPersistent
+    Scope,
+    IsPersistent
   ).
 
 wait_unknown_worker_decision(
@@ -825,13 +866,13 @@ wait_unknown_worker_decision(
   LocalCommits,
   LocalPersistent,
   Seq,
-  AllParticipatingDBsNodes,
-  AnyPersistent
+  Scope,
+  IsPersistent
 ) ->
-  case rollback_consensus_reached(Group, AllParticipatingDBsNodes, DownNodes) of
+  case rollback_consensus_reached(Group, Scope, DownNodes) of
     true ->
       ok = broadcast_group_decision(Group, {rollbacked, self()}),
-      ok = maybe_write_rollbacked(TRef, AllParticipatingDBsNodes, AnyPersistent),
+      ok = maybe_write_rollbacked(TRef, Scope, IsPersistent),
       ok = rollback_local_commits(LocalCommits),
       ok = maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq),
       exit(normal);
@@ -844,7 +885,7 @@ wait_unknown_worker_decision(
           exit(normal);
         {rollbacked, _From}->
           ok = broadcast_group_decision(Group, {rollbacked, self()}),
-          ok = maybe_write_rollbacked(TRef, AllParticipatingDBsNodes, AnyPersistent),
+          ok = maybe_write_rollbacked(TRef, Scope, IsPersistent),
           ok = rollback_local_commits(LocalCommits),
           ok = maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq),
           exit(normal);
@@ -858,8 +899,8 @@ wait_unknown_worker_decision(
             LocalCommits,
             LocalPersistent,
             Seq,
-            AllParticipatingDBsNodes,
-            AnyPersistent
+            Scope,
+            IsPersistent
           );
         {PgRef, leave, Group, _Pids}->
           wait_unknown_worker_decision(
@@ -871,8 +912,8 @@ wait_unknown_worker_decision(
             LocalCommits,
             LocalPersistent,
             Seq,
-            AllParticipatingDBsNodes,
-            AnyPersistent
+            Scope,
+            IsPersistent
           );
         {nodedown, Node}->
           wait_unknown_worker_decision(
@@ -884,14 +925,14 @@ wait_unknown_worker_decision(
             LocalCommits,
             LocalPersistent,
             Seq,
-            AllParticipatingDBsNodes,
-            AnyPersistent
+            Scope,
+            IsPersistent
           )
       after ?WORKER_RESOLUTION_POLL_MS ->
-        case any_silent_node_rollbacked(TRef, Group, AllParticipatingDBsNodes, DownNodes) of
+        case any_silent_node_rollbacked(TRef, Group, Scope, DownNodes) of
           true ->
             ok = broadcast_group_decision(Group, {rollbacked, self()}),
-            ok = maybe_write_rollbacked(TRef, AllParticipatingDBsNodes, AnyPersistent),
+            ok = maybe_write_rollbacked(TRef, Scope, IsPersistent),
             ok = rollback_local_commits(LocalCommits),
             ok = maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq),
             exit(normal);
@@ -905,71 +946,21 @@ wait_unknown_worker_decision(
               LocalCommits,
               LocalPersistent,
               Seq,
-              AllParticipatingDBsNodes,
-              AnyPersistent
+              Scope,
+              IsPersistent
             )
         end
       end
   end.
 
-prepare_local_commits(DBs) ->
-  [
-    prepare_local_commit(DB, Ops)
-    || {DB, Ops} <- lists:sort(maps:to_list(DBs))
-  ].
-
-prepare_local_commit(DB, {Write, Delete}) ->
-  {Ref, Module} = ?dbRefMod(DB),
-  {RollbackWrite, RollbackDelete} = Module:prepare_rollback(Ref, Write, Delete),
-  #local_commit{
-    db = DB,
-    module = Module,
-    ref = Ref,
-    write = Write,
-    delete = Delete,
-    rollback_write = RollbackWrite,
-    rollback_delete = RollbackDelete,
-    persistent = Module:is_persistent()
-  }.
-
-persistent_commits(LocalCommits) ->
-  [Commit || Commit = #local_commit{persistent = true} <- LocalCommits].
-
-apply_local_commits(LocalCommits) ->
-  try
-    [apply_local_commit(Commit) || Commit <- LocalCommits],
-    ok
-  catch
-    Class:Reason:Stack->
-      {error, Class, Reason, Stack}
-  end.
-
-apply_local_commit(#local_commit{
-  module = Module,
-  ref = Ref,
-  write = Write,
-  delete = Delete
-}) ->
-  Module:commit(Ref, Write, Delete).
-
-rollback_local_commits(LocalCommits) ->
-  [rollback_local_commit(Commit) || Commit <- LocalCommits],
-  ok.
-
-rollback_local_commit(#local_commit{
-  db = DB,
-  module = Module,
-  ref = Ref,
-  rollback_write = RollbackWrite,
-  rollback_delete = RollbackDelete
-}) ->
-  try Module:commit(Ref, RollbackWrite, RollbackDelete)
-  catch
-    _:E->
-      ?LOGERROR("~p rollback error: ~p",[DB, E])
-  end.
-
-spawn_workers(Nodes, NsDBs, Data, TRef, AllParticipatingDBsNodes, AnyPersistent, Coordinator) ->
+spawn_workers(#multi_node_context{
+  tref = TRef,
+  data = Data,
+  nodes = Nodes,
+  ns_dbs = NsDBs,
+  scope = Scope,
+  is_persistent = IsPersistent
+}, Coordinator) ->
   maps:from_list([
     begin
       WorkerDBs = maps:with(maps:get(Node, NsDBs), Data),
@@ -978,11 +969,11 @@ spawn_workers(Nodes, NsDBs, Data, TRef, AllParticipatingDBsNodes, AnyPersistent,
           Node,
           ?MODULE,
           commit_request,
-          [#worker_request{
+          [#commit_request{
              tref = TRef,
              dbs = WorkerDBs,
-             all_participating_dbs_nodes = AllParticipatingDBsNodes,
-             any_persistent = AnyPersistent,
+             scope = Scope,
+             is_persistent = IsPersistent,
              coordinator = Coordinator
            }]
         ),
@@ -996,27 +987,6 @@ broadcast_workers(Workers, Message) ->
   [ecall:send(Worker, Message) || Worker <- Workers, Worker =/= self()],
   ok.
 
-maybe_write_single_node_log(_TRef, []) ->
-  undefined;
-maybe_write_single_node_log(TRef, PersistentCommits) ->
-  Seq = zaya_transaction_log:seq(),
-  ok =
-    maybe_log_batch(
-      rollback_entries(PersistentCommits, Seq, TRef) ++
-      [{#rollbacked{tref = TRef},
-        [{Commit#local_commit.db, [node()]} || Commit <- PersistentCommits]}],
-      []
-    ),
-  Seq.
-
-maybe_delete_single_node_log(_TRef, _PersistentCommits, undefined) ->
-  ok;
-maybe_delete_single_node_log(TRef, PersistentCommits, Seq) ->
-  maybe_log_batch(
-    [],
-    rollback_keys(PersistentCommits, Seq, TRef) ++ [#rollbacked{tref = TRef}]
-  ).
-
 maybe_write_worker_rollbacks(_TRef, []) ->
   undefined;
 maybe_write_worker_rollbacks(TRef, LocalPersistent) ->
@@ -1029,25 +999,25 @@ maybe_delete_worker_rollbacks(_TRef, _LocalPersistent, undefined) ->
 maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq) ->
   maybe_log_batch([], rollback_keys(LocalPersistent, Seq, TRef)).
 
-maybe_write_rollbacked(_TRef, _AllParticipatingDBsNodes, false) ->
+maybe_write_rollbacked(_TRef, _Scope, false) ->
   ok;
-maybe_write_rollbacked(TRef, AllParticipatingDBsNodes, true) ->
-  maybe_log_batch([{#rollbacked{tref = TRef}, AllParticipatingDBsNodes}], []).
+maybe_write_rollbacked(TRef, Scope, true) ->
+  maybe_log_batch([{#rollbacked{tref = TRef}, Scope}], []).
 
-maybe_write_coordinator_rollbacked(_TRef, _AllParticipatingDBsNodes, false, _Nodes) ->
+maybe_write_coordinator_rollbacked(_TRef, _Scope, false, _Nodes) ->
   ok;
-maybe_write_coordinator_rollbacked(TRef, AllParticipatingDBsNodes, true, Nodes) ->
+maybe_write_coordinator_rollbacked(TRef, Scope, true, Nodes) ->
   case lists:member(node(), Nodes) of
     true ->
       ok;
     false ->
-      maybe_log_batch([{#rollbacked{tref = TRef}, AllParticipatingDBsNodes}], [])
+      maybe_log_batch([{#rollbacked{tref = TRef}, Scope}], [])
   end.
 
-maybe_log_worker_failure(TRef, AllParticipatingDBsNodes, AnyPersistent, LocalPersistent, Seq) ->
+maybe_log_worker_failure(TRef, Scope, IsPersistent, LocalPersistent, Seq) ->
   Writes =
-    case AnyPersistent of
-      true -> [{#rollbacked{tref = TRef}, AllParticipatingDBsNodes}];
+    case IsPersistent of
+      true -> [{#rollbacked{tref = TRef}, Scope}];
       false -> []
     end,
   Deletes =
@@ -1062,12 +1032,71 @@ maybe_log_batch([], []) ->
 maybe_log_batch(Writes, Deletes) ->
   zaya_transaction_log:commit(Writes, Deletes).
 
+%%-----------------------------------------------------------
+%%  LOCAL COMMIT HELPERS
+%%-----------------------------------------------------------
+prepare_local_commits(DBs) ->
+  [
+    prepare_local_commit(DB, Ops)
+    || {DB, Ops} <- lists:sort(maps:to_list(DBs))
+  ].
+
+prepare_local_commit(DB, {Write, Delete}) ->
+  {Ref, Module} = ?dbRefMod(DB),
+  {RollbackWrite, RollbackDelete} = Module:prepare_rollback(Ref, Write, Delete),
+  #local_commit{
+    db = DB,
+    module = Module,
+    ref = Ref,
+    operation = #ops{write = Write, delete = Delete},
+    rollback = #ops{write = RollbackWrite, delete = RollbackDelete},
+    is_persistent = Module:is_persistent()
+  }.
+
+persistent_commits(LocalCommits) ->
+  [Commit || Commit = #local_commit{is_persistent = true} <- LocalCommits].
+
+apply_local_commits(LocalCommits) ->
+  try
+    [apply_local_commit(Commit) || Commit <- LocalCommits],
+    ok
+  catch
+    Class:Reason:Stack->
+      {error, Class, Reason, Stack}
+  end.
+
+apply_local_commit(#local_commit{
+  module = Module,
+  ref = Ref,
+  operation = #ops{write = Write, delete = Delete}
+}) ->
+  Module:commit(Ref, Write, Delete).
+
+rollback_local_commits(LocalCommits) ->
+  [rollback_local_commit(Commit) || Commit <- LocalCommits],
+  ok.
+
+rollback_local_commit(#local_commit{
+  db = DB,
+  module = Module,
+  ref = Ref,
+  rollback = #ops{write = RollbackWrite, delete = RollbackDelete}
+}) ->
+  try Module:commit(Ref, RollbackWrite, RollbackDelete)
+  catch
+    _:E->
+      ?LOGERROR("~p rollback error: ~p",[DB, E])
+  end.
+
 rollback_entries(LocalCommits, Seq, TRef) ->
   [
     {#rollback{db = Commit#local_commit.db, seq = Seq, tref = TRef},
-     {Commit#local_commit.rollback_write, Commit#local_commit.rollback_delete}}
+     rollback_ops(Commit)}
     || Commit <- LocalCommits
   ].
+
+rollback_ops(#local_commit{rollback = #ops{write = Write, delete = Delete}}) ->
+  {Write, Delete}.
 
 rollback_keys(LocalCommits, Seq, TRef) ->
   [
@@ -1092,26 +1121,26 @@ worker_group(TRef) ->
 broadcast_group_decision(Group, Message) ->
   broadcast_workers(pg:get_members(Group), Message).
 
-all_participating_nodes(AllParticipatingDBsNodes) ->
+all_participating_nodes(Scope) ->
   ordsets:from_list(
-    lists:append([Nodes || {_DB, Nodes} <- AllParticipatingDBsNodes])
+    lists:append([Nodes || {_DB, Nodes} <- Scope])
   ).
 
-rollback_consensus_reached(Group, AllParticipatingDBsNodes, DownNodes) ->
+rollback_consensus_reached(Group, Scope, DownNodes) ->
   MemberNodes = ordsets:from_list([node(Pid) || Pid <- pg:get_members(Group)]),
   lists:all(
     fun(Node) ->
       sets:is_element(Node, DownNodes) orelse lists:member(Node, MemberNodes)
     end,
-    all_participating_nodes(AllParticipatingDBsNodes)
+    all_participating_nodes(Scope)
   ).
 
-any_silent_node_rollbacked(TRef, Group, AllParticipatingDBsNodes, DownNodes) ->
+any_silent_node_rollbacked(TRef, Group, Scope, DownNodes) ->
   MemberNodes = ordsets:from_list([node(Pid) || Pid <- pg:get_members(Group)]),
   SilentNodes =
     [
       Node
-      || Node <- all_participating_nodes(AllParticipatingDBsNodes),
+      || Node <- all_participating_nodes(Scope),
          not sets:is_element(Node, DownNodes),
          not lists:member(Node, MemberNodes)
     ],
@@ -1136,5 +1165,3 @@ on_commit(DBs)->
       true->ignore
     end
   end,?undefined,DBs).
-
-
