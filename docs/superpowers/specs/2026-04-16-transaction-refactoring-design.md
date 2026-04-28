@@ -247,9 +247,10 @@ Each `commit_request` contains:
 
 3. All workers confirmed (commit path):
    3.1. Broadcast {commit2, AllWorkers} to all workers via ecall:send.
-   3.2. Wait until each worker has either replied {commit2, confirmed}
-        or sent 'DOWN'. (DOWN here means the worker finished and exited;
-        for the coordinator's purpose it is equivalent to confirmation.)
+   3.2. Wait for {commit2, confirmed, Worker} from every worker. A 'DOWN'
+        from a still-pending worker in this phase is not a successful
+        confirmation; log it as a commit2 error and remove the worker from
+        the wait set because the transaction decision is already commit.
    3.3. Exit normal.
 
 4. Any worker 'DOWN' before its {commit1, confirm} — rollback path:

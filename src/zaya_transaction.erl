@@ -758,14 +758,6 @@ wait_commit2(PendingWorkers) when length(PendingWorkers) > 0 ->
           ?LOGWARNING("unexpected commit2 confirm from ~p",[W]),
           wait_commit2(PendingWorkers)
       end;
-    {'DOWN', _Ref, process, W, normal}->
-      case lists:member(W, PendingWorkers) of
-        true ->
-          wait_commit2(PendingWorkers -- [W]);
-        _->
-          ?LOGWARNING("unexpected DOWN from ~p, reason: normal",[W]),
-          wait_commit2(PendingWorkers)
-      end;
     {'DOWN', _Ref, process, W, Reason}->
       case lists:member(W, PendingWorkers) of
         true ->
