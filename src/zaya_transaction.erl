@@ -26,7 +26,7 @@
   is_persistent,
   coordinator
 }).
--record(multi_node_context,{
+-record(context,{
   tref,
   data,
   nodes,
@@ -657,7 +657,7 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
       end,
       maps:keys(Data)
     ),
-  Context = #multi_node_context{
+  Context = #context{
     tref = TRef,
     data = Data,
     nodes = Nodes,
@@ -668,7 +668,7 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
   {Coordinator, Ref} =
     spawn_monitor(
       fun()->
-        run_multi_node_coordinator(Context)
+        coordinator(Context)
       end
     ),
   receive
@@ -678,61 +678,116 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
       throw( Error )
   end.
 
-run_multi_node_coordinator(#multi_node_context{
-  tref = TRef,
-  nodes = Nodes,
-  scope = Scope,
-  is_persistent = IsPersistent
-} = Context) ->
+coordinator( Context ) ->
+%-----------------PHASE 1------------------------------------------
   Workers = spawn_workers(Context, self()),
-  case wait_commit1_confirms(Workers, Workers) of
+  case wait_commit1( Workers ) of
     ok ->
-      WorkerPids = maps:keys(Workers),
-      ok = broadcast_workers(WorkerPids, {commit2, WorkerPids}),
+%-----------------PHASE 2------------------------------------------
+      broadcast_workers(Workers, {commit2, Workers}),
       wait_commit2(Workers),
       exit(normal);
-    {error, Error, SurvivingWorkers} ->
-      ok = maybe_write_coordinator_aborted(TRef, Scope, IsPersistent, Nodes),
-      WorkerPids = maps:keys(SurvivingWorkers),
-      ok = broadcast_workers(WorkerPids, {rollback, WorkerPids}),
-      wait_worker_downs(SurvivingWorkers),
-      exit(Error)
+    {abort, Worker, Reason } ->
+%---------------ABORT----------------------------------------------
+      log_aborted( Context ),
+      broadcast_workers(Workers, {rollback, Workers}),
+      wait_worker_downs(Workers -- [Worker]),
+      exit( Reason )
   end.
 
-wait_commit1_confirms(_Workers, PendingWorkers) when map_size(PendingWorkers) =:= 0 ->
-  ok;
-wait_commit1_confirms(Workers, PendingWorkers) ->
+spawn_workers(#context{
+  tref = TRef,
+  data = Data,
+  nodes = Nodes,
+  ns_dbs = NsDBs,
+  scope = Scope,
+  is_persistent = IsPersistent
+}, Coordinator) ->
+  [ begin
+      WorkerDBs = maps:with(maps:get(N, NsDBs), Data),
+      {Worker, _Ref} =
+        spawn_monitor(
+          N,
+          ?MODULE,
+          commit_request,
+          [#commit_request{
+            tref = TRef,
+            dbs = WorkerDBs,
+            scope = Scope,
+            is_persistent = IsPersistent,
+            coordinator = Coordinator
+          }]
+        ),
+      Worker
+    end || N <- Nodes ].
+
+wait_commit1(Workers) when length(Workers) > 0->
   receive
-    {commit1, confirm, Worker}->
-      wait_commit1_confirms(Workers, maps:remove(Worker, PendingWorkers));
+    {commit1, confirm, W}->
+      wait_commit1(Workers -- [W]);
     {'DOWN', _Ref, process, W, Reason}->
-      case maps:is_key(W, Workers) of
+      case lists:member(W, Workers) of
         true ->
-          ?LOGWARNING("commit node ~p down ~p",[node(W),Reason]),
-          {error, Reason, maps:remove(W, Workers)};
+          ?LOGWARNING("transaction abort: node ~p reason ~p",[node(W),Reason]),
+          {abort, W, Reason};
         _->
-          wait_commit1_confirms(Workers, PendingWorkers)
-      end
-  end.
+          ?LOGWARNING("unexpected DOWN from ~p, reason: ~p",[W, Reason]),
+          wait_commit1(Workers)
+      end;
+    Unexpected->
+      ?LOGWARNING("unexpected message: ~p",[Unexpected]),
+      wait_commit1(Workers)
+  end;
+wait_commit1(_Workers) ->
+  ok.
 
-wait_commit2( Workers ) when map_size( Workers )>0 ->
+wait_commit2( Workers ) when length( Workers )>0 ->
   receive
     {commit2, confirmed, W}->
-      wait_commit2( maps:remove( W, Workers ) );
-    {'DOWN', _Ref, process, W, normal}->
-      wait_commit2( maps:remove( W, Workers ) );
+      wait_commit2( Workers -- [W] );
     {'DOWN', _Ref, process, W, Reason}->
-      ?LOGWARNING("~p node commit2 error: ~p",[ node(W), Reason ]),
-      wait_commit2( maps:remove( W, Workers ) )
+      case lists:member(W, Workers) of
+        true ->
+          ?LOGWARNING("~p node commit2 error: ~p",[ node(W), Reason ]),
+          wait_commit2( Workers -- [W] );
+        _->
+          ?LOGWARNING("unexpected DOWN from ~p, reason: ~p",[W, Reason]),
+          wait_commit2(Workers)
+      end;
+    Unexpected->
+      ?LOGWARNING("unexpected message: ~p",[Unexpected]),
+      wait_commit1(Workers)
   end;
 wait_commit2( _Workers )->
   ok.
 
-wait_worker_downs(Workers) when map_size(Workers) > 0 ->
+log_aborted(#context{
+  tref = TRef,
+  scope = Scope,
+  nodes = Nodes,
+  is_persistent = IsPersistent
+}) ->
+  % If the coordinator's node participates in the transaction then #aborted is going to be logged by the local worker
+  NeedsLog = IsPersistent andalso (not lists:member(node(), Nodes)),
+  if
+    NeedsLog ->
+      zaya_transaction_log:commit([{#aborted{tref = TRef}, Scope}], _Deletes = []);
+    true ->
+      ignore
+  end.
+
+wait_worker_downs(Workers) when length(Workers) > 0 ->
   receive
-    {'DOWN', _Ref, process, W, _Reason}->
-      wait_worker_downs(maps:remove(W, Workers));
-    _Message->
+    {'DOWN', _Ref, process, W, Reason}->
+      case lists:member(W, Workers) of
+        true ->
+          wait_worker_downs(Workers -- [W]);
+        _->
+          ?LOGWARNING("unexpected DOWN from ~p, reason: ~p",[W, Reason]),
+          wait_worker_downs(Workers)
+      end;
+    Unexpected->
+      ?LOGWARNING("unexpected message: ~p",[Unexpected]),
       wait_worker_downs(Workers)
   end;
 wait_worker_downs(_Workers) ->
@@ -977,35 +1032,7 @@ wait_unknown_worker_decision(
       end
   end.
 
-spawn_workers(#multi_node_context{
-  tref = TRef,
-  data = Data,
-  nodes = Nodes,
-  ns_dbs = NsDBs,
-  scope = Scope,
-  is_persistent = IsPersistent
-}, Coordinator) ->
-  maps:from_list([
-    begin
-      WorkerDBs = maps:with(maps:get(Node, NsDBs), Data),
-      Worker =
-        spawn(
-          Node,
-          ?MODULE,
-          commit_request,
-          [#commit_request{
-             tref = TRef,
-             dbs = WorkerDBs,
-             scope = Scope,
-             is_persistent = IsPersistent,
-             coordinator = Coordinator
-           }]
-        ),
-      erlang:monitor(process, Worker),
-      {Worker, Node}
-    end
-    || Node <- Nodes
-  ]).
+
 
 broadcast_workers(Workers, Message) ->
   [ecall:send(Worker, Message) || Worker <- Workers, Worker =/= self()],
@@ -1028,15 +1055,6 @@ maybe_write_aborted(_TRef, _Scope, false) ->
 maybe_write_aborted(TRef, Scope, true) ->
   maybe_log_batch([{#aborted{tref = TRef}, Scope}], []).
 
-maybe_write_coordinator_aborted(_TRef, _Scope, false, _Nodes) ->
-  ok;
-maybe_write_coordinator_aborted(TRef, Scope, true, Nodes) ->
-  case lists:member(node(), Nodes) of
-    true ->
-      ok;
-    false ->
-      maybe_log_batch([{#aborted{tref = TRef}, Scope}], [])
-  end.
 
 maybe_log_worker_failure(TRef, Scope, IsPersistent, LocalPersistent, Seq) ->
   Writes =
