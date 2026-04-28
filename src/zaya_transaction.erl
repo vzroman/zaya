@@ -690,8 +690,9 @@ coordinator( Context ) ->
     {abort, Worker, Reason } ->
 %---------------ABORT----------------------------------------------
       log_aborted( Context ),
-      broadcast_workers(Workers, {rollback, Workers}),
-      wait_worker_downs(Workers -- [Worker]),
+      RollbackWorkers = Workers -- [Worker],
+      broadcast_workers(RollbackWorkers, {rollback, RollbackWorkers}),
+      wait_worker_downs(RollbackWorkers),
       exit( Reason )
   end.
 
@@ -721,44 +722,64 @@ spawn_workers(#context{
       Worker
     end || N <- Nodes ].
 
-wait_commit1(Workers) when length(Workers) > 0->
+wait_commit1(PendingWorkers) when length(PendingWorkers) > 0->
   receive
     {commit1, confirm, W}->
-      wait_commit1(Workers -- [W]);
+      case lists:member(W, PendingWorkers) of
+        true ->
+          wait_commit1(PendingWorkers -- [W]);
+        _->
+          ?LOGWARNING("unexpected commit1 confirm from ~p",[W]),
+          wait_commit1(PendingWorkers)
+      end;
     {'DOWN', _Ref, process, W, Reason}->
-      case lists:member(W, Workers) of
+      case lists:member(W, PendingWorkers) of
         true ->
           ?LOGWARNING("transaction abort: node ~p reason ~p",[node(W),Reason]),
           {abort, W, Reason};
         _->
           ?LOGWARNING("unexpected DOWN from ~p, reason: ~p",[W, Reason]),
-          wait_commit1(Workers)
+          wait_commit1(PendingWorkers)
       end;
     Unexpected->
       ?LOGWARNING("unexpected message: ~p",[Unexpected]),
-      wait_commit1(Workers)
+      wait_commit1(PendingWorkers)
   end;
-wait_commit1(_Workers) ->
+wait_commit1(_PendingWorkers) ->
   ok.
 
-wait_commit2( Workers ) when length( Workers )>0 ->
+wait_commit2(PendingWorkers) when length(PendingWorkers) > 0 ->
   receive
     {commit2, confirmed, W}->
-      wait_commit2( Workers -- [W] );
+      case lists:member(W, PendingWorkers) of
+        true ->
+          wait_commit2(PendingWorkers -- [W]);
+        _->
+          ?LOGWARNING("unexpected commit2 confirm from ~p",[W]),
+          wait_commit2(PendingWorkers)
+      end;
+    {'DOWN', _Ref, process, W, normal}->
+      case lists:member(W, PendingWorkers) of
+        true ->
+          wait_commit2(PendingWorkers -- [W]);
+        _->
+          ?LOGWARNING("unexpected DOWN from ~p, reason: normal",[W]),
+          wait_commit2(PendingWorkers)
+      end;
     {'DOWN', _Ref, process, W, Reason}->
-      case lists:member(W, Workers) of
+      case lists:member(W, PendingWorkers) of
         true ->
           ?LOGWARNING("~p node commit2 error: ~p",[ node(W), Reason ]),
-          wait_commit2( Workers -- [W] );
+          wait_commit2(PendingWorkers -- [W]);
         _->
           ?LOGWARNING("unexpected DOWN from ~p, reason: ~p",[W, Reason]),
-          wait_commit2(Workers)
+          wait_commit2(PendingWorkers)
       end;
     Unexpected->
       ?LOGWARNING("unexpected message: ~p",[Unexpected]),
-      wait_commit1(Workers)
+      wait_commit2(PendingWorkers)
   end;
-wait_commit2( _Workers )->
+wait_commit2(_PendingWorkers)->
   ok.
 
 log_aborted(#context{
@@ -776,21 +797,21 @@ log_aborted(#context{
       ignore
   end.
 
-wait_worker_downs(Workers) when length(Workers) > 0 ->
+wait_worker_downs(PendingWorkers) when length(PendingWorkers) > 0 ->
   receive
     {'DOWN', _Ref, process, W, Reason}->
-      case lists:member(W, Workers) of
+      case lists:member(W, PendingWorkers) of
         true ->
-          wait_worker_downs(Workers -- [W]);
+          wait_worker_downs(PendingWorkers -- [W]);
         _->
           ?LOGWARNING("unexpected DOWN from ~p, reason: ~p",[W, Reason]),
-          wait_worker_downs(Workers)
+          wait_worker_downs(PendingWorkers)
       end;
     Unexpected->
       ?LOGWARNING("unexpected message: ~p",[Unexpected]),
-      wait_worker_downs(Workers)
+      wait_worker_downs(PendingWorkers)
   end;
-wait_worker_downs(_Workers) ->
+wait_worker_downs(_PendingWorkers) ->
   ok.
 
 commit_request(#commit_request{
