@@ -6,11 +6,19 @@
 -include("zaya_transaction.hrl").
 
 -define(transaction,{?MODULE,'$transaction$'}).
--record(transaction,{data, changes ,locks}).
+-define(pg_group(TRef),{?MODULE,TRef}).
+
+-record(transaction,{
+  data,
+  changes,
+  locks
+}).
+
 -record(ops,{
   write,
   delete
 }).
+
 -record(local_commit,{
   db,
   module,
@@ -19,6 +27,7 @@
   commit,
   rollback
 }).
+
 -record(commit_request,{
   tref,
   dbs,
@@ -26,6 +35,13 @@
   is_persistent,
   coordinator
 }).
+
+-record(commit_state,{
+  request,
+  commits,
+  log
+}).
+
 -record(context,{
   tref,
   data,
@@ -38,7 +54,6 @@
 -define(LOCK_TIMEOUT, 60000).
 -define(ATTEMPTS,5).
 -define(WORKER_RESOLUTION_POLL_MS, 100).
-
 -define(none,{?MODULE,?undefined}).
 
 %%=================================================================
@@ -606,10 +621,7 @@ do_single_node_commit(_IsPersistent = true, DBs, Commits)->
   },
 
   AtomicLogBatch = [Aborted | Log],
-  zaya_transaction_log:commit(
-    AtomicLogBatch,
-    _Deletes = []
-  ),
+  commit_log( AtomicLogBatch ),
 
   try
     apply_local_commits(Commits),
@@ -620,33 +632,8 @@ do_single_node_commit(_IsPersistent = true, DBs, Commits)->
       rollback_local_commits(Commits),
       erlang:raise(C,E,S)
   after
-    zaya_transaction_log:commit(
-      _Writes = [],
-      [K || {K,_} <- AtomicLogBatch]
-    )
+    purge_log(AtomicLogBatch)
   end.
-
-prepare_log( Commits, TRef )->
-  Seq = zaya_transaction_log:seq(),
-  [prepare_log(Seq, TRef, C) || C <- persistent_commits(Commits)].
-prepare_log(
-    Seq,
-    TRef,
-    #local_commit{
-      db = DB,
-      rollback = #ops{
-        write = Write,
-        delete = Delete
-      }
-    }
-)->
-  Key = #rollback{
-    db = DB,
-    seq = Seq,
-    tref = TRef
-  },
-  Value = {Write, Delete},
-  {Key, Value}.
 
 %%-----------------------------------------------------------
 %%  MULTI NODE COMMIT
@@ -683,6 +670,9 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
       throw( Error )
   end.
 
+%%-----------------------------------------------------------
+%%  COORDINATOR
+%%-----------------------------------------------------------
 coordinator( Context ) ->
 %-----------------PHASE 1------------------------------------------
   Workers = spawn_workers(Context, self()),
@@ -779,6 +769,10 @@ wait_commit2(PendingWorkers) when length(PendingWorkers) > 0 ->
 wait_commit2(_PendingWorkers)->
   ok.
 
+broadcast_workers(Workers, Message) ->
+  [ecall:send(Worker, Message) || Worker <- Workers],
+  ok.
+
 coordinator_log_aborted(#context{
   tref = TRef,
   scope = Scope,
@@ -789,7 +783,7 @@ coordinator_log_aborted(#context{
   NeedsLog = IsPersistent andalso (not lists:member(node(), Nodes)),
   if
     NeedsLog ->
-      zaya_transaction_log:commit([{#aborted{tref = TRef}, Scope}], _Deletes = []);
+      commit_log([{#aborted{tref = TRef}, Scope}]);
     true ->
       ignore
   end.
@@ -811,17 +805,11 @@ wait_worker_downs(PendingWorkers) when length(PendingWorkers) > 0 ->
 wait_worker_downs(_PendingWorkers) ->
   ok.
 
--record(commit_state,{
-  request,
-  commits,
-  log
-}).
-
+%%-----------------------------------------------------------
+%%  WORKER
+%%-----------------------------------------------------------
 commit_request(#commit_request{
   tref = TRef,
-  dbs = DBs,
-  scope = Scope,
-  is_persistent = IsPersistent,
   coordinator = Coordinator
 } = Request)->
 
@@ -833,8 +821,8 @@ commit_request(#commit_request{
       {ok, State3} ?= phase_1_commit( State2 ),
       State3
     else
-      {abort, Error, State}->
-        rollback( State ),
+      {abort, Error, RollbackState}->
+        rollback( RollbackState ),
         exit(Error)
     end,
   ecall:send(Coordinator, {commit1, confirm, self()}),
@@ -845,23 +833,19 @@ commit_request(#commit_request{
 %--------------COMMITTED--------------------------
       ecall:send(Coordinator, {commit2, confirmed, self()}),
       maybe_broadcast_committed(Request, Workers),
-      purge_log(State#commit_state.log),
-      on_commit(DBs);
+      committed( State );
     {rollback, Workers}->
 %--------------ABORTED-----------------------------
-      ok = broadcast_decision( Workers, aborted ),
+      ok = broadcast_decision( Workers, TRef, abort ),
       rollback( State );
     {'DOWN', _Ref, process, Coordinator, _Reason} ->
 %--------------THE DECISION IS NOT KNOWN-------------
-      resolve_unknown_worker_decision(
-        TRef,
-        DBs,
-        LocalCommits,
-        LocalPersistent,
-        Seq,
-        Scope,
-        IsPersistent
-      )
+      case resolve_decision( State ) of
+        commit ->
+          committed( State );
+        rollback->
+          rollback( State )
+      end
   end.
 
 phase_1_prepare(#commit_request{
@@ -888,7 +872,7 @@ phase_1_log(#commit_state{
       {ok, State0};
     Log ->
       try
-        zaya_transaction_log:commit( Log , _Deletes = []),
+        commit_log( Log ),
         State = State0#commit_state{
           log = Log
         },
@@ -928,13 +912,139 @@ log_aborted(#commit_request{
     #aborted{ tref = TRef },
     Scope
   },
-  try zaya_transaction_log:commit(Aborted , _Deletes = [])
+  try commit_log([Aborted])
   catch
     _:E:S->
       ?LOGERROR("unable to log aborted transaction ~p, error: ~p, stack: ~p",[TRef,E,S])
   end;
 log_aborted(_Request)->
   % Transactions touching no persistent DBs don't need logging
+  ignore.
+
+maybe_broadcast_committed(
+    #commit_request{
+      coordinator = Coordinator,
+      tref = TRef
+    },
+    Workers
+)->
+  receive
+    {'DOWN', _Ref, process, Coordinator, normal}->
+      ignore;
+    {'DOWN', _Ref, process, Coordinator, Reason}->
+      BroadcastTo = Workers -- [self()],
+      broadcast_decision(Workers, TRef, commit),
+      ?LOGINFO("transaction ~p coordinator down, reason: ~p, broadcast 'committed' to ~p",[
+        TRef, Reason, [ node(W) || W <- BroadcastTo]
+      ])
+  after
+    60000->
+      ?LOGERROR("transaction ~p timeout on waiting for coordinator down",[TRef])
+  end.
+
+broadcast_decision(Workers, TRef, Decision)->
+  BroadcastTo = Workers -- [self()],
+  [ecall:send(W, {TRef, Decision, BroadcastTo}) || W <- BroadcastTo],
+  ok.
+
+committed(#commit_state{
+  log = Log,
+  request = #commit_request{
+    dbs = DBs
+  }
+})->
+  purge_log( Log ),
+  on_commit( DBs ),
+  ok.
+
+%--------------------------------------------------------------
+% Coordinator is down, the decision is not known
+%--------------------------------------------------------------
+resolve_decision(#commit_state{
+  request = #commit_request{
+    tref = TRef,
+    scope = Scope
+  }
+})->
+
+  % Claim yourself as 'don't know' node
+  PG = ?pg_group(TRef),
+  ok = pg:join(?transaction_pg, PG),
+
+  % Monitor who else doesn't know
+  {_Ref, DontKnowWorkers} = pg:monitor(?transaction_pg, PG),
+
+  % Monitor the nodes, that haven't 'raised a hand' yet
+  AllNodes = ordsets:from_list(
+    lists:append([Nodes || {_DB, Nodes} <- Scope])
+  ),
+  PendingNodes = AllNodes -- [node(W) || W <- DontKnowWorkers],
+  [erlang:monitor_node(N, true) || N <- PendingNodes],
+
+  wait_for_decision(PendingNodes, TRef).
+
+wait_for_decision(_PendingNodes = [], _TRef)->
+  rollback;
+wait_for_decision(PendingNodes, TRef)->
+  receive
+    {TRef, Decision, Workers}->
+      broadcast_decision(Workers, TRef, Decision),
+      Decision;
+    {_Ref, join, ?pg_group(TRef), DontKnowWorkers}->
+      RestNodes = PendingNodes -- [node(W) || W <- DontKnowWorkers],
+      wait_for_decision(RestNodes, TRef);
+    {nodedown, Node}->
+      RestNodes = PendingNodes -- [Node],
+      wait_for_decision(RestNodes, TRef);
+    _Other->
+      wait_for_decision(PendingNodes, TRef)
+  after ?WORKER_RESOLUTION_POLL_MS ->
+    case request_is_aborted(PendingNodes, TRef) of
+      true ->
+        rollback;
+      false->
+        wait_for_decision(PendingNodes, TRef)
+    end
+  end.
+
+request_is_aborted(Nodes, TRef)->
+  {Replies, _} = ecall:call_all_wait(Nodes, zaya_transaction_log, is_aborted, [TRef]),
+  case [N || {N,{ok, true}} <- Replies] of
+    [] -> false;
+    _-> true
+  end.
+
+%%=============================================================
+%% Internal commit helpers
+%%=============================================================
+prepare_log( Commits, TRef )->
+  Seq = zaya_transaction_log:seq(),
+  [prepare_log(Seq, TRef, C) || C <- persistent_commits(Commits)].
+prepare_log(
+    Seq,
+    TRef,
+    #local_commit{
+      db = DB,
+      rollback = #ops{
+        write = Write,
+        delete = Delete
+      }
+    }
+)->
+  Key = #rollback{
+    db = DB,
+    seq = Seq,
+    tref = TRef
+  },
+  Value = {Write, Delete},
+  {Key, Value}.
+
+commit_log([_|_]=Log)->
+  zaya_transaction_log:commit(
+    Log,
+    _Deletes = []
+  );
+commit_log(_Log)->
   ignore.
 
 purge_log([_|_] =Log)->
@@ -950,312 +1060,6 @@ purge_log([_|_] =Log)->
 purge_log(_Log)->
   % No local persistent DBs
   ignore.
-
-maybe_broadcast_committed(
-    #commit_request{
-      coordinator = Coordinator,
-      tref = TRef
-    },
-    Workers
-)->
-  receive
-    {'DOWN', _Ref, process, Coordinator, normal}->
-      ignore;
-    {'DOWN', _Ref, process, Coordinator, Reason}->
-      BroadcastTo = Workers -- [self()],
-      broadcast_decision(Workers, committed),
-      ?LOGINFO("transaction ~p coordinator down, reason: ~p, broadcast 'committed' to ~p",[
-        TRef, Reason, [ node(W) || W <- BroadcastTo]
-      ])
-  after
-    60000->
-      ?LOGERROR("transaction ~p timeout on waiting for coordinator down",[TRef])
-  end.
-
-broadcast_decision(Workers, Decision)->
-  BroadcastTo = Workers -- [self()],
-  [ecall:send(W, {Decision, BroadcastTo}) || W <- BroadcastTo],
-  ok.
-
-
-
-
-todo()->
-  case prepare_worker_state(TRef, DBs) of
-    {ok, LocalCommits, LocalPersistent, Seq} ->
-      case try_apply_local_commits(LocalCommits) of
-        ok ->
-          ecall:send(Coordinator, {commit1, confirm, self()}),
-          wait_worker_decision(
-            TRef,
-            DBs,
-            Coordinator,
-            LocalCommits,
-            LocalPersistent,
-            Seq,
-            Scope,
-            IsPersistent
-          );
-        {error, Class, Reason, Stack} ->
-          ok = rollback_local_commits(LocalCommits),
-          ok = maybe_log_worker_failure(
-            TRef,
-            Scope,
-            IsPersistent,
-            LocalPersistent,
-            Seq
-          ),
-          erlang:raise(Class, Reason, Stack)
-      end;
-    {error, Class, Reason, Stack} ->
-      ok = maybe_log_worker_failure(
-        TRef,
-        Scope,
-        IsPersistent,
-        [],
-        undefined
-      ),
-      erlang:raise(Class, Reason, Stack)
-  end.
-
-
-
-
-prepare_worker_state(TRef, DBs) ->
-  try
-    LocalCommits = prepare_local_commits(DBs),
-    LocalPersistent = persistent_commits(LocalCommits),
-    Seq = maybe_write_worker_rollbacks(TRef, LocalPersistent),
-    {ok, LocalCommits, LocalPersistent, Seq}
-  catch
-    Class:Reason:Stack->
-      {error, Class, Reason, Stack}
-  end.
-
-try_apply_local_commits(LocalCommits) ->
-  try apply_local_commits(LocalCommits)
-  catch
-    Class:Reason:Stack->
-      {error, Class, Reason, Stack}
-  end.
-
-wait_worker_decision(
-  TRef,
-  DBs,
-  Coordinator,
-  LocalCommits,
-  LocalPersistent,
-  Seq,
-  Scope,
-  IsPersistent
-) ->
-  receive
-    {commit2, Workers}->
-      ecall:send(Coordinator, {commit2, confirmed, self()}),
-      wait_after_commit2(Coordinator, Workers, DBs, TRef, LocalPersistent, Seq);
-    {rollback, Workers}->
-      ok = broadcast_workers(Workers, {aborted, self()}),
-      ok = maybe_write_aborted(TRef, Scope, IsPersistent),
-      ok = rollback_local_commits(LocalCommits),
-      ok = maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq),
-      exit(normal);
-    {'DOWN', _Ref, process, Coordinator, _Reason} ->
-      resolve_unknown_worker_decision(
-        TRef,
-        DBs,
-        LocalCommits,
-        LocalPersistent,
-        Seq,
-        Scope,
-        IsPersistent
-      )
-  end.
-
-wait_after_commit2(Coordinator, Workers, DBs, TRef, LocalPersistent, Seq) ->
-  receive
-    {'DOWN', _Ref, process, Coordinator, normal}->
-      ok = maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq),
-      on_commit(DBs),
-      exit(normal);
-    {'DOWN', _Ref, process, Coordinator, _Reason}->
-      ok = broadcast_workers(Workers, {committed, self()}),
-      ok = maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq),
-      on_commit(DBs),
-      exit(normal);
-    {committed, _From}->
-      ok = maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq),
-      on_commit(DBs),
-      exit(normal)
-  end.
-
-resolve_unknown_worker_decision(
-  TRef,
-  DBs,
-  LocalCommits,
-  LocalPersistent,
-  Seq,
-  Scope,
-  IsPersistent
-) ->
-  ok = ensure_pg_scope(),
-  Group = worker_group(TRef),
-  ok = pg:join(Group, self()),
-  {PgRef, _Members} = pg:monitor(Group),
-  [
-    erlang:monitor_node(Node, true)
-    || Node <- all_participating_nodes(Scope),
-       Node =/= node()
-  ],
-  wait_unknown_worker_decision(
-    Group,
-    PgRef,
-    sets:new(),
-    TRef,
-    DBs,
-    LocalCommits,
-    LocalPersistent,
-    Seq,
-    Scope,
-    IsPersistent
-  ).
-
-wait_unknown_worker_decision(
-  Group,
-  PgRef,
-  DownNodes,
-  TRef,
-  DBs,
-  LocalCommits,
-  LocalPersistent,
-  Seq,
-  Scope,
-  IsPersistent
-) ->
-  case rollback_consensus_reached(Group, Scope, DownNodes) of
-    true ->
-      ok = broadcast_group_decision(Group, {aborted, self()}),
-      ok = maybe_write_aborted(TRef, Scope, IsPersistent),
-      ok = rollback_local_commits(LocalCommits),
-      ok = maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq),
-      exit(normal);
-    false ->
-      receive
-        {committed, _From}->
-          ok = broadcast_group_decision(Group, {committed, self()}),
-          ok = maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq),
-          on_commit(DBs),
-          exit(normal);
-        {aborted, _From}->
-          ok = broadcast_group_decision(Group, {aborted, self()}),
-          ok = maybe_write_aborted(TRef, Scope, IsPersistent),
-          ok = rollback_local_commits(LocalCommits),
-          ok = maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq),
-          exit(normal);
-        {PgRef, join, Group, _Pids}->
-          wait_unknown_worker_decision(
-            Group,
-            PgRef,
-            DownNodes,
-            TRef,
-            DBs,
-            LocalCommits,
-            LocalPersistent,
-            Seq,
-            Scope,
-            IsPersistent
-          );
-        {PgRef, leave, Group, _Pids}->
-          wait_unknown_worker_decision(
-            Group,
-            PgRef,
-            DownNodes,
-            TRef,
-            DBs,
-            LocalCommits,
-            LocalPersistent,
-            Seq,
-            Scope,
-            IsPersistent
-          );
-        {nodedown, Node}->
-          wait_unknown_worker_decision(
-            Group,
-            PgRef,
-            sets:add_element(Node, DownNodes),
-            TRef,
-            DBs,
-            LocalCommits,
-            LocalPersistent,
-            Seq,
-            Scope,
-            IsPersistent
-          )
-      after ?WORKER_RESOLUTION_POLL_MS ->
-        case any_silent_node_aborted(TRef, Group, Scope, DownNodes) of
-          true ->
-            ok = broadcast_group_decision(Group, {aborted, self()}),
-            ok = maybe_write_aborted(TRef, Scope, IsPersistent),
-            ok = rollback_local_commits(LocalCommits),
-            ok = maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq),
-            exit(normal);
-          false ->
-            wait_unknown_worker_decision(
-              Group,
-              PgRef,
-              DownNodes,
-              TRef,
-              DBs,
-              LocalCommits,
-              LocalPersistent,
-              Seq,
-              Scope,
-              IsPersistent
-            )
-        end
-      end
-  end.
-
-
-
-broadcast_workers(Workers, Message) ->
-  [ecall:send(Worker, Message) || Worker <- Workers],
-  ok.
-
-maybe_write_worker_rollbacks(_TRef, []) ->
-  undefined;
-maybe_write_worker_rollbacks(TRef, LocalPersistent) ->
-  Seq = zaya_transaction_log:seq(),
-  ok = maybe_log_batch(rollback_entries(LocalPersistent, Seq, TRef), []),
-  Seq.
-
-maybe_delete_worker_rollbacks(_TRef, _LocalPersistent, undefined) ->
-  ok;
-maybe_delete_worker_rollbacks(TRef, LocalPersistent, Seq) ->
-  maybe_log_batch([], rollback_keys(LocalPersistent, Seq, TRef)).
-
-maybe_write_aborted(_TRef, _Scope, false) ->
-  ok;
-maybe_write_aborted(TRef, Scope, true) ->
-  maybe_log_batch([{#aborted{tref = TRef}, Scope}], []).
-
-
-maybe_log_worker_failure(TRef, Scope, IsPersistent, LocalPersistent, Seq) ->
-  Writes =
-    case IsPersistent of
-      true -> [{#aborted{tref = TRef}, Scope}];
-      false -> []
-    end,
-  Deletes =
-    case Seq of
-      undefined -> [];
-      _ -> rollback_keys(LocalPersistent, Seq, TRef)
-    end,
-  maybe_log_batch(Writes, Deletes).
-
-maybe_log_batch([], []) ->
-  ok;
-maybe_log_batch(Writes, Deletes) ->
-  zaya_transaction_log:commit(Writes, Deletes).
 
 %%-----------------------------------------------------------
 %%  LOCAL COMMIT HELPERS
@@ -1317,78 +1121,6 @@ rollback_local_commit(#local_commit{
     _:E->
       ?LOGERROR("~p rollback error: ~p",[DB, E])
   end.
-
-%%-----------------------------------------------------------
-%%  MULTI NODE LOG HELPERS
-%%-----------------------------------------------------------
-rollback_entries(LocalCommits, Seq, TRef) ->
-  [
-    {#rollback{db = Commit#local_commit.db, seq = Seq, tref = TRef},
-     rollback_ops(Commit)}
-    || Commit <- LocalCommits
-  ].
-
-rollback_ops(#local_commit{rollback = #ops{write = Write, delete = Delete}}) ->
-  {Write, Delete}.
-
-rollback_keys(LocalCommits, Seq, TRef) ->
-  [
-    #rollback{db = Commit#local_commit.db, seq = Seq, tref = TRef}
-    || Commit <- LocalCommits
-  ].
-
-%%-----------------------------------------------------------
-%%  MULTI NODE RECOVERY HELPERS
-%%-----------------------------------------------------------
-ensure_pg_scope() ->
-  case whereis(pg) of
-    undefined ->
-      case pg:start_link() of
-        {ok, _Pid} -> ok;
-        {error, {already_started, _Pid}} -> ok
-      end;
-    _ ->
-      ok
-  end.
-
-worker_group(TRef) ->
-  {?MODULE, TRef}.
-
-broadcast_group_decision(Group, Message) ->
-  broadcast_workers(pg:get_members(Group), Message).
-
-all_participating_nodes(Scope) ->
-  ordsets:from_list(
-    lists:append([Nodes || {_DB, Nodes} <- Scope])
-  ).
-
-rollback_consensus_reached(Group, Scope, DownNodes) ->
-  MemberNodes = ordsets:from_list([node(Pid) || Pid <- pg:get_members(Group)]),
-  lists:all(
-    fun(Node) ->
-      sets:is_element(Node, DownNodes) orelse lists:member(Node, MemberNodes)
-    end,
-    all_participating_nodes(Scope)
-  ).
-
-any_silent_node_aborted(TRef, Group, Scope, DownNodes) ->
-  MemberNodes = ordsets:from_list([node(Pid) || Pid <- pg:get_members(Group)]),
-  SilentNodes =
-    [
-      Node
-      || Node <- all_participating_nodes(Scope),
-         not sets:is_element(Node, DownNodes),
-         not lists:member(Node, MemberNodes)
-    ],
-  lists:any(
-    fun(Node) ->
-      case ecall:call(Node, zaya_transaction_log, is_aborted, [TRef]) of
-        {ok, {ok, true}} -> true;
-        _ -> false
-      end
-    end,
-    SilentNodes
-  ).
 
 on_commit(DBs)->
   maps:fold(fun(DB, {Write, Delete},_)->
