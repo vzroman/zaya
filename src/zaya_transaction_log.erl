@@ -75,9 +75,10 @@ is_aborted(TRef) ->
 rollback(DB, Callback) ->
   Entries = rollback_entries(DB),
   lists:foreach(
-    fun({#rollback{} = Key, {RollbackWrite, RollbackDelete}}) ->
-      case decide_recovery(Key#rollback.tref) of
+    fun({#rollback{tref = TRef} = Key, {RollbackWrite, RollbackDelete}}) ->
+      case decide_recovery(TRef) of
         rollback ->
+          ?LOGINFO("~p rollback ~p: ~p",[DB,TRef,{RollbackWrite, RollbackDelete}]),
           ok = Callback({RollbackWrite, RollbackDelete});
         commit ->
           ok
