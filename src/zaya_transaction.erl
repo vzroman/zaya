@@ -51,6 +51,12 @@
   is_persistent
 }).
 
+-record(msg,{
+  tref,
+  type,
+  data
+}).
+
 -define(LOCK_TIMEOUT, 60000).
 -define(ATTEMPTS,5).
 -define(WORKER_RESOLUTION_POLL_MS, 100).
@@ -673,60 +679,65 @@ multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
 %%-----------------------------------------------------------
 %%  COORDINATOR
 %%-----------------------------------------------------------
-coordinator( Context ) ->
+coordinator(#context{
+  tref = TRef
+}=Context) ->
 %-----------------PHASE 1------------------------------------------
-  Workers = spawn_workers(Context, self()),
-  case wait_commit1( Workers ) of
+  Workers = spawn_workers( Context ),
+  case wait_commit1(Workers, TRef) of
     ok ->
 %-----------------PHASE 2------------------------------------------
-      broadcast_workers(Workers, {commit2, Workers}),
-      wait_commit2(Workers),
+      broadcast_workers(
+        Workers,
+        #msg{
+          tref = TRef,
+          type = commit,
+          data = Workers
+        }
+      ),
+      wait_commit2(Workers, TRef),
       exit(normal);
-    {abort, Worker, Reason } ->
+    {abort, Worker, Reason} ->
 %---------------ABORT----------------------------------------------
       coordinator_log_aborted( Context ),
       RollbackWorkers = Workers -- [Worker],
-      broadcast_workers(RollbackWorkers, {rollback, RollbackWorkers}),
+      broadcast_workers(
+        RollbackWorkers,
+        #msg{
+          tref = TRef,
+          type = abort,
+          data = RollbackWorkers
+        }
+      ),
       wait_worker_downs(RollbackWorkers),
       exit( Reason )
   end.
 
 spawn_workers(#context{
   tref = TRef,
-  data = Data,
+  scope = Scope,
+  is_persistent = IsPersistent,
   nodes = Nodes,
   ns_dbs = NsDBs,
-  scope = Scope,
-  is_persistent = IsPersistent
-}, Coordinator) ->
+  data = Data
+}) ->
+  Request = #commit_request{
+    tref = TRef,
+    scope = Scope,
+    is_persistent = IsPersistent,
+    coordinator = self()
+  },
   [ begin
-      WorkerDBs = maps:with(maps:get(N, NsDBs), Data),
-      {Worker, _Ref} =
-        spawn_monitor(
-          N,
-          ?MODULE,
-          commit_request,
-          [#commit_request{
-            tref = TRef,
-            dbs = WorkerDBs,
-            scope = Scope,
-            is_persistent = IsPersistent,
-            coordinator = Coordinator
-          }]
-        ),
+      {Worker, _Ref} = spawn_monitor(N, ?MODULE, commit_request, [Request#commit_request{
+        dbs = maps:with(maps:get(N, NsDBs), Data)
+      }]),
       Worker
     end || N <- Nodes ].
 
-wait_commit1(PendingWorkers) when length(PendingWorkers) > 0->
+wait_commit1(PendingWorkers, TRef) when length(PendingWorkers) > 0->
   receive
-    {commit1, confirm, W}->
-      case lists:member(W, PendingWorkers) of
-        true ->
-          wait_commit1(PendingWorkers -- [W]);
-        _->
-          ?LOGWARNING("unexpected commit1 confirm from ~p",[W]),
-          wait_commit1(PendingWorkers)
-      end;
+    #msg{ tref = TRef, type = commit1, data = W }->
+      wait_commit1(PendingWorkers -- [W], TRef);
     {'DOWN', _Ref, process, W, Reason}->
       case lists:member(W, PendingWorkers) of
         true ->
@@ -734,39 +745,33 @@ wait_commit1(PendingWorkers) when length(PendingWorkers) > 0->
           {abort, W, Reason};
         _->
           ?LOGWARNING("unexpected DOWN from ~p, reason: ~p",[W, Reason]),
-          wait_commit1(PendingWorkers)
+          wait_commit1(PendingWorkers, TRef)
       end;
     Unexpected->
       ?LOGWARNING("unexpected message: ~p",[Unexpected]),
-      wait_commit1(PendingWorkers)
+      wait_commit1(PendingWorkers, TRef)
   end;
-wait_commit1(_PendingWorkers) ->
+wait_commit1(_PendingWorkers, _TRef) ->
   ok.
 
-wait_commit2(PendingWorkers) when length(PendingWorkers) > 0 ->
+wait_commit2(PendingWorkers, TRef) when length(PendingWorkers) > 0 ->
   receive
-    {commit2, confirmed, W}->
-      case lists:member(W, PendingWorkers) of
-        true ->
-          wait_commit2(PendingWorkers -- [W]);
-        _->
-          ?LOGWARNING("unexpected commit2 confirm from ~p",[W]),
-          wait_commit2(PendingWorkers)
-      end;
+    #msg{ tref = TRef, type = commit2, data = W }->
+      wait_commit2(PendingWorkers -- [W], TRef);
     {'DOWN', _Ref, process, W, Reason}->
       case lists:member(W, PendingWorkers) of
         true ->
           ?LOGWARNING("~p node commit2 error: ~p",[ node(W), Reason ]),
-          wait_commit2(PendingWorkers -- [W]);
+          wait_commit2(PendingWorkers -- [W], TRef);
         _->
           ?LOGWARNING("unexpected DOWN from ~p, reason: ~p",[W, Reason]),
-          wait_commit2(PendingWorkers)
+          wait_commit2(PendingWorkers, TRef)
       end;
     Unexpected->
       ?LOGWARNING("unexpected message: ~p",[Unexpected]),
-      wait_commit2(PendingWorkers)
+      wait_commit2(PendingWorkers, TRef)
   end;
-wait_commit2(_PendingWorkers)->
+wait_commit2(_PendingWorkers, _TRef)->
   ok.
 
 broadcast_workers(Workers, Message) ->
@@ -825,16 +830,24 @@ commit_request(#commit_request{
         rollback( RollbackState ),
         exit(Error)
     end,
-  ecall:send(Coordinator, {commit1, confirm, self()}),
+  ecall:send(Coordinator, #msg{
+    tref = TRef,
+    type = commit1,
+    data = self()
+  }),
 
 %----------------PHASE 2--------------------------
   receive
-    {commit2, Workers}->
+    #msg{tref = TRef, type = commit, data = Workers}->
 %--------------COMMITTED--------------------------
-      ecall:send(Coordinator, {commit2, confirmed, self()}),
+      ecall:send(Coordinator, #msg{
+        tref = TRef,
+        type = commit2,
+        data = self()
+      }),
       maybe_broadcast_committed(Request, Workers),
       committed( State );
-    {rollback, Workers}->
+    #msg{tref = TRef, type = abort, data = Workers}->
 %--------------ABORTED-----------------------------
       ok = broadcast_decision( Workers, TRef, abort ),
       rollback( State );
@@ -843,7 +856,7 @@ commit_request(#commit_request{
       case resolve_decision( State ) of
         commit ->
           committed( State );
-        rollback->
+        abort->
           rollback( State )
       end
   end.
@@ -856,10 +869,10 @@ phase_1_prepare(#commit_request{
   erlang:monitor(process, Coordinator),
   Commits = prepare_local_commits(DBs),
 
-  #commit_state{
+  {ok, #commit_state{
     request = Request,
     commits = Commits
-  }.
+  }}.
 
 phase_1_log(#commit_state{
   request = #commit_request{
@@ -944,7 +957,12 @@ maybe_broadcast_committed(
 
 broadcast_decision(Workers, TRef, Decision)->
   BroadcastTo = Workers -- [self()],
-  [ecall:send(W, {TRef, Decision, BroadcastTo}) || W <- BroadcastTo],
+  Msg = #msg{
+    tref = TRef,
+    type = Decision,
+    data = BroadcastTo
+  },
+  [ecall:send(W, Msg) || W <- BroadcastTo],
   ok.
 
 committed(#commit_state{
@@ -969,7 +987,7 @@ resolve_decision(#commit_state{
 
   % Claim yourself as 'don't know' node
   PG = ?pg_group(TRef),
-  ok = pg:join(?transaction_pg, PG),
+  ok = pg:join(?transaction_pg, PG, self()),
 
   % Monitor who else doesn't know
   {_Ref, DontKnowWorkers} = pg:monitor(?transaction_pg, PG),
@@ -984,10 +1002,10 @@ resolve_decision(#commit_state{
   wait_for_decision(PendingNodes, TRef).
 
 wait_for_decision(_PendingNodes = [], _TRef)->
-  rollback;
+  abort;
 wait_for_decision(PendingNodes, TRef)->
   receive
-    {TRef, Decision, Workers}->
+    #msg{tref = TRef, type = Decision, data = Workers}->
       broadcast_decision(Workers, TRef, Decision),
       Decision;
     {_Ref, join, ?pg_group(TRef), DontKnowWorkers}->
@@ -1001,7 +1019,7 @@ wait_for_decision(PendingNodes, TRef)->
   after ?WORKER_RESOLUTION_POLL_MS ->
     case request_is_aborted(PendingNodes, TRef) of
       true ->
-        rollback;
+        abort;
       false->
         wait_for_decision(PendingNodes, TRef)
     end
