@@ -818,10 +818,15 @@ commit_request(#commit_request{
   coordinator = Coordinator
 } = Request)->
 
-%----------------PHASE 1--------------------------
+  erlang:monitor(process, Coordinator),
+  State0 = #commit_state{
+    request = Request
+  },
+  
+  %----------------PHASE 1--------------------------
   State =
     maybe
-      {ok, State1} ?= phase_1_prepare( Request ),
+      {ok, State1} ?= phase_1_prepare( State0 ),
       {ok, State2} ?= phase_1_log( State1 ),
       {ok, State3} ?= phase_1_commit( State2 ),
       State3
@@ -861,18 +866,24 @@ commit_request(#commit_request{
       end
   end.
 
-phase_1_prepare(#commit_request{
-  coordinator = Coordinator,
-  dbs = DBs
-} =Request)->
-
-  erlang:monitor(process, Coordinator),
-  Commits = prepare_local_commits(DBs),
-
-  {ok, #commit_state{
-    request = Request,
-    commits = Commits
-  }}.
+phase_1_prepare(
+  #commit_state{
+    request = #commit_request{
+      tref = TRef,
+      dbs = DBs
+    }
+  } = State0
+)->
+  try 
+    State = State0#commit_state{
+      commits = prepare_local_commits(DBs)
+    },
+    {ok, State}
+  catch
+    _:E:S->
+      ?LOGERROR("unable to prepare transaction ~p, error: ~p, stack: ~p",[TRef, E, S]),
+      {abort, E, State0}
+  end.  
 
 phase_1_log(#commit_state{
   request = #commit_request{
@@ -1121,9 +1132,11 @@ apply_local_commit(#local_commit{
 }) ->
   Module:commit(Ref, Write, Delete).
 
-rollback_local_commits(LocalCommits) ->
+rollback_local_commits([_|_]=LocalCommits) ->
   [rollback_local_commit(Commit) || Commit <- LocalCommits],
-  ok.
+  ok;
+rollback_local_commits(_LocalCommits) ->
+  ignore.
 
 rollback_local_commit(#local_commit{
   db = DB,
