@@ -898,12 +898,13 @@ phase_1_log(#commit_state{
 
 phase_1_commit(#commit_state{
   commits = Commits
-} = State0)->
+} = State)->
   try
-    apply_local_commits( Commits )
+    apply_local_commits( Commits ),
+    {ok, State}
   catch
     _:E->
-      {abort, E, State0}
+      {abort, E, State}
   end.
 
 rollback(#commit_state{
