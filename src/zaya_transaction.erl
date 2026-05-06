@@ -822,7 +822,7 @@ commit_request(#commit_request{
   State0 = #commit_state{
     request = Request
   },
-  
+
   %----------------PHASE 1--------------------------
   State =
     maybe
@@ -1048,8 +1048,13 @@ request_is_aborted(Nodes, TRef)->
 %% Internal commit helpers
 %%=============================================================
 prepare_log( Commits, TRef )->
-  Seq = zaya_transaction_log:seq(),
-  [prepare_log(Seq, TRef, C) || C <- persistent_commits(Commits)].
+  case [C || C <- persistent_commits(Commits)] of
+    []-> 
+      [];
+    Persistent ->
+      Seq = zaya_transaction_log:seq(),
+      [prepare_log(Seq, TRef, C) || C <- Persistent]
+  end.  
 prepare_log(
     Seq,
     TRef,
