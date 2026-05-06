@@ -1,6 +1,7 @@
 -module(zaya_transaction_log).
 
 -include("zaya.hrl").
+-include("zaya_schema.hrl").
 -include("zaya_transaction.hrl").
 
 -behaviour(gen_server).
@@ -113,9 +114,8 @@ init([]) ->
   #{cleanup_interval_ms := Interval} = Settings = read_config(),
   Runtime = open_log_db(Settings),
   persistent_term:put(?RUNTIME_KEY, Runtime),
-  %% Run the first cleanup immediately so startup-time stale entries
-  %% are not kept around for a full interval.
-  self() ! cleanup,
+  % init wait for schema loop
+  erlang:send_after(1000, self(), wait_for_schema),
   {ok, #state{cleanup_interval_ms = Interval}}.
 
 handle_call(Unexpected, From, State) ->
@@ -126,6 +126,15 @@ handle_cast(Unexpected, State) ->
   ?LOGWARNING("unexpected cast request ~p",[Unexpected]),
   {noreply, State}.
 
+handle_info(wait_for_schema, State) ->
+  try
+    ?schemaRef,
+    % Enter the cleanup loop
+    self() ! cleanup
+  catch
+    _:_ -> erlang:send_after(1000, self(), wait_for_schema)
+  end,
+  {noreply, State};
 handle_info(cleanup, State = #state{cleanup_interval_ms = Interval}) ->
   try
     cleanup(db_ref())
