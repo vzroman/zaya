@@ -41,6 +41,7 @@ all() ->
 
 init_per_suite(Config) ->
   ok = load_support_backend(?config(priv_dir, Config)),
+  ok = zaya_ct:stop_zaya(),
   application:set_env(
     zaya,
     transaction_log,
@@ -50,11 +51,11 @@ init_per_suite(Config) ->
       cleanup_interval_ms => 1000
     }
   ),
-  {ok, _Apps} = application:ensure_all_started(zaya),
+  ok = zaya_ct:start_zaya(),
   Config.
 
 end_per_suite(_Config) ->
-  ok = application:stop(zaya),
+  ok = zaya_ct:stop_zaya(),
   ok.
 
 init_per_testcase(_Name, Config) ->
@@ -350,9 +351,22 @@ attach_copy_purges_stale_rollbacks_test(Config) ->
 load_support_backend(PrivDir) ->
   SupportDir = filename:join(PrivDir, "support-ebin"),
   ok = filelib:ensure_dir(filename:join(SupportDir, "dummy")),
-  SupportSrc = filename:join([code:lib_dir(zaya), "test", "support", "zaya_tx_test_backend.erl"]),
-  {ok, zaya_tx_test_backend} = compile:file(SupportSrc, [{outdir, SupportDir}, report_errors, report_warnings]),
+  SupportRoot = filename:join([code:lib_dir(zaya), "test", "support"]),
+  SupportModules = [zaya_ct, zaya_tx_test_backend],
+  ok =
+    lists:foreach(
+      fun(Module) ->
+        SupportSrc = filename:join(SupportRoot, atom_to_list(Module) ++ ".erl"),
+        {ok, Module} =
+          compile:file(
+            SupportSrc,
+            [{outdir, SupportDir}, report_errors, report_warnings]
+          )
+      end,
+      SupportModules
+    ),
   true = code:add_patha(SupportDir),
+  {module, zaya_ct} = code:load_file(zaya_ct),
   {module, zaya_tx_test_backend} = code:load_file(zaya_tx_test_backend),
   ok.
 
@@ -405,11 +419,20 @@ pending_transaction_visible(ExpectedPending) ->
   zaya:list_pending_transactions() =:= ExpectedPending.
 
 make_remote_ref() ->
-  Node = list_to_atom("other0@nohost"),
   Ref = make_ref(),
   OldNode = atom_to_binary(node(), latin1),
-  NewNode = atom_to_binary(Node, latin1),
+  NewNode = remote_node_name(OldNode),
+  Node = binary_to_atom(NewNode, latin1),
   {Node, binary_to_term(binary:replace(term_to_binary(Ref), OldNode, NewNode, [global]))}.
+
+remote_node_name(LocalNode) ->
+  Size = byte_size(LocalNode),
+  First =
+    case LocalNode of
+      <<"x", _/binary>> -> $y;
+      _ -> $x
+    end,
+  list_to_binary([First | lists:duplicate(Size - 1, $x)]).
 
 cleanup_schema_node(Node) ->
   catch zaya_schema_srv:node_down(Node, pending_transaction_test),

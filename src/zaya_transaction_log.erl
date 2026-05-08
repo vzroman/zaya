@@ -111,6 +111,7 @@ start_link() ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 init([]) ->
+  process_flag(trap_exit,true),
   #{cleanup_interval_ms := Interval} = Settings = read_config(),
   Runtime = open_log_db(Settings),
   persistent_term:put(?RUNTIME_KEY, Runtime),

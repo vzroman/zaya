@@ -24,6 +24,12 @@
   coordinator
 }).
 
+-record(msg, {
+  tref,
+  type,
+  data
+}).
+
 all() ->
   [
     single_db_node_commit_uses_local_fast_path_test,
@@ -36,6 +42,7 @@ init_per_suite(Config) ->
   PrivDir = ?config(priv_dir, Config),
   ok = ensure_distributed(),
   ok = load_support_backend(PrivDir),
+  ok = zaya_ct:stop_zaya(),
   application:set_env(zaya, schema_dir, filename:join(PrivDir, "schema")),
   application:set_env(
     zaya,
@@ -46,11 +53,11 @@ init_per_suite(Config) ->
       cleanup_interval_ms => 1000
     }
   ),
-  {ok, _Apps} = application:ensure_all_started(zaya),
+  ok = zaya_ct:start_zaya(),
   Config.
 
 end_per_suite(_Config) ->
-  ok = application:stop(zaya),
+  ok = zaya_ct:stop_zaya(),
   ok.
 
 single_db_node_commit_uses_local_fast_path_test(Config) ->
@@ -136,12 +143,13 @@ multi_node_worker_rolls_back_after_coordinator_decision_test(Config) ->
     ok = setup_local_db(Orders, OrdersParams, [{item, old_orders}]),
     ok = setup_local_db(Audit, AuditParams, [{item, old_audit}]),
     Coordinator = self(),
+    TRef = make_ref(),
     {Worker, MRef} =
       spawn_monitor(
         fun() ->
           zaya_transaction:commit_request(
             #commit_request{
-              tref = make_ref(),
+              tref = TRef,
               dbs = #{
                 Orders => {[{item, new_orders}], []},
                 Audit => {[{item, new_audit}], []}
@@ -157,12 +165,12 @@ multi_node_worker_rolls_back_after_coordinator_decision_test(Config) ->
         end
       ),
     receive
-      {commit1, confirm, Worker} ->
+      #msg{tref = TRef, type = commit1, data = Worker} ->
         ok
     after 1000 ->
       ct:fail(commit1_confirm_timeout)
     end,
-    Worker ! {rollback, [Worker]},
+    Worker ! #msg{tref = TRef, type = abort, data = [Worker]},
     receive
       {'DOWN', MRef, process, Worker, normal} ->
         ok;
@@ -195,7 +203,7 @@ load_support_backend(PrivDir) ->
   SupportDir = filename:join(PrivDir, "support-ebin"),
   ok = filelib:ensure_dir(filename:join(SupportDir, "dummy")),
   SupportRoot = filename:join([code:lib_dir(zaya), "test", "support"]),
-  SupportModules = [cthr, zaya_tx_test_backend],
+  SupportModules = [cthr, zaya_ct, zaya_tx_test_backend],
   ok =
     lists:foreach(
       fun(Module) ->
