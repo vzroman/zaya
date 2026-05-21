@@ -528,7 +528,7 @@ default_params(DB, Params )->
         filename:absname(?schemaDir)
     end,
 
-  Params#{ dir => Dir ++"/"++atom_to_list(DB) }.
+  Params#{ dir => Dir ++"/"++atom_to_list(DB), name => DB }.
 
 lock( DB, IsShared, Timeout )->
   Nodes =
