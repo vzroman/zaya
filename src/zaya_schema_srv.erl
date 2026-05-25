@@ -368,6 +368,7 @@ handle_cast({split_brain, Node},State)->
   end,
 
   merge_brain( Node ),
+  ?SCHEMA_NOTIFY({split_brain, Node}),
 
   {noreply,State};
 
