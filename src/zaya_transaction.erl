@@ -3,15 +3,63 @@
 
 -include("zaya.hrl").
 -include("zaya_schema.hrl").
+-include("zaya_transaction.hrl").
 
 -define(transaction,{?MODULE,'$transaction$'}).
--record(transaction,{data, changes ,locks}).
+-define(pg_group(TRef),{?MODULE,TRef}).
 
--record(db_commit,{ db, module, ref, t_ref }).
+-record(transaction,{
+  data,
+  changes,
+  locks
+}).
+
+-record(ops,{
+  write,
+  delete
+}).
+
+-record(local_commit,{
+  db,
+  module,
+  ref,
+  is_persistent,
+  commit,
+  rollback
+}).
+
+-record(commit_request,{
+  tref,
+  dbs,
+  scope,
+  is_persistent,
+  coordinator
+}).
+
+-record(commit_state,{
+  request,
+  commits,
+  log
+}).
+
+-record(context,{
+  tref,
+  data,
+  nodes,
+  ns_dbs,
+  scope,
+  is_persistent
+}).
+
+-record(msg,{
+  tref,
+  type,
+  data
+}).
 
 -define(LOCK_TIMEOUT, 60000).
 -define(ATTEMPTS,5).
-
+-define(WORKER_RESOLUTION_POLL_MS, 100).
 -define(none,{?MODULE,?undefined}).
 
 %%=================================================================
@@ -29,10 +77,11 @@
 %%	Internal API
 %%=================================================================
 -export([
+  single_db_node_commit/2,
   single_db_node_commit/1,
   single_db_commit/1,
   single_node_commit/1,
-  commit_request/2
+  commit_request/1
 ]).
 
 %%-----------------------------------------------------------
@@ -494,8 +543,10 @@ prepare_commit( Data )->
 %%-----------------------------------------------------------
 %%  SINGLE DB & NODE COMMIT
 %%-----------------------------------------------------------
-single_db_node_commit(Data, [Node])->
-  case ecall:call(Node, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
+single_db_node_commit(Data, [N]) when N=:=node()->
+  single_db_node_commit(Data);
+single_db_node_commit(Data, [N])->
+  case ecall:call(N, ?MODULE, ?FUNCTION_NAME, [ Data ]) of
     {ok,_} -> ok;
     {error, Error}-> throw( Error )
   end.
@@ -506,7 +557,8 @@ single_db_node_commit( Data )->
 
   Module:commit( Ref, Write, Delete ),
 
-  on_commit( Data ).
+  on_commit( Data ),
+  ok.
 
 %%-----------------------------------------------------------
 %%  SINGLE DB COMMIT
@@ -523,161 +575,589 @@ single_db_commit( Data )->
 
   Module:commit( Ref, Write, Delete ),
 
-  on_commit( Data ).
+  on_commit( Data ),
+  ok.
 
 %%-----------------------------------------------------------
 %%  SINGLE NODE COMMIT
 %%-----------------------------------------------------------
+single_node_commit(DBs, [N]) when N=:=node()->
+  {Worker, Ref} =
+    spawn_monitor(
+      fun()->
+        single_node_commit(DBs)
+      end
+    ),
+  receive
+    {'DOWN', Ref, process, Worker, normal}->
+      ok;
+    {'DOWN', Ref, process, Worker, Error}->
+      throw( Error )
+  end;
 single_node_commit( DBs, [N])->
-  case ecall:call(N,?MODULE, ?FUNCTION_NAME, [ DBs ]) of
+  case ecall:call(N, ?MODULE, ?FUNCTION_NAME, [DBs]) of
     {ok,_}-> ok;
     {error, Error}-> throw( Error )
   end.
-single_node_commit( DBs )->
-  Commits = commit1( DBs ),
-  commit2( Commits ).
+
+single_node_commit(DBs) ->
+  Commits = prepare_local_commits(DBs),
+  IsPersistent = persistent_commits(Commits) =/= [],
+  do_single_node_commit(IsPersistent, DBs, Commits).
+
+do_single_node_commit(_IsPersistent = false, DBs, Commits)->
+  try
+    apply_local_commits(Commits),
+    on_commit(DBs)
+  catch
+    C:E:S->
+      rollback_local_commits(Commits),
+      erlang:raise(C,E,S)
+  end;
+
+do_single_node_commit(_IsPersistent = true, DBs, Commits)->
+
+  TRef = make_ref(),
+  Log = prepare_log(Commits, TRef),
+
+  % Write the decision marker (#aborted) in an atomic batch with the rollback log
+  Aborted = {
+    #aborted{tref = TRef},
+    [{DB,[node()]} || DB <- maps:keys(DBs)]
+  },
+
+  AtomicLogBatch = [Aborted | Log],
+  commit_log( AtomicLogBatch ),
+
+  try
+    apply_local_commits(Commits),
+    on_commit(DBs),
+    ok
+  catch
+    C:E:S->
+      rollback_local_commits(Commits),
+      erlang:raise(C,E,S)
+  after
+    purge_log(AtomicLogBatch)
+  end.
 
 %%-----------------------------------------------------------
 %%  MULTI NODE COMMIT
 %%-----------------------------------------------------------
 multi_node_commit(Data, #commit{ns = Nodes, ns_dbs = NsDBs, dbs_ns = DBsNs})->
-
-  {_,Ref} = spawn_monitor(fun()->
-
-    Master = self(),
-
-%-----------phase 1------------------------------------------
-    Workers =
-      maps:from_list([ begin
-        W = spawn(N, ?MODULE, commit_request, [Master, maps:with(maps:get(N,NsDBs), Data)]),
-        erlang:monitor(process, W),
-        {W,N}
-      end || N <- Nodes]),
-
-    RestWorkers = wait_confirm(maps:keys(DBsNs), DBsNs, NsDBs, Workers, _Ns = [] ),
-%-----------phase 2------------------------------------------
-    [ W ! {commit2, Master} || W <- maps:keys(RestWorkers) ],
-    wait_commit2( Workers ),
-    ok
-  end),
-
+  TRef = make_ref(),
+  Scope = maps:to_list(DBsNs),
+  IsPersistent =
+    lists:any(
+      fun(DB)->
+        Module = ?dbModule(DB),
+        Module:is_persistent()
+      end,
+      maps:keys(Data)
+    ),
+  Context = #context{
+    tref = TRef,
+    data = Data,
+    nodes = Nodes,
+    ns_dbs = NsDBs,
+    scope = Scope,
+    is_persistent = IsPersistent
+  },
+  {Coordinator, Ref} =
+    spawn_monitor(
+      fun()->
+        coordinator(Context)
+      end
+    ),
   receive
-    {'DOWN', Ref, process, _, normal}->
+    {'DOWN', Ref, process, Coordinator, normal}->
       ok;
-    {'DOWN', Ref, process, _, Error}->
+    {'DOWN', Ref, process, Coordinator, Error}->
       throw( Error )
   end.
 
-wait_confirm([], _DBsNs, _NsDBs, Workers, _Ns )->
-  ?LOGDEBUG("transaction confirmed"),
-  Workers;
-wait_confirm(DBs, DBsNs, NsDBs, Workers, Ns )->
+%%-----------------------------------------------------------
+%%  COORDINATOR
+%%-----------------------------------------------------------
+coordinator(#context{
+  tref = TRef
+}=Context) ->
+%-----------------PHASE 1------------------------------------------
+  Workers = spawn_workers( Context ),
+  case wait_commit1(Workers, TRef) of
+    ok ->
+%-----------------PHASE 2------------------------------------------
+      broadcast_workers(
+        Workers,
+        #msg{
+          tref = TRef,
+          type = commit,
+          data = Workers
+        }
+      ),
+      wait_commit2(Workers, TRef),
+      exit(normal);
+    {abort, Worker, Reason} ->
+%---------------ABORT----------------------------------------------
+      coordinator_log_aborted( Context ),
+      RollbackWorkers = Workers -- [Worker],
+      broadcast_workers(
+        RollbackWorkers,
+        #msg{
+          tref = TRef,
+          type = abort,
+          data = RollbackWorkers
+        }
+      ),
+      wait_worker_downs(RollbackWorkers),
+      exit( Reason )
+  end.
+
+spawn_workers(#context{
+  tref = TRef,
+  scope = Scope,
+  is_persistent = IsPersistent,
+  nodes = Nodes,
+  ns_dbs = NsDBs,
+  data = Data
+}) ->
+  Request = #commit_request{
+    tref = TRef,
+    scope = Scope,
+    is_persistent = IsPersistent,
+    coordinator = self()
+  },
+  [ begin
+      {Worker, _Ref} = spawn_monitor(N, ?MODULE, commit_request, [Request#commit_request{
+        dbs = maps:with(maps:get(N, NsDBs), Data)
+      }]),
+      Worker
+    end || N <- Nodes ].
+
+wait_commit1(PendingWorkers, TRef) when length(PendingWorkers) > 0->
   receive
-    {confirm, W}->
-      case Workers of
-        #{W := N}->
-          Ns1 = [N|Ns],
-          % The DB is ready when all participating ready nodes have confirmed
-          ReadyDBs =
-            [DB || DB <- maps:get(N,NsDBs), length(maps:get(DB,DBsNs) -- Ns1) =:= 0],
-
-          wait_confirm(DBs -- ReadyDBs, DBsNs, NsDBs, Workers, Ns1 );
-        _->
-          % Who was it?
-          wait_confirm(DBs, DBsNs, NsDBs, Workers, Ns )
-      end;
+    #msg{ tref = TRef, type = commit1, data = W }->
+      wait_commit1(PendingWorkers -- [W], TRef);
     {'DOWN', _Ref, process, W, Reason}->
-      % One node went down
-      case maps:take(W, Workers ) of
-        {N, RestWorkers}->
-
-          ?LOGDEBUG("commit node ~p down ~p",[N,Reason]),
-
-          % Remove the node from the databases active nodes
-          DBsNs1 =
-            maps:map(fun(DB,DBNodes)->
-              case DBNodes -- [N] of
-                []->
-                  ?LOGDEBUG("~p database is unavailable, reason ~p, abort transaction",[DB,Reason]),
-                  throw({unavailable, DB});
-                RestNodes->
-                  RestNodes
-              end
-            end, DBsNs),
-
-          DBs1 =  [ DB || DB <- DBs, [] =/= (maps:get(DB, DBsNs1) -- Ns)],
-
-          wait_confirm(DBs1, DBsNs1, maps:remove(N,NsDBs),  RestWorkers, Ns );
+      case lists:member(W, PendingWorkers) of
+        true ->
+          ?LOGWARNING("transaction abort: node ~p reason ~p",[node(W),Reason]),
+          {abort, W, Reason};
         _->
-          % Who was it?
-          wait_confirm(DBs, DBsNs, NsDBs, Workers, Ns )
+          ?LOGWARNING("unexpected DOWN from ~p, reason: ~p",[W, Reason]),
+          wait_commit1(PendingWorkers, TRef)
+      end;
+    Unexpected->
+      ?LOGWARNING("unexpected message: ~p",[Unexpected]),
+      wait_commit1(PendingWorkers, TRef)
+  end;
+wait_commit1(_PendingWorkers, _TRef) ->
+  ok.
+
+wait_commit2(PendingWorkers, TRef) when length(PendingWorkers) > 0 ->
+  receive
+    #msg{ tref = TRef, type = commit2, data = W }->
+      wait_commit2(PendingWorkers -- [W], TRef);
+    {'DOWN', _Ref, process, W, Reason}->
+      case lists:member(W, PendingWorkers) of
+        true ->
+          ?LOGWARNING("~p node commit2 error: ~p",[ node(W), Reason ]),
+          wait_commit2(PendingWorkers -- [W], TRef);
+        _->
+          ?LOGWARNING("unexpected DOWN from ~p, reason: ~p",[W, Reason]),
+          wait_commit2(PendingWorkers, TRef)
+      end;
+    Unexpected->
+      ?LOGWARNING("unexpected message: ~p",[Unexpected]),
+      wait_commit2(PendingWorkers, TRef)
+  end;
+wait_commit2(_PendingWorkers, _TRef)->
+  ok.
+
+broadcast_workers(Workers, Message) ->
+  [ecall:send(Worker, Message) || Worker <- Workers],
+  ok.
+
+coordinator_log_aborted(#context{
+  tref = TRef,
+  scope = Scope,
+  nodes = Nodes,
+  is_persistent = IsPersistent
+}) ->
+  % If the coordinator's node participates in the transaction then #aborted is going to be logged by the local worker
+  NeedsLog = IsPersistent andalso (not lists:member(node(), Nodes)),
+  if
+    NeedsLog ->
+      commit_log([{#aborted{tref = TRef}, Scope}]);
+    true ->
+      ignore
+  end.
+
+wait_worker_downs(PendingWorkers) when length(PendingWorkers) > 0 ->
+  receive
+    {'DOWN', _Ref, process, W, Reason}->
+      case lists:member(W, PendingWorkers) of
+        true ->
+          wait_worker_downs(PendingWorkers -- [W]);
+        _->
+          ?LOGWARNING("unexpected DOWN from ~p, reason: ~p",[W, Reason]),
+          wait_worker_downs(PendingWorkers)
+      end;
+    Unexpected->
+      ?LOGWARNING("unexpected message: ~p",[Unexpected]),
+      wait_worker_downs(PendingWorkers)
+  end;
+wait_worker_downs(_PendingWorkers) ->
+  ok.
+
+%%-----------------------------------------------------------
+%%  WORKER
+%%-----------------------------------------------------------
+commit_request(#commit_request{
+  tref = TRef,
+  coordinator = Coordinator
+} = Request)->
+
+  erlang:monitor(process, Coordinator),
+  State0 = #commit_state{
+    request = Request
+  },
+
+  %----------------PHASE 1--------------------------
+  State =
+    maybe
+      {ok, State1} ?= phase_1_prepare( State0 ),
+      {ok, State2} ?= phase_1_log( State1 ),
+      {ok, State3} ?= phase_1_commit( State2 ),
+      State3
+    else
+      {abort, Error, RollbackState}->
+        rollback( RollbackState ),
+        exit(Error)
+    end,
+  ecall:send(Coordinator, #msg{
+    tref = TRef,
+    type = commit1,
+    data = self()
+  }),
+
+%----------------PHASE 2--------------------------
+  receive
+    #msg{tref = TRef, type = commit, data = Workers}->
+%--------------COMMITTED--------------------------
+      ecall:send(Coordinator, #msg{
+        tref = TRef,
+        type = commit2,
+        data = self()
+      }),
+      maybe_broadcast_committed(Request, Workers),
+      committed( State );
+    #msg{tref = TRef, type = abort, data = Workers}->
+%--------------ABORTED-----------------------------
+      ok = broadcast_decision( Workers, TRef, abort ),
+      rollback( State );
+    {'DOWN', _Ref, process, Coordinator, _Reason} ->
+%--------------THE DECISION IS NOT KNOWN-------------
+      case resolve_decision( State ) of
+        commit ->
+          committed( State );
+        abort->
+          rollback( State )
       end
   end.
 
-wait_commit2( Workers ) when map_size( Workers )>0 ->
-  receive
-    {'DOWN', _Ref, process, W, normal}->
-      wait_commit2( maps:remove( W, Workers ) );
-    {'DOWN', _Ref, process, W, Reason}->
-      ?LOGWARNING("~p node commit2 error: ~p",[ node(W), Reason ]),
-      wait_commit2( maps:remove( W, Workers ) )
-  end;
-wait_commit2( _Workers )->
-  ok.
+phase_1_prepare(
+  #commit_state{
+    request = #commit_request{
+      tref = TRef,
+      dbs = DBs
+    }
+  } = State0
+)->
+  try 
+    State = State0#commit_state{
+      commits = prepare_local_commits(DBs)
+    },
+    {ok, State}
+  catch
+    _:E:S->
+      ?LOGERROR("unable to prepare transaction ~p, error: ~p, stack: ~p",[TRef, E, S]),
+      {abort, E, State0}
+  end.  
 
-commit_request( Master, DBs )->
-
-  erlang:monitor(process, Master),
-
-%-----------phase 1------------------------------------------
-  Commits = commit1( DBs ),
-
-  Master ! { confirm, self() },
-
-  receive
-%-----------phase 2------------------------------------------
-    {commit2, Master}->
-      commit2( Commits ),
-      on_commit(DBs);
-%-----------rollback------------------------------------------
-    {'DOWN', _Ref, process, Master, Reason} ->
-      ?LOGDEBUG("rollback commit master down ~p",[Reason]),
-      rollback( Commits )
+phase_1_log(#commit_state{
+  request = #commit_request{
+    tref = TRef
+  },
+  commits = Commits
+} =State0)->
+  case prepare_log(Commits, TRef) of
+    []->
+      {ok, State0};
+    Log ->
+      try
+        commit_log( Log ),
+        State = State0#commit_state{
+          log = Log
+        },
+        {ok, State}
+      catch
+        _:E->
+          {abort, E, State0}
+      end
   end.
 
-db_commit( DB, Write, Delete )->
-  {Ref, Module} = ?dbRefMod( DB ),
-  #db_commit{
+phase_1_commit(#commit_state{
+  commits = Commits
+} = State)->
+  try
+    apply_local_commits( Commits ),
+    {ok, State}
+  catch
+    _:E->
+      {abort, E, State}
+  end.
+
+rollback(#commit_state{
+  request = Request,
+  commits = Commits,
+  log = Log
+})->
+  log_aborted( Request ),
+  rollback_local_commits( Commits ),
+  purge_log( Log ),
+  ok.
+
+log_aborted(#commit_request{
+  is_persistent = true,
+  tref = TRef,
+  scope = Scope
+})->
+  Aborted = {
+    #aborted{ tref = TRef },
+    Scope
+  },
+  try commit_log([Aborted])
+  catch
+    _:E:S->
+      ?LOGERROR("unable to log aborted transaction ~p, error: ~p, stack: ~p",[TRef,E,S])
+  end;
+log_aborted(_Request)->
+  % Transactions touching no persistent DBs don't need logging
+  ignore.
+
+maybe_broadcast_committed(
+    #commit_request{
+      coordinator = Coordinator,
+      tref = TRef
+    },
+    Workers
+)->
+  receive
+    {'DOWN', _Ref, process, Coordinator, normal}->
+      ignore;
+    {'DOWN', _Ref, process, Coordinator, Reason}->
+      BroadcastTo = Workers -- [self()],
+      broadcast_decision(Workers, TRef, commit),
+      ?LOGINFO("transaction ~p coordinator down, reason: ~p, broadcast 'committed' to ~p",[
+        TRef, Reason, [ node(W) || W <- BroadcastTo]
+      ])
+  after
+    60000->
+      ?LOGERROR("transaction ~p timeout on waiting for coordinator down",[TRef])
+  end.
+
+broadcast_decision(Workers, TRef, Decision)->
+  BroadcastTo = Workers -- [self()],
+  Msg = #msg{
+    tref = TRef,
+    type = Decision,
+    data = BroadcastTo
+  },
+  [ecall:send(W, Msg) || W <- BroadcastTo],
+  ok.
+
+committed(#commit_state{
+  log = Log,
+  request = #commit_request{
+    dbs = DBs
+  }
+})->
+  purge_log( Log ),
+  on_commit( DBs ),
+  ok.
+
+%--------------------------------------------------------------
+% Coordinator is down, the decision is not known
+%--------------------------------------------------------------
+resolve_decision(#commit_state{
+  request = #commit_request{
+    tref = TRef,
+    scope = Scope
+  }
+})->
+
+  % Claim yourself as 'don't know' node
+  PG = ?pg_group(TRef),
+  ok = pg:join(?transaction_pg, PG, self()),
+
+  % Monitor who else doesn't know
+  {_Ref, DontKnowWorkers} = pg:monitor(?transaction_pg, PG),
+
+  % Monitor the nodes, that haven't 'raised a hand' yet
+  AllNodes = ordsets:from_list(
+    lists:append([Nodes || {_DB, Nodes} <- Scope])
+  ),
+  PendingNodes = AllNodes -- [node(W) || W <- DontKnowWorkers],
+  [erlang:monitor_node(N, true) || N <- PendingNodes],
+
+  wait_for_decision(PendingNodes, TRef).
+
+wait_for_decision(_PendingNodes = [], _TRef)->
+  abort;
+wait_for_decision(PendingNodes, TRef)->
+  receive
+    #msg{tref = TRef, type = Decision, data = Workers}->
+      broadcast_decision(Workers, TRef, Decision),
+      Decision;
+    {_Ref, join, ?pg_group(TRef), DontKnowWorkers}->
+      RestNodes = PendingNodes -- [node(W) || W <- DontKnowWorkers],
+      wait_for_decision(RestNodes, TRef);
+    {nodedown, Node}->
+      RestNodes = PendingNodes -- [Node],
+      wait_for_decision(RestNodes, TRef);
+    _Other->
+      wait_for_decision(PendingNodes, TRef)
+  after ?WORKER_RESOLUTION_POLL_MS ->
+    case request_is_aborted(PendingNodes, TRef) of
+      true ->
+        abort;
+      false->
+        wait_for_decision(PendingNodes, TRef)
+    end
+  end.
+
+request_is_aborted(Nodes, TRef)->
+  {Replies, _} = ecall:call_all_wait(Nodes, zaya_transaction_log, is_aborted, [TRef]),
+  case [N || {N,{ok, true}} <- Replies] of
+    [] -> false;
+    _-> true
+  end.
+
+%%=============================================================
+%% Internal commit helpers
+%%=============================================================
+prepare_log( Commits, TRef )->
+  case [C || C <- persistent_commits(Commits)] of
+    []-> 
+      [];
+    Persistent ->
+      Seq = zaya_transaction_log:seq(),
+      [prepare_log(Seq, TRef, C) || C <- Persistent]
+  end.  
+prepare_log(
+    Seq,
+    TRef,
+    #local_commit{
+      db = DB,
+      rollback = #ops{
+        write = Write,
+        delete = Delete
+      }
+    }
+)->
+  Key = #rollback{
+    db = DB,
+    seq = Seq,
+    tref = TRef
+  },
+  Value = {Write, Delete},
+  {Key, Value}.
+
+commit_log([_|_]=Log)->
+  zaya_transaction_log:commit(
+    Log,
+    _Deletes = []
+  );
+commit_log(_Log)->
+  ignore.
+
+purge_log([_|_] =Log)->
+  try
+    zaya_transaction_log:commit(
+      _Writes = [],
+      [K || {K,_} <- Log]
+    )
+  catch
+    _:E:S->
+      ?LOGERROR("unable to purge transaction log ~p, error: ~p, stack: ~p",[Log,E,S])
+  end;
+purge_log(_Log)->
+  % No local persistent DBs
+  ignore.
+
+%%-----------------------------------------------------------
+%%  LOCAL COMMIT HELPERS
+%%-----------------------------------------------------------
+prepare_local_commits(DBs) ->
+  [ prepare_local_commit(DB, Ops) || {DB, Ops} <- maps:to_list(DBs) ].
+
+prepare_local_commit(DB, {Write, Delete}) ->
+  {Ref, Module} = ?dbRefMod(DB),
+  {RollbackWrite, RollbackDelete} = Module:prepare_rollback(Ref, Write, Delete),
+  IsPersistent = Module:is_persistent(),
+  #local_commit{
     db = DB,
     module = Module,
     ref = Ref,
-    t_ref = Module:commit1( Ref, Write, Delete )
+    is_persistent = IsPersistent,
+    commit = #ops{
+      write = Write,
+      delete = Delete
+    },
+    rollback = #ops{
+      write = RollbackWrite,
+      delete = RollbackDelete
+    }
   }.
 
-commit1( DBs )->
-  maps:fold( fun(DB, {Write, Delete}, Acc)->
-    Commit =
-    try db_commit( DB, Write, Delete )
-    catch
-      _:E->
-        ?LOGERROR("~p commit phase 1 error: ~p",[ DB, E ]),
-        rollback( Acc ),
-        throw( E )
-    end,
-    [Commit|Acc]
-  end, [], DBs ).
+persistent_commits(LocalCommits) ->
+  [Commit || Commit = #local_commit{is_persistent = true} <- LocalCommits].
 
-commit2( Commits )->
-  [ Module:commit2( Ref, TRef) ||#db_commit{ ref = Ref, module = Module, t_ref = TRef } <- Commits],
+apply_local_commits(LocalCommits) ->
+  [apply_local_commit(Commit) || Commit <- LocalCommits],
   ok.
 
-rollback( Commits )->
-  [ try Module:rollback( Ref, TRef )
-    catch
-      _:E  ->
-        ?LOGERROR("~p rollback commit phase 1 error: ~p",[ DB, E ])
-    end ||#db_commit{ db = DB, ref = Ref, module = Module, t_ref = TRef } <- Commits],
-  ok.
+apply_local_commit(#local_commit{
+  module = Module,
+  ref = Ref,
+  commit = #ops{
+    write = Write,
+    delete = Delete
+  }
+}) ->
+  Module:commit(Ref, Write, Delete).
+
+rollback_local_commits([_|_]=LocalCommits) ->
+  [rollback_local_commit(Commit) || Commit <- LocalCommits],
+  ok;
+rollback_local_commits(_LocalCommits) ->
+  ignore.
+
+rollback_local_commit(#local_commit{
+  db = DB,
+  module = Module,
+  ref = Ref,
+  rollback = #ops{
+    write = RollbackWrite,
+    delete = RollbackDelete
+  }
+}) ->
+  try Module:commit(Ref, RollbackWrite, RollbackDelete)
+  catch
+    _:E->
+      ?LOGERROR("~p rollback error: ~p",[DB, E])
+  end.
 
 on_commit(DBs)->
   maps:fold(fun(DB, {Write, Delete},_)->
@@ -690,7 +1170,3 @@ on_commit(DBs)->
       true->ignore
     end
   end,?undefined,DBs).
-
-
-
-

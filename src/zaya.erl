@@ -8,7 +8,9 @@
   start/0,
   stop/0,
   remove_node/1,
-  schema_dir/0
+  schema_dir/0,
+  list_pending_transactions/0,
+  list_pending_transactions/1
 ]).
 
 %%=================================================================
@@ -138,6 +140,12 @@ remove_node(Node)->
 
 schema_dir()->
   zaya_schema_srv:schema_dir().
+
+list_pending_transactions() ->
+  zaya_transaction_log:list_pending_transactions().
+
+list_pending_transactions(DB) ->
+  zaya_transaction_log:list_pending_transactions(DB).
 
 %%%%---------------------------------------------------------------
 %%%%	Nodes Info API

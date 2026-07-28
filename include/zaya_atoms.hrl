@@ -13,5 +13,6 @@
 
 -define(locks,'$zaya_locks$').
 -define(subscriptions,'$zaya_subscriptions$').
+-define(transaction_pg,'$zaya_transaction_pg$').
 
 -endif.
