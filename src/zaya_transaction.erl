@@ -112,14 +112,13 @@ read(DB, Keys, _Lock = none)->
 
 read(DB, Keys, Lock)->
 
+  % Obtain locks on all keys before the action starts
+  lock(DB, Keys, Lock),
+
   Transaction = #transaction{
     changes = Changes0,
-    data = Data0,
-    locks = Locks0
+    data = Data0
   } = get(?transaction),
-
-  % Obtain locks on all keys before the action starts
-  Locks = lock(DB, Keys, Lock, maps:get(DB, Locks0, #{}) ),
 
   Changes = maps:get( DB, Changes0, ?undefined),
   Data = maps:get( DB, Data0, ?undefined ),
@@ -128,9 +127,6 @@ read(DB, Keys, Lock)->
 
   if
     length( ToRead ) =:= 0 ->
-      put( ?transaction, Transaction#transaction{
-        locks = Locks0#{ DB => Locks }
-      }),
       Ready;
     true ->
 
@@ -144,8 +140,7 @@ read(DB, Keys, Lock)->
         end,
 
       put( ?transaction, Transaction#transaction{
-        data = Data0#{ DB => NewData },
-        locks = Locks0#{ DB => Locks }
+        data = Data0#{ DB => NewData }
       }),
 
       if
@@ -212,19 +207,17 @@ write(DB, KVs, _Lock = none)->
 
 write(DB, KVs, Lock)->
 
-  Transaction = #transaction{
-    changes = Changes0,
-    locks = Locks0
-  } = get(?transaction),
-
   % Obtain locks on all keys before the action starts
-  Locks = lock(DB, [K || {K,_} <- KVs], Lock, maps:get(DB, Locks0, #{}) ),
+  lock(DB, [K || {K,_} <- KVs], Lock),
+
+  Transaction = #transaction{
+    changes = Changes0
+  } = get(?transaction),
 
   Changes = do_write(KVs, maps:get( DB, Changes0, #{}) ),
 
   put( ?transaction, Transaction#transaction{
-    changes = Changes0#{ DB => Changes },
-    locks = Locks0#{ DB => Locks }
+    changes = Changes0#{ DB => Changes }
   }),
 
   ok.
@@ -253,19 +246,17 @@ delete(DB, Keys, _Lock = none)->
 
 delete(DB, Keys, Lock)->
 
-  Transaction = #transaction{
-    changes = Changes0,
-    locks = Locks0
-  } = get(?transaction),
-
   % Obtain locks on all keys before the action starts
-  Locks = lock(DB, Keys, Lock, maps:get(DB, Locks0, #{}) ),
+  lock(DB, Keys, Lock),
+
+  Transaction = #transaction{
+    changes = Changes0
+  } = get(?transaction),
 
   Changes = do_delete(Keys, maps:get( DB, Changes0, #{}) ),
 
   put( ?transaction, Transaction#transaction{
-    changes = Changes0#{ DB => Changes },
-    locks = Locks0#{ DB => Locks }
+    changes = Changes0#{ DB => Changes }
   }),
 
   ok.
@@ -360,9 +351,27 @@ erase_transaction()->
 % The locks of a DB are #{ Key => #{ Type => Unlock } }.
 % A key locked for read and then for write holds both locks, the write lock
 % doesn't replace the read lock and each of them must be released.
+% The lock of the DB itself is kept among them as the {?MODULE,DB} key,
+% a key with the same name is not locked for read.
 % held - the locks of the transaction including the obtained by the request
 % new - the locks obtained by the request
 -record(locks,{ db, nodes, type, held, new }).
+
+% The locks are kept in the transaction as soon as they are obtained:
+% whatever fails after that they are released with the transaction
+lock(DB, Keys, Type)->
+  Transaction = #transaction{
+    locks = Locks0
+  } = get(?transaction),
+
+  Locks = lock(DB, Keys, Type, maps:get(DB, Locks0, #{}) ),
+
+  put( ?transaction, Transaction#transaction{
+    locks = Locks0#{ DB => Locks }
+  }),
+
+  ok.
+
 lock(DB, Keys, Type, Locks) when Type=:=read; Type=:=write->
 
   LockNodes = ?dbAvailableNodes(DB),

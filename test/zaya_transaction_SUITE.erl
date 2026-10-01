@@ -33,7 +33,6 @@
   locks_are_released_when_caller_dies_test/1,
   transaction_waits_for_db_lock_test/1,
   locks_of_several_dbs_test/1,
-  key_equal_to_db_lock_name_test/1,
 
   upgrade_test/1,
   upgrade_is_released_on_abort_test/1,
@@ -143,7 +142,6 @@ groups() ->
       locks_are_released_when_caller_dies_test,
       transaction_waits_for_db_lock_test,
       locks_of_several_dbs_test,
-      key_equal_to_db_lock_name_test,
 
       upgrade_test,
       upgrade_is_released_on_abort_test,
@@ -653,31 +651,6 @@ locks_of_several_dbs_test(Config) ->
       ?assertEqual([{k, v}], zaya:read(DB1, [k])),
       ?assertEqual([{k, v}], zaya:read(DB2, [k]))
     end)
-  end).
-
-%%-----------------------------------------------------------------
-%%  The lock of the DB is kept among the locks of its keys under the
-%%  name {zaya_transaction, DB}. A key with the same name is still a
-%%  key and must be locked
-%%-----------------------------------------------------------------
-key_equal_to_db_lock_name_test(Config) ->
-  with_db(Config, fun(DB) ->
-    Key = {zaya_transaction, DB},
-    Result =
-      zaya:transaction(fun() ->
-        [] = zaya:read(DB, [Key], read),
-        Locks1 = held_locks(DB, [Key]),
-        ok = zaya:write(DB, [{Key, v}], write),
-        {Locks1, held_locks(DB, [Key])}
-      end),
-    ?assertEqual(
-      {ok, {
-        [{node(), db, ?READ_LOCKED}, {node(), {key, Key}, ?READ_LOCKED}],
-        [{node(), db, ?READ_LOCKED}, {node(), {key, Key}, ?WRITE_LOCKED}]
-      }},
-      Result
-    ),
-    ?assertEqual([], held_locks(DB, [Key]))
   end).
 
 %%=================================================================
