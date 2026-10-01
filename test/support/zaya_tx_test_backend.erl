@@ -12,6 +12,7 @@
   remove/1,
   is_persistent/0,
   fail_once/1,
+  fail_read_once/1,
   fail_after_confirm/1,
   last_tref/0,
   seed/2,
@@ -79,7 +80,8 @@ prepare_rollback(#{table := Table}, Write, Delete) ->
     ),
   {lists:reverse(RollbackWrite), lists:reverse(RollbackDelete)}.
 
-read(#{table := Table}, Keys) ->
+read(#{dir := Dir, table := Table}, Keys) ->
+  maybe_fail_read_once(Dir),
   lists:foldl(
     fun(Key, Acc) ->
       case ets:lookup(Table, Key) of
@@ -114,6 +116,10 @@ fail_once(DB) ->
   persistent_term:put({?MODULE, fail_once, dir_key(DB)}, true),
   ok.
 
+fail_read_once(DB) ->
+  persistent_term:put({?MODULE, fail_read_once, dir_key(DB)}, true),
+  ok.
+
 fail_after_confirm(DB) ->
   persistent_term:put({?MODULE, fail_after_confirm, dir_key(DB)}, true),
   ok.
@@ -146,11 +152,15 @@ reset(ParamsOrDir) ->
   persistent_term:erase({?MODULE, last_commit_pid, Dir}),
   persistent_term:erase({?MODULE, open_count, Dir}),
   persistent_term:erase({?MODULE, fail_once, Dir}),
+  persistent_term:erase({?MODULE, fail_read_once, Dir}),
   persistent_term:erase({?MODULE, fail_after_confirm, Dir}),
   ok.
 
 maybe_fail_once(Dir) ->
   fail_if_requested({?MODULE, fail_once, Dir}, {forced_failure, Dir}).
+
+maybe_fail_read_once(Dir) ->
+  fail_if_requested({?MODULE, fail_read_once, Dir}, {forced_read_failure, Dir}).
 
 maybe_fail_after_confirm(Dir) ->
   fail_if_requested(

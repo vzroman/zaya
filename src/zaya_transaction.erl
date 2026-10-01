@@ -357,7 +357,12 @@ erase_transaction()->
 %%-----------------------------------------------------------
 %%  LOCKS
 %%-----------------------------------------------------------
--record(locks,{ db, nodes, type, held, acc }).
+% The locks of a DB are #{ Key => #{ Type => Unlock } }.
+% A key locked for read and then for write holds both locks, the write lock
+% doesn't replace the read lock and each of them must be released.
+% held - the locks of the transaction including the obtained by the request
+% new - the locks obtained by the request
+-record(locks,{ db, nodes, type, held, new }).
 lock(DB, Keys, Type, Locks) when Type=:=read; Type=:=write->
 
   LockNodes = ?dbAvailableNodes(DB),
@@ -368,74 +373,77 @@ lock(DB, Keys, Type, Locks) when Type=:=read; Type=:=write->
 
   % Shared lock is set on the whole DB to prevent it's copies transformations
   % during transactions
-  InitAcc =
+  { Held, New } =
     case maps:is_key({?MODULE,DB}, Locks) of
       true->
-        #{};
+        { Locks, [] };
       _->
-        #{
-          {?MODULE,DB} => {read, lock_key( DB, _IsShared=true, _Timeout=?infinity, LockNodes )}
-        }
+        DBUnlock = lock_key( DB, _IsShared=true, _Timeout=?infinity, LockNodes ),
+        { Locks#{ {?MODULE,DB} => #{ read => DBUnlock } }, [DBUnlock] }
     end,
 
   lock(Keys, #locks{
     db = DB,
     nodes = LockNodes,
     type = Type,
-    held = Locks,
-    acc = InitAcc
+    held = Held,
+    new = New
   });
 lock(_DB, _Keys, none, Locks)->
   % The lock is not needed
   Locks.
 
 lock([K|Rest], #locks{
-  acc = Acc
-} = State)->
-  KeyLock =
-    try lock_key( K, State )
-    catch
-      _:E->
-        [Unlock() || {_Type, Unlock} <- maps:values( Acc) ],
-        throw(E)
-    end,
-  lock(Rest, State#locks{
-    acc = Acc#{ K => KeyLock }
-  });
-lock([], #locks{
+  type = Type,
   held = Held,
-  acc = Acc
+  new = New
+} = State)->
+  case maps:get( K, Held, #{} ) of
+    KeyLocks when is_map_key(Type, KeyLocks); is_map_key(write, KeyLocks) ->
+      % The key is already locked, the write lock covers the read
+      lock(Rest, State);
+    KeyLocks->
+      Unlock =
+        try lock_key( K, State )
+        catch
+          _:E->
+            % Only the locks obtained by the request are released,
+            % the locks held before it stay held
+            [U() || U <- New ],
+            throw(E)
+        end,
+      lock(Rest, State#locks{
+        held = Held#{ K => KeyLocks#{ Type => Unlock } },
+        new = [Unlock|New]
+      })
+  end;
+lock([], #locks{
+  held = Held
 })->
-  maps:merge( Held, Acc).
+  Held.
 
 lock_key(K, #locks{
   db = DB,
   nodes = Nodes,
-  type = Type,
-  held = Held
+  type = Type
 })->
-  case Held of
-    #{K := {HeldType,_} = Lock} when Type=:= read; HeldType =:= write ->
-      Lock;
-    _->
-      % Write locks must be set on each DB copy.
-      % Read locks. If the DB has local copy it's
-      % enough to obtain only local lock because if the transaction
-      % origin node fails the whole transaction will be aborted. Otherwise
-      % The lock must be set at each node holding DB copy.
-      % Because if we set lock only at one (or some copies) they can fall down
-      % while the transaction is not finished then the lock will be lost and the
-      % transaction can become not isolated
-      IsLocal = lists:member(node(), Nodes),
-      LockNodes =
-        if
-          Type =:= read, IsLocal->
-            [node()];
-          true->
-            Nodes
-        end,
-      {Type, lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, LockNodes )}
-  end.
+  % Write locks must be set on each DB copy.
+  % Read locks. If the DB has local copy it's
+  % enough to obtain only local lock because if the transaction
+  % origin node fails the whole transaction will be aborted. Otherwise
+  % The lock must be set at each node holding DB copy.
+  % Because if we set lock only at one (or some copies) they can fall down
+  % while the transaction is not finished then the lock will be lost and the
+  % transaction can become not isolated
+  IsLocal = lists:member(node(), Nodes),
+  LockNodes =
+    if
+      Type =:= read, IsLocal->
+        [node()];
+      true->
+        Nodes
+    end,
+  lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, LockNodes ).
 
 lock_key( Key, IsShared, Timeout, Nodes )->
   case elock:lock( ?locks, Key, IsShared, Timeout, Nodes) of
@@ -445,14 +453,20 @@ lock_key( Key, IsShared, Timeout, Nodes )->
       throw({lock,Error})
   end.
 
+% The locks held by the parent are not released. They are compared by the type
+% because the key locked by the parent for read can be locked for write by
+% the internal transaction, then only the write lock is released
 release_locks(Locks, Parent )->
   maps:fold(fun(DB,Keys,_)->
     ParentKeys = maps:get(DB,Parent,#{}),
-    maps:fold(fun(K,{_Type,Unlock},_)->
-      case maps:is_key(K,ParentKeys) of
-        true -> ignore;
-        _->Unlock()
-      end
+    maps:fold(fun(K,KeyLocks,_)->
+      ParentKeyLocks = maps:get(K,ParentKeys,#{}),
+      maps:fold(fun(Type,Unlock,_)->
+        case maps:is_key(Type,ParentKeyLocks) of
+          true -> ignore;
+          _->Unlock()
+        end
+      end,?undefined,KeyLocks)
     end,?undefined,Keys)
   end,?undefined,Locks).
 
