@@ -57,7 +57,6 @@
   data
 }).
 
--define(LOCK_TIMEOUT, 60000).
 -define(ATTEMPTS,5).
 -define(WORKER_RESOLUTION_POLL_MS, 100).
 -define(none,{?MODULE,?undefined}).
@@ -387,7 +386,7 @@ lock(DB, Keys, Type, Locks) when Type=:=read; Type=:=write->
       true->
         { Locks, [] };
       _->
-        DBUnlock = lock_key( DB, _IsShared=true, _Timeout=?infinity, LockNodes ),
+        DBUnlock = lock_key( DB, _IsShared=true, LockNodes ),
         { Locks#{ {?MODULE,DB} => #{ read => DBUnlock } }, [DBUnlock] }
     end,
 
@@ -452,10 +451,11 @@ lock_key(K, #locks{
       true->
         Nodes
     end,
-  lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, ?LOCK_TIMEOUT, LockNodes ).
+  lock_key( {?MODULE,DB,K}, _IsShared = Type=:=read, LockNodes ).
 
-lock_key( Key, IsShared, Timeout, Nodes )->
-  case elock:lock( ?locks, Key, IsShared, Timeout, Nodes) of
+% The lock is waited for without a timeout
+lock_key( Key, IsShared, Nodes )->
+  case elock:lock( ?locks, Key, IsShared, _Timeout=?infinity, Nodes) of
     {ok, Unlock}->
       Unlock;
     {error,Error}->

@@ -5,6 +5,7 @@
 -include("zaya_atoms.hrl").
 
 -export([
+  suite/0,
   all/0,
   groups/0,
   init_per_suite/1,
@@ -114,6 +115,11 @@
 -define(HELPER_TIMEOUT, 30000).
 %% The locks a trap holds to win a deadlock (see start_trap/2)
 -define(TRAP_WEIGHT, 50).
+
+%% The transactions wait for their locks without a timeout: a case that waits
+%% for a lock that is never released is stopped by the timetrap
+suite() ->
+  [{timetrap, {seconds, 60}}].
 
 all() ->
   [
@@ -1254,6 +1260,9 @@ invalid_lock_type_aborts_and_releases_test(Config) ->
 
 %%=================================================================
 %%  CONCURRENT TRANSACTIONS
+%%
+%%  A transaction waits for a lock as long as it is held: the wait
+%%  has no timeout and is not an error, the transaction isn't restarted
 %%=================================================================
 readers_share_writer_waits_test(Config) ->
   with_db(Config, fun(DB) ->
@@ -1269,7 +1278,14 @@ readers_share_writer_waits_test(Config) ->
     ok = wait_paused(Reader1),
     Reader2 = async(Read),
     ok = wait_paused(Reader2),
-    Writer = async(fun() -> zaya:transaction(fun() -> zaya:write(DB, [{k, v}], write) end) end),
+    Attempts = counters:new(1, []),
+    Writer =
+      async(fun() ->
+        zaya:transaction(fun() ->
+          ok = counters:add(Attempts, 1, 1),
+          zaya:write(DB, [{k, v}], write)
+        end)
+      end),
     ?assertNot(is_done(Writer, 500)),
     ok = resume(Reader1),
     ?assertEqual({ok, ok}, await(Reader1)),
@@ -1277,6 +1293,7 @@ readers_share_writer_waits_test(Config) ->
     ok = resume(Reader2),
     ?assertEqual({ok, ok}, await(Reader2)),
     ?assertEqual({ok, ok}, await(Writer)),
+    ?assertEqual(1, counters:get(Attempts, 1)),
     ?assertEqual([], held_locks(DB, [k])),
     ?assertEqual([{k, v}], zaya:read(DB, [k]))
   end).
