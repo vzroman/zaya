@@ -347,7 +347,7 @@ erase_transaction()->
 %%-----------------------------------------------------------
 %%  LOCKS
 %%-----------------------------------------------------------
-% The locks of a DB are #{ Key => #{ Type => Unlock } }.
+% The locks of a DB are #{ Key => #{ Type => LockRef } }.
 % A key locked for read and then for write holds both locks, the write lock
 % doesn't replace the read lock and each of them must be released.
 % The lock of the DB itself is kept among them as the {?MODULE,DB} key,
@@ -386,8 +386,8 @@ lock(DB, Keys, Type, Locks) when Type=:=read; Type=:=write->
       true->
         { Locks, [] };
       _->
-        DBUnlock = lock_key( DB, _IsShared=true, LockNodes ),
-        { Locks#{ {?MODULE,DB} => #{ read => DBUnlock } }, [DBUnlock] }
+        DBLockRef = lock_key( DB, _IsShared=true, LockNodes ),
+        { Locks#{ {?MODULE,DB} => #{ read => DBLockRef } }, [DBLockRef] }
     end,
 
   lock(Keys, #locks{
@@ -411,18 +411,18 @@ lock([K|Rest], #locks{
       % The key is already locked, the write lock covers the read
       lock(Rest, State);
     KeyLocks->
-      Unlock =
+      LockRef =
         try lock_key( K, State )
         catch
           _:E->
             % Only the locks obtained by the request are released,
             % the locks held before it stay held
-            [U() || U <- New ],
+            [elock:unlock(Ref) || Ref <- New ],
             throw(E)
         end,
       lock(Rest, State#locks{
-        held = Held#{ K => KeyLocks#{ Type => Unlock } },
-        new = [Unlock|New]
+        held = Held#{ K => KeyLocks#{ Type => LockRef } },
+        new = [LockRef|New]
       })
   end;
 lock([], #locks{
@@ -455,9 +455,9 @@ lock_key(K, #locks{
 
 % The lock is waited for without a timeout
 lock_key( Key, IsShared, Nodes )->
-  case elock:lock( ?locks, Key, IsShared, _Timeout=?infinity, Nodes) of
-    {ok, Unlock}->
-      Unlock;
+  case elock:lock( ?locks, Key, Nodes, #{is_shared => IsShared}) of
+    {ok, LockRef}->
+      LockRef;
     {error,Error}->
       throw({lock,Error})
   end.
@@ -470,10 +470,10 @@ release_locks(Locks, Parent )->
     ParentKeys = maps:get(DB,Parent,#{}),
     maps:fold(fun(K,KeyLocks,_)->
       ParentKeyLocks = maps:get(K,ParentKeys,#{}),
-      maps:fold(fun(Type,Unlock,_)->
+      maps:fold(fun(Type,LockRef,_)->
         case maps:is_key(Type,ParentKeyLocks) of
           true -> ignore;
-          _->Unlock()
+          _->elock:unlock(LockRef)
         end
       end,?undefined,KeyLocks)
     end,?undefined,Keys)

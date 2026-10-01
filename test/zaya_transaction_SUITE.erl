@@ -1078,7 +1078,8 @@ failed_request_releases_its_locks_test(Config) ->
         ok = zaya:write(DB, [{n1, v}], write),
         {Error, Locks1, key_lock(DB, n1)}
       end),
-    ?assertEqual({ok, {{lock, deadlock}, [?WRITE_LOCKED, ?FREE, ?FREE], ?WRITE_LOCKED}}, Result),
+    Deadlock = deadlock(key_term(DB, a)),
+    ?assertEqual({ok, {Deadlock, [?WRITE_LOCKED, ?FREE, ?FREE], ?WRITE_LOCKED}}, Result),
     ok = wait_helpers(),
     ?assertEqual([], held_locks(DB, [a, b, n1, n2])),
     ?assertEqual([{a, v}, {n1, v}], lists:sort(zaya:read(DB, [a, b, n1, n2])))
@@ -1096,10 +1097,11 @@ failed_request_keeps_held_locks_test(Config) ->
         Error2 = (catch zaya:read(DB, [r, w, b], read)),
         {Error1, Locks1, Error2, [key_lock(DB, K) || K <- [r, w]]}
       end),
+    Deadlock = deadlock(key_term(DB, a)),
     ?assertEqual(
       {ok, {
-        {lock, deadlock}, [?READ_LOCKED, ?WRITE_LOCKED],
-        {lock, deadlock}, [?READ_LOCKED, ?WRITE_LOCKED]
+        Deadlock, [?READ_LOCKED, ?WRITE_LOCKED],
+        Deadlock, [?READ_LOCKED, ?WRITE_LOCKED]
       }},
       Result
     ),
@@ -1122,7 +1124,7 @@ failed_upgrade_request_keeps_read_lock_test(Config) ->
         ok = zaya:write(DB, [{k1, v}], write),
         {Error, Lock1, key_lock(DB, k1)}
       end),
-    ?assertEqual({ok, {{lock, deadlock}, ?READ_LOCKED, ?WRITE_LOCKED}}, Result),
+    ?assertEqual({ok, {deadlock(key_term(DB, k2)), ?READ_LOCKED, ?WRITE_LOCKED}}, Result),
     ok = wait_helpers(),
     ?assertEqual([], held_locks(DB, [k1, k2])),
     ?assertEqual([{k1, v}], zaya:read(DB, [k1, k2]))
@@ -1144,7 +1146,7 @@ failed_first_request_releases_db_lock_test(Config) ->
         end),
       ?assertEqual(
         {ok, {
-          {lock, deadlock},
+          deadlock(key_term(DB1, a)),
           [{node(), db, ?READ_LOCKED}, {node(), {key, a}, ?WRITE_LOCKED}],
           ?FREE,
           ?FREE
@@ -1221,7 +1223,7 @@ lock_error_aborts_after_attempts_test(Config) ->
         start_trap(key_term(DB, a), key_term(DB, b)),
         zaya:write(DB, [{n, v}, {b, v}], write)
       end),
-    ?assertEqual({abort, {lock, deadlock}}, Result),
+    ?assertEqual({abort, deadlock(key_term(DB, a))}, Result),
     ?assertEqual(5, counters:get(Attempts, 1)),
     ok = wait_helpers(),
     ?assertEqual([], held_locks(DB, [r, a, n, b])),
@@ -1344,7 +1346,8 @@ many_concurrent_upgrades_keep_updates_test(Config) ->
     Results = [await(Pid) || Pid <- Pids],
     Committed = length([ok || {ok, ok} <- Results]),
     ct:pal("committed ~p of ~p: ~p", [Committed, length(Results), Results]),
-    ?assertEqual([], [R || R <- Results, R =/= {ok, ok}, R =/= {abort, {lock, deadlock}}]),
+    Deadlock = deadlock(key_term(DB, counter)),
+    ?assertEqual([], [R || R <- Results, R =/= {ok, ok}, R =/= {abort, Deadlock}]),
     ?assert(Committed > 0),
     ?assertEqual([{counter, Committed}], zaya:read(DB, [counter])),
     ?assertEqual([], held_locks(DB, [counter]))
@@ -1474,7 +1477,7 @@ cluster_failed_upgrade_request_test(Config) ->
         Error = (catch zaya:write(DB, [{k1, v}, {k2, v}], write)),
         {Error, [key_lock(N, DB, k1) || N <- Nodes], key_lock(PeerNode, DB, k2)}
       end),
-    ?assertEqual({ok, {{lock, deadlock}, [?READ_LOCKED, ?FREE], ?FREE}}, Result),
+    ?assertEqual({ok, {deadlock(key_term(DB, k2)), [?READ_LOCKED, ?FREE], ?FREE}}, Result),
     ok = wait_helpers(),
     ?assertEqual([], held_locks(Nodes, DB, [k1, k2]))
   end).
@@ -1619,6 +1622,13 @@ held_locks(Nodes, DB, Keys) ->
        State <- [lock_state(Node, Term)],
        State =/= ?FREE
   ].
+
+%%-----------------------------------------------------------------
+%%  The lock error of a request that has lost a deadlock. Term is the
+%%  lock the winner waits for on this node: the one the loser holds
+%%-----------------------------------------------------------------
+deadlock(Term) ->
+  {lock, {deadlock, {?locks, Term, node()}}}.
 
 %%-----------------------------------------------------------------
 %%  The helpers make a lock request of the caller fail at once, with
