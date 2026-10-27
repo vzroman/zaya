@@ -502,7 +502,7 @@ attach_copy(DB,Node,Params)->
       ok
   end,
 
-  {ok, Unlock} = elock:lock( ?locks, DB, _IsShared = false, _Timeout = infinity, ?dbReadyNodes(DB)),
+  LockRef = lock( DB, ?dbReadyNodes(DB) ),
 
   try
     case ?dbReadOnly( DB ) of
@@ -535,7 +535,7 @@ attach_copy(DB,Node,Params)->
       {error,Error}->throw(Error)
     end
   after
-    Unlock()
+    unlock( LockRef )
   end.
 
 remove_copy(DB, Node)->
@@ -659,12 +659,25 @@ read_only( DB, IsReadOnly )->
   end,
 
   ReadyNodes = ?readyNodes,
-  {ok, Unlock} = elock:lock( ?locks, DB, _IsShared = false, _Timeout = infinity, ReadyNodes),
+  LockRef = lock( DB, ReadyNodes ),
 
   try ecall:call_all_wait(ReadyNodes, zaya_db_srv, set_readonly, [DB,IsReadOnly] )
   after
-    Unlock()
+    unlock( LockRef )
   end.
+
+% Exclusive lock of the DB on the nodes, waited for without a timeout
+lock( _DB, _Nodes = [] )->
+  % There is nothing to lock
+  ?undefined;
+lock( DB, Nodes )->
+  {ok, LockRef} = elock:lock( ?locks, DB, Nodes ),
+  LockRef.
+
+unlock( ?undefined )->
+  ok;
+unlock( LockRef )->
+  elock:unlock( LockRef ).
 
 on_update( DB, Action, Args )->
   esubscribe:notify(?subscriptions, DB, {Action,Args} ),

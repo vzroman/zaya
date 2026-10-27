@@ -303,7 +303,7 @@ handle_event(state_timeout, run, rollback, #data{db = DB, module = Module, ref =
 handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
 
   case lock(DB, _IsShared=false, _Timeout = 30000) of
-    {ok, Unlock}->
+    {ok, LockRef}->
       try
         ok = zaya_schema_srv:open_db(DB, node(), Ref),
         {OKs, Errs} = ecall:call_all_wait( ?readyNodes -- [node()], zaya_schema_srv, open_db, [ DB, node(), Ref ] ),
@@ -311,7 +311,7 @@ handle_event(state_timeout, run, register, #data{db = DB, ref = Ref} = Data) ->
 
         {next_state, ready, Data}
       after
-        Unlock()
+        unlock(LockRef)
       end;
     {error,LockError}->
       ?LOGINFO("~p database register lock error ~p, retry",[DB, LockError]),
@@ -462,13 +462,13 @@ handle_event(cast, force_load, recovery, #data{db = DB} = Data ) ->
 %%---------------------------------------------------------------------------
 handle_event(state_timeout, NextState, unregister, #data{db = DB} = Data) ->
 
-  case lock( DB, _IsShared=false, _Timeout = infinity ) of
-    {ok, Unlock}->
+  case lock( DB, _IsShared=false, _Timeout = ?undefined ) of
+    {ok, LockRef}->
       try
         ecall:call_all_wait(?readyNodes, zaya_schema_srv, close_db, [DB, node()]),
         {next_state, NextState, Data, [ {state_timeout, 0, run } ]}
       after
-        Unlock()
+        unlock(LockRef)
       end;
     {error,LockError}->
       ?LOGINFO("~p database unregister lock error ~p, retry",[DB, LockError]),
@@ -536,14 +536,25 @@ lock( DB, IsShared, Timeout )->
       IsShared -> [node()];
       true -> ?dbAvailableNodes( DB )
     end,
-  case elock:lock( ?locks, DB, IsShared, Timeout, Nodes) of
-    {ok, Unlock} ->
-      {ok, Unlock};
-    {error, deadlock}->
+  lock( DB, IsShared, Timeout, Nodes ).
+
+lock( _DB, _IsShared, _Timeout, _Nodes = [] )->
+  % The DB is not available at any node yet, there is nothing to lock
+  {ok, ?undefined};
+lock( DB, IsShared, Timeout, Nodes )->
+  case elock:lock( ?locks, DB, Nodes, #{is_shared => IsShared, timeout => Timeout}) of
+    {ok, LockRef} ->
+      {ok, LockRef};
+    {error, {deadlock, _Lock}}->
       lock( DB, IsShared, Timeout );
     Error ->
       Error
   end.
+
+unlock( ?undefined )->
+  ok;
+unlock( LockRef )->
+  elock:unlock( LockRef ).
 
 -record(backup, { original_dir, backup_dir }).
 prepare_backup( Dir ) when is_binary(Dir); is_list( Dir )->

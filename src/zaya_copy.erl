@@ -240,7 +240,7 @@ copy_request(#{
     batch = []
   },
 
-  {ok, Unlock} = elock:lock(?locks, Source, _IsShared = true, _Timeout = ?infinity ),
+  {ok, LockRef} = elock:lock(?locks, Source, [node()], #{is_shared => true}),
 
   try
       #s_acc{ batch = TailBatch } = TailState =
@@ -257,7 +257,7 @@ copy_request(#{
       ?LOGERROR("~s error ~p, stack ~p",[Log,Error,Stack]),
       Receiver ! {error, self(), Error}
   after
-    Unlock(),
+    elock:unlock(LockRef),
     unlink(Receiver)
   end.
 
